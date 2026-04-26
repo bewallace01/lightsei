@@ -2,16 +2,22 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import desc, select, text
 from sqlalchemy.orm import Session
 
+import limits
 import policies
 from auth import AuthResult, get_authenticated, get_workspace_id
 from cost import agent_cost_since, utc_day_start
 from db import ensure_agent, get_session
+from limits import (
+    BodySizeLimitMiddleware,
+    limit_login_attempt,
+    limit_signup_attempt,
+)
 from keys import (
     generate_key,
     generate_session_token,
@@ -145,6 +151,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(BodySizeLimitMiddleware)
 
 
 @app.on_event("startup")
@@ -157,11 +164,24 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _rate_limited_workspace_id(
+    auth: AuthResult = Depends(get_authenticated),
+) -> str:
+    """Rate-limits the /events ingest path per-credential, then returns the
+    workspace_id. Per-credential (not per-workspace) so a leaked or runaway
+    api_key throttles itself without taking out the dashboard's session."""
+    cred_id = auth.api_key.id if auth.api_key else (
+        auth.session.id if auth.session else auth.workspace_id
+    )
+    limits.limit_events_per_credential(cred_id)
+    return auth.workspace_id
+
+
 @app.post("/events")
 def post_event(
     event: EventIn,
     session: Session = Depends(get_session),
-    workspace_id: str = Depends(get_workspace_id),
+    workspace_id: str = Depends(_rate_limited_workspace_id),
 ) -> dict[str, Any]:
     ts = event.timestamp or utcnow()
     ensure_agent(session, workspace_id, event.agent_name, ts)
@@ -465,7 +485,12 @@ def _serialize_user(u: User) -> dict[str, Any]:
 
 
 @app.post("/auth/signup")
-def signup(body: SignupIn, session: Session = Depends(get_session)) -> dict[str, Any]:
+def signup(
+    body: SignupIn,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    limit_signup_attempt(request)
     existing = session.execute(
         select(User).where(User.email == body.email.lower())
     ).scalar_one_or_none()
@@ -510,7 +535,12 @@ def signup(body: SignupIn, session: Session = Depends(get_session)) -> dict[str,
 
 
 @app.post("/auth/login")
-def login(body: LoginIn, session: Session = Depends(get_session)) -> dict[str, Any]:
+def login(
+    body: LoginIn,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    limit_login_attempt(request)
     user = session.execute(
         select(User).where(User.email == body.email.lower())
     ).scalar_one_or_none()

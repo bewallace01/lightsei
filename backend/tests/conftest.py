@@ -90,6 +90,7 @@ os.environ["LIGHTSEI_DATABASE_URL"] = _test_url
 from fastapi.testclient import TestClient  # noqa: E402
 
 from db import engine  # noqa: E402
+from limits import reset_counter_for_tests  # noqa: E402
 from main import app  # noqa: E402
 from migrate import upgrade_to_head  # noqa: E402
 
@@ -117,6 +118,7 @@ def _migrate_schema() -> list[str]:
 @pytest.fixture(autouse=True)
 def _truncate_between_tests(_migrate_schema) -> Iterator[None]:
     yield
+    reset_counter_for_tests()
     if not _migrate_schema:
         return
     from sqlalchemy import text
