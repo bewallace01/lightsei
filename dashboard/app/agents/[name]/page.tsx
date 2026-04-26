@@ -157,11 +157,20 @@ export default function AgentPage({ params }: { params: { name: string } }) {
           );
         })()}
       </div>
-      <p className="text-sm text-gray-500 mt-1 mb-8">
+      <p className="text-sm text-gray-500 mt-1 mb-3">
         Send commands to this agent. The bot polls every few seconds and runs
         a registered <code className="font-mono">@lightsei.on_command</code>{" "}
         handler.
       </p>
+      <div className="mb-8">
+        <Link
+          href={`/agents/${encodeURIComponent(agentName)}/chat`}
+          className="inline-flex items-center gap-1.5 text-sm text-accent-700 hover:text-accent-800"
+        >
+          open chat
+          <span className="text-xs">→</span>
+        </Link>
+      </div>
 
       {error && (
         <div className="mb-6 p-3 border border-red-200 bg-red-50 text-red-700 text-sm rounded-md">

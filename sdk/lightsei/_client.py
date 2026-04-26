@@ -18,6 +18,7 @@ _DEFAULT_MAX_RETRIES = 3
 _MAX_QUEUE_SIZE = 10_000
 _DEFAULT_CAPTURE_CONTENT = True
 _DEFAULT_COMMAND_POLL_INTERVAL = 5.0
+_DEFAULT_CHAT_POLL_INTERVAL = 2.0
 
 
 class _Client:
@@ -34,12 +35,14 @@ class _Client:
         self.max_retries: int = _DEFAULT_MAX_RETRIES
         self.capture_content: bool = _DEFAULT_CAPTURE_CONTENT
         self.command_poll_interval: float = _DEFAULT_COMMAND_POLL_INTERVAL
+        self.chat_poll_interval: float = _DEFAULT_CHAT_POLL_INTERVAL
         self._queue: queue.Queue = queue.Queue(maxsize=_MAX_QUEUE_SIZE)
         self._http: Optional[httpx.Client] = None
         self._stop_event = threading.Event()
         self._flush_thread: Optional[threading.Thread] = None
         self._atexit_registered = False
         self._command_poller = None  # set in init() if needed
+        self._chat_poller = None     # set in init() if needed
 
     def is_initialized(self) -> bool:
         return self._initialized
@@ -56,6 +59,7 @@ class _Client:
         max_retries: Optional[int] = None,
         capture_content: Optional[bool] = None,
         command_poll_interval: Optional[float] = None,
+        chat_poll_interval: Optional[float] = None,
     ) -> None:
         with self._lock:
             if self._initialized:
@@ -78,6 +82,8 @@ class _Client:
                 self.capture_content = capture_content
             if command_poll_interval is not None:
                 self.command_poll_interval = command_poll_interval
+            if chat_poll_interval is not None:
+                self.chat_poll_interval = chat_poll_interval
 
             headers = {"content-type": "application/json"}
             if self.api_key:
@@ -119,6 +125,15 @@ class _Client:
                     self._command_poller.start()
             except Exception as e:  # pragma: no cover
                 logger.warning("lightsei command poller failed to start: %s", e)
+
+            # Optional: start the chat poller if @on_chat is registered.
+            try:
+                from ._chat import _ChatPoller, has_chat_handler
+                if has_chat_handler() and self.agent_name:
+                    self._chat_poller = _ChatPoller(self, self.chat_poll_interval)
+                    self._chat_poller.start()
+            except Exception as e:  # pragma: no cover
+                logger.warning("lightsei chat poller failed to start: %s", e)
 
             self._initialized = True
             logger.info(
@@ -261,6 +276,11 @@ class _Client:
                 self._command_poller.stop()
             except Exception:
                 pass
+        if self._chat_poller is not None:
+            try:
+                self._chat_poller.stop()
+            except Exception:
+                pass
         try:
             self.flush(timeout=2.0)
         except Exception:
@@ -281,6 +301,11 @@ class _Client:
                     self._command_poller.stop()
                 except Exception:
                     pass
+            if self._chat_poller is not None:
+                try:
+                    self._chat_poller.stop()
+                except Exception:
+                    pass
             if self._http is not None:
                 try:
                     self._http.close()
@@ -297,11 +322,13 @@ class _Client:
             self.max_retries = _DEFAULT_MAX_RETRIES
             self.capture_content = _DEFAULT_CAPTURE_CONTENT
             self.command_poll_interval = _DEFAULT_COMMAND_POLL_INTERVAL
+            self.chat_poll_interval = _DEFAULT_CHAT_POLL_INTERVAL
             self._queue = queue.Queue(maxsize=_MAX_QUEUE_SIZE)
             self._http = None
             self._stop_event = threading.Event()
             self._flush_thread = None
             self._command_poller = None
+            self._chat_poller = None
 
 
 _client = _Client()

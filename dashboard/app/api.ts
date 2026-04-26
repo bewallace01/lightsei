@@ -388,3 +388,66 @@ export async function fetchAgentManifest(agentName: string): Promise<AgentManife
     `/agents/${encodeURIComponent(agentName)}/manifest`,
   )) as AgentManifest;
 }
+
+// ----- Chat -----
+
+export type Thread = {
+  id: string;
+  agent_name: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type ThreadMessage = {
+  id: string;
+  thread_id: string;
+  role: "user" | "assistant" | "system";
+  content: string;
+  status: "completed" | "pending" | "in_progress" | "failed";
+  error: string | null;
+  created_at: string;
+  completed_at: string | null;
+};
+
+export async function listThreads(agentName: string): Promise<Thread[]> {
+  const body = (await authedJson(
+    `/agents/${encodeURIComponent(agentName)}/threads`,
+  )) as { threads: Thread[] };
+  return body.threads;
+}
+
+export async function createThread(
+  agentName: string,
+  title?: string,
+): Promise<Thread> {
+  return (await authedJson(`/agents/${encodeURIComponent(agentName)}/threads`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ title }),
+  })) as Thread;
+}
+
+export async function getThread(
+  threadId: string,
+): Promise<{ thread: Thread; messages: ThreadMessage[] }> {
+  return (await authedJson(`/threads/${threadId}`)) as {
+    thread: Thread;
+    messages: ThreadMessage[];
+  };
+}
+
+export async function postThreadMessage(
+  threadId: string,
+  content: string,
+): Promise<{ user_message: ThreadMessage; pending_message: ThreadMessage }> {
+  return (await authedJson(`/threads/${threadId}/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ content }),
+  })) as { user_message: ThreadMessage; pending_message: ThreadMessage };
+}
+
+export async function deleteThread(threadId: string): Promise<void> {
+  await authedJson(`/threads/${threadId}`, { method: "DELETE" });
+}

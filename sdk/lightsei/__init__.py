@@ -12,6 +12,7 @@ Public surface:
 import logging
 from typing import Any, Optional
 
+from ._chat import on_chat
 from ._client import _client
 from ._commands import on_command
 from ._context import get_run_id
@@ -29,6 +30,7 @@ __all__ = [
     "check_policy",
     "get_run_id",
     "on_command",
+    "on_chat",
     "LightseiError",
     "LightseiPolicyError",
 ]
@@ -46,6 +48,7 @@ def init(
     max_retries: Optional[int] = None,
     capture_content: Optional[bool] = None,
     command_poll_interval: Optional[float] = None,
+    chat_poll_interval: Optional[float] = None,
 ) -> None:
     """Initialize Lightsei. Idempotent: a second call is ignored.
 
@@ -67,6 +70,7 @@ def init(
         max_retries=max_retries,
         capture_content=capture_content,
         command_poll_interval=command_poll_interval,
+        chat_poll_interval=chat_poll_interval,
     )
     _auto_patch()
 

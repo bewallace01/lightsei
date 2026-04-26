@@ -26,6 +26,8 @@ from models import (
     Event,
     Run,
     Session as SessionRow,
+    Thread,
+    ThreadMessage,
     User,
     Workspace,
 )
@@ -94,6 +96,19 @@ class CommandCompleteIn(BaseModel):
 
 class AgentManifestIn(BaseModel):
     command_handlers: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ThreadCreateIn(BaseModel):
+    title: Optional[str] = None
+
+
+class ThreadMessagePostIn(BaseModel):
+    content: str = Field(min_length=1)
+
+
+class ThreadMessageCompleteIn(BaseModel):
+    content: Optional[str] = None
+    error: Optional[str] = None
 
 
 def _serialize_api_key(k: ApiKey) -> dict[str, Any]:
@@ -766,6 +781,239 @@ def get_manifest(
             "last_seen_at": None,
         }
     return _serialize_manifest(a)
+
+
+def _serialize_thread(t: Thread) -> dict[str, Any]:
+    return {
+        "id": t.id,
+        "agent_name": t.agent_name,
+        "title": t.title,
+        "created_at": t.created_at.isoformat(),
+        "updated_at": t.updated_at.isoformat(),
+    }
+
+
+def _serialize_thread_message(m: ThreadMessage) -> dict[str, Any]:
+    return {
+        "id": m.id,
+        "thread_id": m.thread_id,
+        "role": m.role,
+        "content": m.content,
+        "status": m.status,
+        "error": m.error,
+        "created_at": m.created_at.isoformat(),
+        "completed_at": m.completed_at.isoformat() if m.completed_at else None,
+    }
+
+
+def _thread_for_workspace(
+    session: Session, thread_id: str, workspace_id: str
+) -> Thread:
+    t = session.get(Thread, thread_id)
+    if t is None or t.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="thread not found")
+    return t
+
+
+@app.post("/agents/{agent_name}/threads")
+def create_thread(
+    agent_name: str,
+    body: ThreadCreateIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    now = utcnow()
+    ensure_agent(session, workspace_id, agent_name, now)
+    t = Thread(
+        id=str(uuid.uuid4()),
+        workspace_id=workspace_id,
+        agent_name=agent_name,
+        title=body.title or "New thread",
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(t)
+    session.flush()
+    return _serialize_thread(t)
+
+
+@app.get("/agents/{agent_name}/threads")
+def list_threads(
+    agent_name: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    rows = session.execute(
+        select(Thread)
+        .where(
+            Thread.workspace_id == workspace_id,
+            Thread.agent_name == agent_name,
+        )
+        .order_by(desc(Thread.updated_at))
+    ).scalars().all()
+    return {"threads": [_serialize_thread(t) for t in rows]}
+
+
+@app.get("/threads/{thread_id}")
+def get_thread(
+    thread_id: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    t = _thread_for_workspace(session, thread_id, workspace_id)
+    msgs = session.execute(
+        select(ThreadMessage)
+        .where(ThreadMessage.thread_id == t.id)
+        .order_by(ThreadMessage.created_at)
+    ).scalars().all()
+    return {
+        "thread": _serialize_thread(t),
+        "messages": [_serialize_thread_message(m) for m in msgs],
+    }
+
+
+@app.delete("/threads/{thread_id}")
+def delete_thread(
+    thread_id: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    t = _thread_for_workspace(session, thread_id, workspace_id)
+    session.delete(t)
+    session.flush()
+    return {"deleted": thread_id}
+
+
+@app.post("/threads/{thread_id}/messages")
+def post_thread_message(
+    thread_id: str,
+    body: ThreadMessagePostIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """User sends a message. Creates a 'user' completed message and a
+    'pending' assistant message that the agent will claim."""
+    t = _thread_for_workspace(session, thread_id, workspace_id)
+    now = utcnow()
+    user_msg = ThreadMessage(
+        id=str(uuid.uuid4()),
+        thread_id=t.id,
+        role="user",
+        content=body.content,
+        status="completed",
+        created_at=now,
+        completed_at=now,
+    )
+    pending = ThreadMessage(
+        id=str(uuid.uuid4()),
+        thread_id=t.id,
+        role="assistant",
+        content="",
+        status="pending",
+        created_at=now,
+    )
+    session.add(user_msg)
+    session.add(pending)
+    t.updated_at = now
+    # If the thread still has the default title, derive one from the first
+    # user message — capped at 60 chars.
+    if t.title == "New thread":
+        t.title = body.content.strip().splitlines()[0][:60]
+    session.flush()
+    return {
+        "user_message": _serialize_thread_message(user_msg),
+        "pending_message": _serialize_thread_message(pending),
+    }
+
+
+@app.post("/agents/{agent_name}/threads/claim")
+def claim_thread_turn(
+    agent_name: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Atomically claim the oldest pending assistant message across all
+    threads for this agent in the caller's workspace. Returns the message
+    id plus the full conversation history (completed messages only)."""
+    now = utcnow()
+    row = session.execute(
+        text(
+            """
+            SELECT m.id AS message_id, m.thread_id AS thread_id
+            FROM thread_messages m
+            JOIN threads t ON t.id = m.thread_id
+            WHERE t.workspace_id = :wsid
+              AND t.agent_name = :agent
+              AND m.status = 'pending'
+              AND m.role = 'assistant'
+            ORDER BY m.created_at ASC
+            LIMIT 1
+            FOR UPDATE OF m SKIP LOCKED
+            """
+        ),
+        {"wsid": workspace_id, "agent": agent_name},
+    ).first()
+    if row is None:
+        return {"turn": None}
+    msg = session.get(ThreadMessage, row.message_id)
+    if msg is None:
+        return {"turn": None}
+    # Mark as claimed by writing claimed_at? We use status transitions: we
+    # leave status='pending' (no separate claimed state for messages —
+    # callers are expected to either complete or fail). To prevent re-claim
+    # during the same instant, FOR UPDATE plus the next claim's WHERE
+    # status='pending' is enough; but we also bump it to 'in_progress' for
+    # clarity.
+    msg.status = "in_progress"
+    history = session.execute(
+        select(ThreadMessage)
+        .where(
+            ThreadMessage.thread_id == row.thread_id,
+            ThreadMessage.status == "completed",
+        )
+        .order_by(ThreadMessage.created_at)
+    ).scalars().all()
+    session.flush()
+    return {
+        "turn": {
+            "message_id": msg.id,
+            "thread_id": msg.thread_id,
+            "messages": [
+                {"role": m.role, "content": m.content} for m in history
+            ],
+        }
+    }
+
+
+@app.post("/messages/{message_id}/complete")
+def complete_thread_message(
+    message_id: str,
+    body: ThreadMessageCompleteIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    msg = session.get(ThreadMessage, message_id)
+    if msg is None:
+        raise HTTPException(status_code=404, detail="message not found")
+    t = session.get(Thread, msg.thread_id)
+    if t is None or t.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="message not found")
+    if msg.status not in ("pending", "in_progress"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"message already {msg.status}",
+        )
+    now = utcnow()
+    if body.error:
+        msg.status = "failed"
+        msg.error = body.error
+    else:
+        msg.status = "completed"
+        msg.content = body.content or ""
+    msg.completed_at = now
+    t.updated_at = now
+    session.flush()
+    return _serialize_thread_message(msg)
 
 
 @app.get("/agents/{agent_name}/cost")
