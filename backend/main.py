@@ -61,6 +61,10 @@ class WorkspaceCreateIn(BaseModel):
     api_key_name: str = "default"
 
 
+class WorkspacePatchIn(BaseModel):
+    name: str = Field(min_length=1)
+
+
 class ApiKeyCreateIn(BaseModel):
     name: str = "default"
 
@@ -311,7 +315,7 @@ def create_workspace(
         workspace_id=ws.id,
         name=body.api_key_name,
         prefix=prefix_for_display(plaintext),
-        hash=hash_key(plaintext),
+        hash=hash_token(plaintext),
         created_at=now,
     )
     session.add(api_key_row)
@@ -330,6 +334,20 @@ def get_me(
     ws = session.get(Workspace, workspace_id)
     if ws is None:
         raise HTTPException(status_code=404, detail="workspace not found")
+    return _serialize_workspace(ws)
+
+
+@app.patch("/workspaces/me")
+def patch_me(
+    body: WorkspacePatchIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    ws = session.get(Workspace, workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    ws.name = body.name
+    session.flush()
     return _serialize_workspace(ws)
 
 
@@ -356,7 +374,7 @@ def create_my_key(
         workspace_id=workspace_id,
         name=body.name,
         prefix=prefix_for_display(plaintext),
-        hash=hash_key(plaintext),
+        hash=hash_token(plaintext),
         created_at=utcnow(),
     )
     session.add(row)
@@ -493,6 +511,59 @@ def auth_me(
         "workspace": _serialize_workspace(ws) if ws else None,
         "credential": "session" if auth.user else "api_key",
     }
+
+
+def _serialize_session(s: SessionRow, current: bool) -> dict[str, Any]:
+    return {
+        "id": s.id,
+        "created_at": s.created_at.isoformat(),
+        "expires_at": s.expires_at.isoformat(),
+        "revoked_at": s.revoked_at.isoformat() if s.revoked_at else None,
+        "current": current,
+    }
+
+
+@app.get("/auth/sessions")
+def list_sessions(
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    if auth.user is None:
+        raise HTTPException(
+            status_code=400, detail="sessions are only visible to a logged-in user"
+        )
+    rows = session.execute(
+        select(SessionRow)
+        .where(SessionRow.user_id == auth.user.id)
+        .order_by(desc(SessionRow.created_at))
+    ).scalars().all()
+    current_id = auth.session.id if auth.session else None
+    return {
+        "sessions": [
+            _serialize_session(s, current=s.id == current_id) for s in rows
+        ]
+    }
+
+
+@app.delete("/auth/sessions/{session_id}")
+def revoke_session(
+    session_id: str,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    if auth.user is None:
+        raise HTTPException(status_code=400, detail="must be logged in")
+    row = session.get(SessionRow, session_id)
+    if row is None or row.user_id != auth.user.id:
+        raise HTTPException(status_code=404, detail="session not found")
+    if auth.session and row.id == auth.session.id:
+        raise HTTPException(
+            status_code=400, detail="cannot revoke the session used for this request"
+        )
+    if row.revoked_at is None:
+        row.revoked_at = utcnow()
+    session.flush()
+    return _serialize_session(row, current=False)
 
 
 @app.get("/agents/{agent_name}/cost")

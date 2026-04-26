@@ -241,3 +241,92 @@ export async function logout(): Promise<void> {
     clearSession();
   }
 }
+
+// ----- /account page helpers -----
+
+export type ApiKeySummary = {
+  id: string;
+  name: string;
+  prefix: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+};
+
+export type SessionSummary = {
+  id: string;
+  created_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+  current: boolean;
+};
+
+async function authedJson(
+  path: string,
+  init?: RequestInit,
+): Promise<unknown> {
+  const r = await fetch(`${API_URL}${path}`, {
+    cache: "no-store",
+    ...init,
+    headers: {
+      ...authHeaders(),
+      ...(init?.headers || {}),
+    },
+  });
+  if (r.status === 401) throw new UnauthorizedError();
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(
+      typeof body === "object" && body && "detail" in body
+        ? String((body as { detail: string }).detail)
+        : `${path} returned ${r.status}`,
+    );
+  }
+  return r.json();
+}
+
+export async function fetchWorkspace(): Promise<SessionWorkspace> {
+  return (await authedJson("/workspaces/me")) as SessionWorkspace;
+}
+
+export async function renameWorkspace(name: string): Promise<SessionWorkspace> {
+  return (await authedJson("/workspaces/me", {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  })) as SessionWorkspace;
+}
+
+export async function fetchApiKeys(): Promise<ApiKeySummary[]> {
+  const body = (await authedJson("/workspaces/me/api-keys")) as {
+    api_keys: ApiKeySummary[];
+  };
+  return body.api_keys;
+}
+
+export async function createApiKey(name: string): Promise<ApiKeySummary & { plaintext: string }> {
+  return (await authedJson("/workspaces/me/api-keys", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  })) as ApiKeySummary & { plaintext: string };
+}
+
+export async function revokeApiKey(keyId: string): Promise<ApiKeySummary> {
+  return (await authedJson(`/workspaces/me/api-keys/${keyId}`, {
+    method: "DELETE",
+  })) as ApiKeySummary;
+}
+
+export async function fetchSessions(): Promise<SessionSummary[]> {
+  const body = (await authedJson("/auth/sessions")) as {
+    sessions: SessionSummary[];
+  };
+  return body.sessions;
+}
+
+export async function revokeSession(sessionId: string): Promise<SessionSummary> {
+  return (await authedJson(`/auth/sessions/${sessionId}`, {
+    method: "DELETE",
+  })) as SessionSummary;
+}

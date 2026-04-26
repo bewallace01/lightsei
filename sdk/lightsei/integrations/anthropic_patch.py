@@ -19,6 +19,12 @@ from typing import Any
 from .._client import _client
 from .._context import get_run_id
 from ..errors import LightseiPolicyError
+from ._runscope import (
+    close_implicit_run,
+    implicit_run,
+    implicit_run_async,
+    open_implicit_run,
+)
 from ._streamtap import _AsyncStreamTap, _SyncStreamTap
 
 logger = logging.getLogger("lightsei.anthropic")
@@ -112,47 +118,52 @@ def _check_policy_or_raise(req: dict[str, Any]) -> None:
         raise LightseiPolicyError(reason, decision)
 
 
+_STREAM_LABEL = "anthropic.messages.create"
+
+
 def _instrumented_call(original, self, args, kwargs):
     req = _summarize_request(kwargs)
-    _check_policy_or_raise(req)
-    _client.emit("llm_call_started", req)
-    started = time.time()
-    try:
-        result = original(self, *args, **kwargs)
-    except Exception as e:
+    with implicit_run(_STREAM_LABEL):
+        _check_policy_or_raise(req)
+        _client.emit("llm_call_started", req)
+        started = time.time()
+        try:
+            result = original(self, *args, **kwargs)
+        except Exception as e:
+            _client.emit(
+                "llm_call_failed",
+                {**req, "duration_s": time.time() - started, "error": repr(e)},
+            )
+            raise
         _client.emit(
-            "llm_call_failed",
-            {**req, "duration_s": time.time() - started, "error": repr(e)},
+            "llm_call_completed",
+            {**req, **_summarize_response(result), "duration_s": time.time() - started},
         )
-        raise
-    _client.emit(
-        "llm_call_completed",
-        {**req, **_summarize_response(result), "duration_s": time.time() - started},
-    )
-    return result
+        return result
 
 
 async def _instrumented_call_async(original, self, args, kwargs):
     req = _summarize_request(kwargs)
-    _check_policy_or_raise(req)
-    _client.emit("llm_call_started", req)
-    started = time.time()
-    try:
-        result = await original(self, *args, **kwargs)
-    except Exception as e:
+    async with implicit_run_async(_STREAM_LABEL):
+        _check_policy_or_raise(req)
+        _client.emit("llm_call_started", req)
+        started = time.time()
+        try:
+            result = await original(self, *args, **kwargs)
+        except Exception as e:
+            _client.emit(
+                "llm_call_failed",
+                {**req, "duration_s": time.time() - started, "error": repr(e)},
+            )
+            raise
         _client.emit(
-            "llm_call_failed",
-            {**req, "duration_s": time.time() - started, "error": repr(e)},
+            "llm_call_completed",
+            {**req, **_summarize_response(result), "duration_s": time.time() - started},
         )
-        raise
-    _client.emit(
-        "llm_call_completed",
-        {**req, **_summarize_response(result), "duration_s": time.time() - started},
-    )
-    return result
+        return result
 
 
-def _make_stream_observers(req, started, run_id):
+def _make_stream_observers(req, started, run_id, is_implicit):
     """Build (on_chunk, on_finish) for Anthropic streams.
 
     Anthropic emits typed events: message_start carries the initial message
@@ -207,6 +218,7 @@ def _make_stream_observers(req, started, run_id):
         if state["output_tokens"] is not None:
             payload["output_tokens"] = state["output_tokens"]
         _client.emit("llm_call_completed", payload, run_id=run_id)
+        close_implicit_run(run_id, is_implicit, _STREAM_LABEL)
 
     return on_chunk, on_finish
 
@@ -214,8 +226,8 @@ def _make_stream_observers(req, started, run_id):
 def _instrumented_stream(original, self, args, kwargs):
     req = _summarize_request(kwargs)
     _check_policy_or_raise(req)
-    run_id = get_run_id()
-    _client.emit("llm_call_started", {**req, "stream": True})
+    run_id, is_implicit = open_implicit_run(_STREAM_LABEL)
+    _client.emit("llm_call_started", {**req, "stream": True}, run_id=run_id)
     started = time.time()
     try:
         stream = original(self, *args, **kwargs)
@@ -223,17 +235,19 @@ def _instrumented_stream(original, self, args, kwargs):
         _client.emit(
             "llm_call_failed",
             {**req, "duration_s": time.time() - started, "error": repr(e), "stream": True},
+            run_id=run_id,
         )
+        close_implicit_run(run_id, is_implicit, _STREAM_LABEL, error=e)
         raise
-    on_chunk, on_finish = _make_stream_observers(req, started, run_id)
+    on_chunk, on_finish = _make_stream_observers(req, started, run_id, is_implicit)
     return _SyncStreamTap(stream, on_chunk, on_finish)
 
 
 async def _instrumented_stream_async(original, self, args, kwargs):
     req = _summarize_request(kwargs)
     _check_policy_or_raise(req)
-    run_id = get_run_id()
-    _client.emit("llm_call_started", {**req, "stream": True})
+    run_id, is_implicit = open_implicit_run(_STREAM_LABEL)
+    _client.emit("llm_call_started", {**req, "stream": True}, run_id=run_id)
     started = time.time()
     try:
         stream = await original(self, *args, **kwargs)
@@ -241,7 +255,9 @@ async def _instrumented_stream_async(original, self, args, kwargs):
         _client.emit(
             "llm_call_failed",
             {**req, "duration_s": time.time() - started, "error": repr(e), "stream": True},
+            run_id=run_id,
         )
+        close_implicit_run(run_id, is_implicit, _STREAM_LABEL, error=e)
         raise
-    on_chunk, on_finish = _make_stream_observers(req, started, run_id)
+    on_chunk, on_finish = _make_stream_observers(req, started, run_id, is_implicit)
     return _AsyncStreamTap(stream, on_chunk, on_finish)

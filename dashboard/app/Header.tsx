@@ -44,6 +44,9 @@ export default function Header() {
               <span className="text-gray-400 mx-2">·</span>
               {user.email}
             </span>
+            <Link href="/account" className="text-blue-600 underline">
+              account
+            </Link>
             <button
               type="button"
               onClick={onLogout}

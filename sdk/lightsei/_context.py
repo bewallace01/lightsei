@@ -2,7 +2,7 @@ import contextvars
 from typing import Optional
 
 _current_run_id: contextvars.ContextVar[Optional[str]] = contextvars.ContextVar(
-    "beacon_run_id", default=None
+    "lightsei_run_id", default=None
 )
 
 
