@@ -1,0 +1,57 @@
+name: db-backup
+
+# Runs nightly. Dumps the production Postgres, gzips it, encrypts with a
+# passphrase from secrets, uploads as a workflow artifact (default 90-day
+# retention). Restore: `scripts/restore.sh <artifact.sql.gz.enc>`.
+#
+# Recover the passphrase from your password manager. If you lose it, the
+# encrypted artifacts are useless.
+
+on:
+  schedule:
+    # Daily at 09:00 UTC (~2-5am US time, low traffic)
+    - cron: "0 9 * * *"
+  workflow_dispatch: # allow manual triggers from the Actions tab
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Install Postgres 18 client
+        run: |
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+          sudo sh -c 'echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" > /etc/apt/sources.list.d/pgdg.list'
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client-18
+
+      - name: Dump, gzip, encrypt
+        env:
+          DATABASE_URL: ${{ secrets.LIGHTSEI_DATABASE_BACKUP_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          STAMP=$(date -u +%Y%m%d_%H%M%S)
+          OUT="lightsei-${STAMP}.sql.gz.enc"
+          pg_dump \
+            --no-owner \
+            --no-acl \
+            --format=plain \
+            "$DATABASE_URL" \
+          | gzip -9 \
+          | openssl enc -aes-256-cbc -pbkdf2 -salt -pass env:BACKUP_PASSPHRASE \
+          > "$OUT"
+          ls -lh "$OUT"
+          # Sanity: encrypted file should be at least a few KB; empty = something broke
+          test "$(stat -c%s "$OUT")" -gt 1024
+          echo "BACKUP_FILE=$OUT" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BACKUP_FILE }}
+          path: ${{ env.BACKUP_FILE }}
+          retention-days: 90
+          if-no-files-found: error
