@@ -128,66 +128,79 @@ export default function AccountPage() {
   };
 
   return (
-    <main className="p-8 max-w-4xl mx-auto">
+    <main className="px-8 py-10 max-w-4xl mx-auto">
       <Header />
 
+      <div className="mb-8">
+        <h1 className="text-2xl font-semibold tracking-tight">Account</h1>
+        <p className="text-sm text-gray-500 mt-1">
+          Manage your workspace, API keys, and active sessions.
+        </p>
+      </div>
+
       {error && (
-        <div className="mb-4 p-3 border border-red-300 bg-red-50 text-red-700 text-sm rounded">
+        <div className="mb-6 p-3 border border-red-200 bg-red-50 text-red-700 text-sm rounded-md">
           {error}
         </div>
       )}
 
       {/* --- Workspace --- */}
-      <section className="mb-10">
-        <h2 className="text-lg font-semibold mb-3">Workspace</h2>
+      <section className="mb-12">
+        <h2 className="text-[11px] font-semibold text-gray-500 mb-4 uppercase tracking-wider">
+          Workspace
+        </h2>
         <form onSubmit={onRename} className="flex items-end gap-3">
           <div className="flex-1">
-            <label className="block text-sm text-gray-600 mb-1">Name</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1.5">
+              Name
+            </label>
             <input
               value={name}
               onChange={(e) => setName(e.target.value)}
-              className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent-500/30 focus:border-accent-500 transition-shadow"
             />
           </div>
           <button
             type="submit"
             disabled={renaming || !workspace || name === workspace.name || !name.trim()}
-            className="px-4 py-2 bg-blue-600 text-white rounded text-sm font-medium disabled:opacity-50"
+            className="px-4 py-2 bg-accent-600 hover:bg-accent-700 text-white rounded-md text-sm font-medium disabled:opacity-50 transition-colors"
           >
-            {renaming ? "saving..." : "save"}
+            {renaming ? "saving…" : "save"}
           </button>
         </form>
         {savedAt && Date.now() - savedAt < 4000 && (
           <div className="text-xs text-green-700 mt-2">saved.</div>
         )}
-        <div className="text-xs text-gray-500 mt-2">
+        <div className="text-xs text-gray-500 mt-3">
           signed in as <span className="font-mono">{user?.email ?? "—"}</span>
         </div>
       </section>
 
       {/* --- API keys --- */}
-      <section className="mb-10">
-        <h2 className="text-lg font-semibold mb-3">API keys</h2>
+      <section className="mb-12">
+        <h2 className="text-[11px] font-semibold text-gray-500 mb-4 uppercase tracking-wider">
+          API keys
+        </h2>
 
         {newKey && (
-          <div className="mb-4 p-4 border border-amber-300 bg-amber-50 rounded">
-            <div className="text-xs uppercase font-semibold text-amber-800 mb-1">
+          <div className="mb-5 p-4 border border-amber-300 bg-amber-50 rounded-lg">
+            <div className="text-[10px] uppercase tracking-wider font-semibold text-amber-800 mb-1.5">
               new key — copy now, shown once
             </div>
-            <code className="block font-mono text-sm break-all text-amber-900 mb-2">
+            <code className="block font-mono text-sm break-all text-amber-900 mb-2.5">
               {newKey.plaintext}
             </code>
-            <div className="flex items-center gap-3 text-sm">
+            <div className="flex items-center gap-4 text-sm">
               <button
                 type="button"
-                className="text-blue-600 underline"
+                className="text-accent-700 hover:text-accent-800 font-medium"
                 onClick={() => navigator.clipboard.writeText(newKey.plaintext)}
               >
                 copy
               </button>
               <button
                 type="button"
-                className="text-gray-600 underline"
+                className="text-gray-600 hover:text-gray-800"
                 onClick={() => setNewKey(null)}
               >
                 dismiss
@@ -196,56 +209,74 @@ export default function AccountPage() {
           </div>
         )}
 
-        <form onSubmit={onCreateKey} className="flex items-end gap-3 mb-4">
+        <form onSubmit={onCreateKey} className="flex items-end gap-3 mb-5">
           <div className="flex-1">
-            <label className="block text-sm text-gray-600 mb-1">New key name</label>
+            <label className="block text-sm font-medium text-gray-700 mb-1.5">
+              New key name
+            </label>
             <input
               value={keyName}
               onChange={(e) => setKeyName(e.target.value)}
               placeholder="production"
-              className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent-500/30 focus:border-accent-500 transition-shadow"
             />
           </div>
           <button
             type="submit"
             disabled={!keyName.trim()}
-            className="px-4 py-2 bg-blue-600 text-white rounded text-sm font-medium disabled:opacity-50"
+            className="px-4 py-2 bg-accent-600 hover:bg-accent-700 text-white rounded-md text-sm font-medium disabled:opacity-50 transition-colors"
           >
             create
           </button>
         </form>
 
+        <div className="rounded-lg border border-gray-200 overflow-hidden">
         <table className="w-full text-left text-sm">
-          <thead>
-            <tr className="border-b border-gray-200 text-gray-600">
-              <th className="py-2 pr-4 font-medium">Name</th>
-              <th className="py-2 pr-4 font-medium">Prefix</th>
-              <th className="py-2 pr-4 font-medium">Created</th>
-              <th className="py-2 pr-4 font-medium">Last used</th>
-              <th className="py-2 pr-4 font-medium">Status</th>
-              <th className="py-2 pr-4 font-medium"></th>
+          <thead className="bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500">
+            <tr>
+              <th className="px-4 py-3 font-medium">Name</th>
+              <th className="px-4 py-3 font-medium">Prefix</th>
+              <th className="px-4 py-3 font-medium">Created</th>
+              <th className="px-4 py-3 font-medium">Last used</th>
+              <th className="px-4 py-3 font-medium">Status</th>
+              <th className="px-4 py-3 font-medium"></th>
             </tr>
           </thead>
           <tbody>
-            {keys.map((k) => (
-              <tr key={k.id} className="border-b border-gray-100">
-                <td className="py-2 pr-4">{k.name}</td>
-                <td className="py-2 pr-4 font-mono text-xs">{k.prefix}…</td>
-                <td className="py-2 pr-4 font-mono text-xs">{fmt(k.created_at)}</td>
-                <td className="py-2 pr-4 font-mono text-xs">{fmt(k.last_used_at)}</td>
-                <td className="py-2 pr-4">
+            {keys.map((k, i) => (
+              <tr
+                key={k.id}
+                className={
+                  i !== keys.length - 1 ? "border-b border-gray-100" : ""
+                }
+              >
+                <td className="px-4 py-3 text-gray-800">{k.name}</td>
+                <td className="px-4 py-3 font-mono text-xs text-gray-600">
+                  {k.prefix}…
+                </td>
+                <td className="px-4 py-3 font-mono text-xs text-gray-600">
+                  {fmt(k.created_at)}
+                </td>
+                <td className="px-4 py-3 font-mono text-xs text-gray-600">
+                  {fmt(k.last_used_at)}
+                </td>
+                <td className="px-4 py-3">
                   {k.revoked_at ? (
-                    <span className="text-red-700">revoked</span>
+                    <span className="inline-block px-2 py-0.5 rounded-full bg-red-100 text-red-800 text-[11px] font-medium">
+                      revoked
+                    </span>
                   ) : (
-                    <span className="text-gray-700">active</span>
+                    <span className="inline-block px-2 py-0.5 rounded-full bg-gray-100 text-gray-700 text-[11px] font-medium">
+                      active
+                    </span>
                   )}
                 </td>
-                <td className="py-2 pr-4">
+                <td className="px-4 py-3 text-right">
                   {!k.revoked_at && (
                     <button
                       type="button"
                       onClick={() => onRevokeKey(k.id)}
-                      className="text-red-600 underline text-xs"
+                      className="text-red-600 hover:text-red-700 text-xs font-medium"
                     >
                       revoke
                     </button>
@@ -255,47 +286,66 @@ export default function AccountPage() {
             ))}
             {keys.length === 0 && (
               <tr>
-                <td className="py-2 text-gray-500 italic" colSpan={6}>
+                <td className="px-4 py-4 text-gray-400 italic text-sm" colSpan={6}>
                   no keys yet
                 </td>
               </tr>
             )}
           </tbody>
         </table>
+        </div>
       </section>
 
       {/* --- Sessions --- */}
       <section>
-        <h2 className="text-lg font-semibold mb-3">Browser sessions</h2>
+        <h2 className="text-[11px] font-semibold text-gray-500 mb-4 uppercase tracking-wider">
+          Browser sessions
+        </h2>
+        <div className="rounded-lg border border-gray-200 overflow-hidden">
         <table className="w-full text-left text-sm">
-          <thead>
-            <tr className="border-b border-gray-200 text-gray-600">
-              <th className="py-2 pr-4 font-medium">Created</th>
-              <th className="py-2 pr-4 font-medium">Expires</th>
-              <th className="py-2 pr-4 font-medium">Status</th>
-              <th className="py-2 pr-4 font-medium"></th>
+          <thead className="bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500">
+            <tr>
+              <th className="px-4 py-3 font-medium">Created</th>
+              <th className="px-4 py-3 font-medium">Expires</th>
+              <th className="px-4 py-3 font-medium">Status</th>
+              <th className="px-4 py-3 font-medium"></th>
             </tr>
           </thead>
           <tbody>
-            {sessions.map((s) => (
-              <tr key={s.id} className="border-b border-gray-100">
-                <td className="py-2 pr-4 font-mono text-xs">{fmt(s.created_at)}</td>
-                <td className="py-2 pr-4 font-mono text-xs">{fmt(s.expires_at)}</td>
-                <td className="py-2 pr-4">
+            {sessions.map((s, i) => (
+              <tr
+                key={s.id}
+                className={
+                  i !== sessions.length - 1 ? "border-b border-gray-100" : ""
+                }
+              >
+                <td className="px-4 py-3 font-mono text-xs text-gray-600">
+                  {fmt(s.created_at)}
+                </td>
+                <td className="px-4 py-3 font-mono text-xs text-gray-600">
+                  {fmt(s.expires_at)}
+                </td>
+                <td className="px-4 py-3">
                   {s.revoked_at ? (
-                    <span className="text-red-700">revoked</span>
+                    <span className="inline-block px-2 py-0.5 rounded-full bg-red-100 text-red-800 text-[11px] font-medium">
+                      revoked
+                    </span>
                   ) : s.current ? (
-                    <span className="text-green-700">current</span>
+                    <span className="inline-block px-2 py-0.5 rounded-full bg-green-100 text-green-800 text-[11px] font-medium">
+                      current
+                    </span>
                   ) : (
-                    <span className="text-gray-700">active</span>
+                    <span className="inline-block px-2 py-0.5 rounded-full bg-gray-100 text-gray-700 text-[11px] font-medium">
+                      active
+                    </span>
                   )}
                 </td>
-                <td className="py-2 pr-4">
+                <td className="px-4 py-3 text-right">
                   {!s.revoked_at && !s.current && (
                     <button
                       type="button"
                       onClick={() => onRevokeSession(s.id)}
-                      className="text-red-600 underline text-xs"
+                      className="text-red-600 hover:text-red-700 text-xs font-medium"
                     >
                       revoke
                     </button>
@@ -305,13 +355,14 @@ export default function AccountPage() {
             ))}
             {sessions.length === 0 && (
               <tr>
-                <td className="py-2 text-gray-500 italic" colSpan={4}>
+                <td className="px-4 py-4 text-gray-400 italic text-sm" colSpan={4}>
                   no active sessions
                 </td>
               </tr>
             )}
           </tbody>
         </table>
+        </div>
       </section>
     </main>
   );

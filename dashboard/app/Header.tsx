@@ -11,6 +11,7 @@ import {
   SessionUser,
   SessionWorkspace,
 } from "./api";
+import Logo from "./Logo";
 
 export default function Header() {
   const router = useRouter();
@@ -32,40 +33,50 @@ export default function Header() {
   };
 
   return (
-    <header className="flex items-center justify-between mb-6">
-      <Link href="/" className="text-2xl font-semibold no-underline text-gray-900">
-        Lightsei
+    <header className="flex items-center justify-between mb-10 pb-4 border-b border-gray-100">
+      <Link href="/" className="no-underline">
+        <Logo />
       </Link>
-      <div className="flex items-center gap-4 text-sm">
+      <div className="flex items-center gap-5 text-sm text-gray-600">
         {user ? (
           <>
-            <span className="text-gray-700">
-              <span className="font-mono">{workspace?.name ?? "—"}</span>
-              <span className="text-gray-400 mx-2">·</span>
-              {user.email}
+            <span className="hidden sm:inline">
+              <span className="font-medium text-gray-900">
+                {workspace?.name ?? "—"}
+              </span>
+              <span className="text-gray-300 mx-2">·</span>
+              <span>{user.email}</span>
             </span>
-            <Link href="/account" className="text-blue-600 underline">
+            <Link
+              href="/account"
+              className="text-gray-700 hover:text-accent-600 transition-colors"
+            >
               account
             </Link>
             <button
               type="button"
               onClick={onLogout}
-              className="text-blue-600 underline"
+              className="text-gray-700 hover:text-accent-600 transition-colors"
             >
               log out
             </button>
           </>
         ) : (
           <>
-            <Link href="/login" className="text-blue-600 underline">
+            <Link
+              href="/login"
+              className="text-gray-700 hover:text-accent-600 transition-colors"
+            >
               log in
             </Link>
-            <Link href="/signup" className="text-blue-600 underline">
+            <Link
+              href="/signup"
+              className="px-3 py-1.5 rounded-md bg-accent-600 text-white hover:bg-accent-700 transition-colors no-underline"
+            >
               sign up
             </Link>
           </>
         )}
-        <span className="text-xs text-gray-500">polls every 2s</span>
       </div>
     </header>
   );

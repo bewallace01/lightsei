@@ -124,27 +124,40 @@ export default function RunDetail({ params }: { params: { id: string } }) {
   }, [runId, router]);
 
   return (
-    <main className="p-8 max-w-6xl mx-auto">
+    <main className="px-8 py-10 max-w-6xl mx-auto">
       <Header />
 
-      <div className="mb-4">
-        <Link href="/" className="text-blue-600 underline text-sm">
-          &larr; runs
-        </Link>
-      </div>
+      <Link
+        href="/"
+        className="text-sm text-gray-500 hover:text-accent-600 transition-colors inline-block mb-4"
+      >
+        ← runs
+      </Link>
 
-      <h1 className="text-xl font-semibold mb-1 font-mono">{runId}</h1>
+      <h1 className="text-lg font-semibold tracking-tight font-mono text-gray-900 mb-1">
+        {runId}
+      </h1>
       {run && (
-        <div className="text-sm text-gray-600 mb-6">
-          agent <span className="font-mono">{run.agent_name}</span>
-          {" · started "}
-          {fmtTime(run.started_at)}
-          {run.ended_at ? ` · ended ${fmtTime(run.ended_at)}` : " · running"}
+        <div className="text-sm text-gray-500 mb-8">
+          agent <span className="font-mono text-gray-700">{run.agent_name}</span>
+          <span className="text-gray-300 mx-2">·</span>
+          started {fmtTime(run.started_at)}
+          {run.ended_at ? (
+            <>
+              <span className="text-gray-300 mx-2">·</span>
+              ended {fmtTime(run.ended_at)}
+            </>
+          ) : (
+            <>
+              <span className="text-gray-300 mx-2">·</span>
+              <span className="text-amber-700">running</span>
+            </>
+          )}
         </div>
       )}
 
       {error && (
-        <div className="mb-4 p-3 border border-red-300 bg-red-50 text-red-700 text-sm rounded">
+        <div className="mb-6 p-3 border border-red-200 bg-red-50 text-red-700 text-sm rounded-md">
           {error}
         </div>
       )}
@@ -160,16 +173,16 @@ export default function RunDetail({ params }: { params: { id: string } }) {
           action?: string;
         };
         return (
-          <div className="mb-6 p-4 border border-red-300 bg-red-50 rounded">
+          <div className="mb-8 p-5 border border-red-200 bg-red-50 rounded-lg">
             <div className="flex items-baseline gap-3">
-              <span className="px-2 py-0.5 rounded bg-red-200 text-red-900 text-xs font-semibold uppercase">
+              <span className="px-2 py-0.5 rounded-full bg-red-200 text-red-900 text-[11px] font-semibold uppercase tracking-wide">
                 denied
               </span>
-              <span className="text-red-800 font-medium">
+              <span className="text-red-900 font-medium">
                 {p.reason ?? "policy denied"}
               </span>
             </div>
-            <div className="mt-2 text-sm text-red-800 space-y-0.5">
+            <div className="mt-3 text-sm text-red-800 space-y-1">
               {p.policy && (
                 <div>
                   policy: <span className="font-mono">{p.policy}</span>
@@ -183,11 +196,11 @@ export default function RunDetail({ params }: { params: { id: string } }) {
               {typeof p.cost_so_far_usd === "number" &&
                 typeof p.cap_usd === "number" && (
                   <div>
-                    cost so far:{" "}
+                    cost so far{" "}
                     <span className="font-mono">
                       ${p.cost_so_far_usd.toFixed(6)}
-                    </span>{" "}
-                    / cap{" "}
+                    </span>
+                    , cap{" "}
                     <span className="font-mono">${p.cap_usd.toFixed(6)}</span>
                   </div>
                 )}
@@ -203,25 +216,27 @@ export default function RunDetail({ params }: { params: { id: string } }) {
         );
         if (!hasContent) return null;
         return (
-          <section className="mb-8">
-            <h2 className="text-sm font-semibold text-gray-700 mb-3 uppercase tracking-wide">
+          <section className="mb-10">
+            <h2 className="text-[11px] font-semibold text-gray-500 mb-4 uppercase tracking-wider">
               Conversation
             </h2>
-            <div className="space-y-6">
+            <div className="space-y-7">
               {turns.map((t, i) => (
-                <div key={i} className="space-y-2">
+                <div key={i} className="space-y-2.5">
                   <div className="text-xs text-gray-500 flex items-center gap-2">
                     <span>
                       call {i + 1}
                       {t.model && (
                         <>
-                          {" · "}
-                          <span className="font-mono">{t.model}</span>
+                          <span className="text-gray-300 mx-1.5">·</span>
+                          <span className="font-mono text-gray-700">
+                            {t.model}
+                          </span>
                         </>
                       )}
                     </span>
                     {t.denied && (
-                      <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-800 text-[10px] uppercase font-semibold">
+                      <span className="px-1.5 py-0.5 rounded-full bg-red-100 text-red-800 text-[10px] uppercase font-semibold tracking-wide">
                         denied{t.denied.reason ? ` · ${t.denied.reason}` : ""}
                       </span>
                     )}
@@ -230,11 +245,11 @@ export default function RunDetail({ params }: { params: { id: string } }) {
                     <div
                       key={`req-${j}`}
                       className={
-                        "p-3 border rounded text-sm whitespace-pre-wrap break-words " +
+                        "p-3.5 border rounded-lg text-sm whitespace-pre-wrap break-words " +
                         bubbleColors(m.role)
                       }
                     >
-                      <div className="text-xs uppercase tracking-wide opacity-70 mb-1">
+                      <div className="text-[10px] uppercase tracking-wider opacity-60 font-semibold mb-1.5">
                         {m.role ?? "?"}
                       </div>
                       {messageText(m)}
@@ -243,11 +258,11 @@ export default function RunDetail({ params }: { params: { id: string } }) {
                   {t.response !== undefined && (
                     <div
                       className={
-                        "p-3 border rounded text-sm whitespace-pre-wrap break-words " +
+                        "p-3.5 border rounded-lg text-sm whitespace-pre-wrap break-words " +
                         bubbleColors("assistant")
                       }
                     >
-                      <div className="text-xs uppercase tracking-wide opacity-70 mb-1">
+                      <div className="text-[10px] uppercase tracking-wider opacity-60 font-semibold mb-1.5">
                         assistant
                       </div>
                       {t.response}
@@ -260,49 +275,57 @@ export default function RunDetail({ params }: { params: { id: string } }) {
         );
       })()}
 
+      <h2 className="text-[11px] font-semibold text-gray-500 mb-4 uppercase tracking-wider">
+        Events
+      </h2>
+
       {loading ? (
-        <div className="text-gray-500">loading...</div>
+        <div className="text-gray-400 text-sm">loading…</div>
       ) : events.length === 0 ? (
-        <div className="text-gray-500">no events</div>
+        <div className="text-gray-400 text-sm">no events</div>
       ) : (
+        <div className="rounded-lg border border-gray-200 overflow-hidden">
         <table className="w-full text-left text-sm">
-          <thead>
-            <tr className="border-b border-gray-200 text-gray-600">
-              <th className="py-2 pr-4 font-medium w-40">Time</th>
-              <th className="py-2 pr-4 font-medium w-48">Kind</th>
-              <th className="py-2 pr-4 font-medium">Payload</th>
+          <thead className="bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500">
+            <tr>
+              <th className="px-4 py-3 font-medium w-44">Time</th>
+              <th className="px-4 py-3 font-medium w-52">Kind</th>
+              <th className="px-4 py-3 font-medium">Payload</th>
             </tr>
           </thead>
           <tbody>
-            {events.map((e) => {
+            {events.map((e, i) => {
               const isDenial = e.kind === "policy_denied";
               return (
                 <tr
                   key={e.id}
                   className={
-                    "border-b align-top " +
+                    "align-top " +
                     (isDenial
-                      ? "border-red-200 bg-red-50"
-                      : "border-gray-100")
+                      ? "bg-red-50/50 "
+                      : "") +
+                    (i !== events.length - 1
+                      ? "border-b border-gray-100"
+                      : "")
                   }
                 >
-                  <td className="py-2 pr-4 font-mono text-xs">
+                  <td className="px-4 py-3 font-mono text-xs text-gray-600">
                     {fmtTime(e.timestamp)}
                   </td>
-                  <td className="py-2 pr-4 font-mono text-xs">
+                  <td className="px-4 py-3 font-mono text-xs">
                     {isDenial ? (
                       <span className="text-red-800 font-semibold">
                         {e.kind}
                       </span>
                     ) : (
-                      e.kind
+                      <span className="text-gray-700">{e.kind}</span>
                     )}
                   </td>
-                  <td className="py-2 pr-4">
+                  <td className="px-4 py-3">
                     <pre
                       className={
                         "font-mono text-xs whitespace-pre-wrap break-words " +
-                        (isDenial ? "text-red-900" : "text-gray-800")
+                        (isDenial ? "text-red-900" : "text-gray-700")
                       }
                     >
                       {JSON.stringify(e.payload, null, 2)}
@@ -313,6 +336,7 @@ export default function RunDetail({ params }: { params: { id: string } }) {
             })}
           </tbody>
         </table>
+        </div>
       )}
     </main>
   );
