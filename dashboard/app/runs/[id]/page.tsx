@@ -20,6 +20,7 @@ type Turn = {
   model?: string;
   request: Message[];
   response?: string;
+  denied?: { reason?: string };
 };
 
 function buildConversation(events: Event[]): Turn[] {
@@ -41,6 +42,18 @@ function buildConversation(events: Event[]): Turn[] {
       }
       current = null;
     } else if (e.kind === "llm_call_failed" && current) {
+      current = null;
+    } else if (e.kind === "policy_denied") {
+      // Denial happens before llm_call_started, so the request_messages live
+      // on the denial event itself when the SDK captured them.
+      const reqMsgs = p.request_messages as Message[] | undefined;
+      if (Array.isArray(reqMsgs) && reqMsgs.length > 0) {
+        turns.push({
+          model: (p.model as string | undefined) ?? undefined,
+          request: reqMsgs,
+          denied: { reason: p.reason as string | undefined },
+        });
+      }
       current = null;
     }
   }
@@ -197,13 +210,20 @@ export default function RunDetail({ params }: { params: { id: string } }) {
             <div className="space-y-6">
               {turns.map((t, i) => (
                 <div key={i} className="space-y-2">
-                  <div className="text-xs text-gray-500">
-                    call {i + 1}
-                    {t.model && (
-                      <>
-                        {" · "}
-                        <span className="font-mono">{t.model}</span>
-                      </>
+                  <div className="text-xs text-gray-500 flex items-center gap-2">
+                    <span>
+                      call {i + 1}
+                      {t.model && (
+                        <>
+                          {" · "}
+                          <span className="font-mono">{t.model}</span>
+                        </>
+                      )}
+                    </span>
+                    {t.denied && (
+                      <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-800 text-[10px] uppercase font-semibold">
+                        denied{t.denied.reason ? ` · ${t.denied.reason}` : ""}
+                      </span>
                     )}
                   </div>
                   {t.request.map((m, j) => (

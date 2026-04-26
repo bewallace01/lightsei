@@ -129,7 +129,14 @@ def _check_policy_or_raise(req: dict[str, Any]) -> None:
     if not decision.get("allow", True):
         reason = decision.get("reason", "policy denied")
         # Record the denial as an event so it shows up in the dashboard.
-        _client.emit("policy_denied", {"action": _ACTION, **decision})
+        # Carry request_messages through (when captured) so the user can see
+        # what was being asked when the gate fired.
+        denied_payload: dict[str, Any] = {"action": _ACTION, **decision}
+        if "request_messages" in req:
+            denied_payload["request_messages"] = req["request_messages"]
+        if "model" in req:
+            denied_payload["model"] = req["model"]
+        _client.emit("policy_denied", denied_payload)
         raise LightseiPolicyError(reason, decision)
 
 

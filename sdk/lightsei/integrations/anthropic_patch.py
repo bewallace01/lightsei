@@ -133,7 +133,12 @@ def _check_policy_or_raise(req: dict[str, Any]) -> None:
     decision = _client.check_policy(_ACTION, payload=req)
     if not decision.get("allow", True):
         reason = decision.get("reason", "policy denied")
-        _client.emit("policy_denied", {"action": _ACTION, **decision})
+        denied_payload: dict[str, Any] = {"action": _ACTION, **decision}
+        if "request_messages" in req:
+            denied_payload["request_messages"] = req["request_messages"]
+        if "model" in req:
+            denied_payload["model"] = req["model"]
+        _client.emit("policy_denied", denied_payload)
         raise LightseiPolicyError(reason, decision)
 
 
