@@ -153,6 +153,7 @@ class Agent(Base):
     )
     name: Mapped[str] = mapped_column(String, primary_key=True)
     daily_cost_cap_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    system_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     command_handlers: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)
     last_seen_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True

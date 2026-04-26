@@ -4,12 +4,15 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
+  Agent,
   AgentManifest,
   cancelCommand,
   Command,
   enqueueCommand,
+  fetchAgent,
   fetchAgentManifest,
   fetchCommands,
+  patchAgent,
   UnauthorizedError,
 } from "../../api";
 import Header from "../../Header";
@@ -43,6 +46,10 @@ export default function AgentPage({ params }: { params: { name: string } }) {
   const router = useRouter();
   const [commands, setCommands] = useState<Command[]>([]);
   const [manifest, setManifest] = useState<AgentManifest | null>(null);
+  const [agent, setAgent] = useState<Agent | null>(null);
+  const [systemPromptDraft, setSystemPromptDraft] = useState("");
+  const [systemPromptSaving, setSystemPromptSaving] = useState(false);
+  const [systemPromptSavedAt, setSystemPromptSavedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [kind, setKind] = useState("ping");
   const [kindCustom, setKindCustom] = useState(false);
@@ -51,12 +58,22 @@ export default function AgentPage({ params }: { params: { name: string } }) {
 
   const load = async () => {
     try {
-      const [cmds, mf] = await Promise.all([
+      const [cmds, mf, ag] = await Promise.all([
         fetchCommands(agentName),
         fetchAgentManifest(agentName),
+        fetchAgent(agentName).catch(() => null),
       ]);
       setCommands(cmds);
       setManifest(mf);
+      if (ag) {
+        setAgent(ag);
+        // Only sync the draft if the user hasn't typed since last load.
+        setSystemPromptDraft((cur) =>
+          cur === (agent?.system_prompt ?? "") || cur === ""
+            ? ag.system_prompt ?? ""
+            : cur,
+        );
+      }
       setError(null);
     } catch (e) {
       if (e instanceof UnauthorizedError) {
@@ -177,6 +194,58 @@ export default function AgentPage({ params }: { params: { name: string } }) {
           {error}
         </div>
       )}
+
+      <section className="mb-10">
+        <h2 className="text-[11px] font-semibold text-gray-500 mb-4 uppercase tracking-wider">
+          System prompt
+        </h2>
+        <p className="text-xs text-gray-500 mb-3">
+          Prepended to every chat thread for this agent. Bot doesn&apos;t need
+          to do anything — Lightsei delivers it as a <code className="font-mono">system</code>{" "}
+          message. Leave blank to disable.
+        </p>
+        <textarea
+          value={systemPromptDraft}
+          onChange={(e) => setSystemPromptDraft(e.target.value)}
+          rows={4}
+          placeholder="You are a helpful assistant…"
+          className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm font-sans focus:outline-none focus:ring-2 focus:ring-accent-500/30 focus:border-accent-500"
+        />
+        <div className="flex items-center gap-3 mt-2">
+          <button
+            type="button"
+            disabled={
+              systemPromptSaving ||
+              systemPromptDraft === (agent?.system_prompt ?? "")
+            }
+            onClick={async () => {
+              setSystemPromptSaving(true);
+              try {
+                const next = systemPromptDraft.trim() ? systemPromptDraft : null;
+                const updated = await patchAgent(agentName, { system_prompt: next });
+                setAgent(updated);
+                setSystemPromptDraft(updated.system_prompt ?? "");
+                setSystemPromptSavedAt(Date.now());
+              } catch (e) {
+                setError(String(e));
+              } finally {
+                setSystemPromptSaving(false);
+              }
+            }}
+            className="px-4 py-2 bg-accent-600 hover:bg-accent-700 text-white rounded-md text-sm font-medium disabled:opacity-50 transition-colors"
+          >
+            {systemPromptSaving ? "saving…" : "save"}
+          </button>
+          {systemPromptSavedAt && Date.now() - systemPromptSavedAt < 4000 && (
+            <span className="text-xs text-green-700">saved.</span>
+          )}
+          {agent?.system_prompt && (
+            <span className="text-xs text-gray-400">
+              {agent.system_prompt.length} chars stored
+            </span>
+          )}
+        </div>
+      </section>
 
       <section className="mb-10">
         <h2 className="text-[11px] font-semibold text-gray-500 mb-4 uppercase tracking-wider">

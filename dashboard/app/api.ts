@@ -383,6 +383,31 @@ export type AgentManifest = {
   last_seen_at: string | null;
 };
 
+export type Agent = {
+  name: string;
+  daily_cost_cap_usd: number | null;
+  system_prompt: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export async function fetchAgent(name: string): Promise<Agent> {
+  return (await authedJson(
+    `/agents/${encodeURIComponent(name)}`,
+  )) as Agent;
+}
+
+export async function patchAgent(
+  name: string,
+  patch: Partial<{ daily_cost_cap_usd: number | null; system_prompt: string | null }>,
+): Promise<Agent> {
+  return (await authedJson(`/agents/${encodeURIComponent(name)}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(patch),
+  })) as Agent;
+}
+
 export async function fetchAgentManifest(agentName: string): Promise<AgentManifest> {
   return (await authedJson(
     `/agents/${encodeURIComponent(agentName)}/manifest`,

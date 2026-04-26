@@ -58,6 +58,9 @@ class PolicyCheckIn(BaseModel):
 
 class AgentPatchIn(BaseModel):
     daily_cost_cap_usd: Optional[float] = None  # null clears the cap
+    system_prompt: Optional[str] = None  # null clears the prompt
+    # Distinguish "field not provided" from "explicitly null". Pydantic v2:
+    # we'll detect via model_fields_set.
 
 
 class WorkspaceCreateIn(BaseModel):
@@ -267,6 +270,16 @@ def get_run_events(
     }
 
 
+def _serialize_agent(a: Agent) -> dict[str, Any]:
+    return {
+        "name": a.name,
+        "daily_cost_cap_usd": a.daily_cost_cap_usd,
+        "system_prompt": a.system_prompt,
+        "created_at": a.created_at.isoformat(),
+        "updated_at": a.updated_at.isoformat(),
+    }
+
+
 @app.get("/agents")
 def list_agents(
     session: Session = Depends(get_session),
@@ -275,17 +288,7 @@ def list_agents(
     rows = session.execute(
         select(Agent).where(Agent.workspace_id == workspace_id).order_by(Agent.name)
     ).scalars().all()
-    return {
-        "agents": [
-            {
-                "name": a.name,
-                "daily_cost_cap_usd": a.daily_cost_cap_usd,
-                "created_at": a.created_at.isoformat(),
-                "updated_at": a.updated_at.isoformat(),
-            }
-            for a in rows
-        ]
-    }
+    return {"agents": [_serialize_agent(a) for a in rows]}
 
 
 @app.get("/agents/{agent_name}")
@@ -297,12 +300,7 @@ def get_agent(
     a = session.get(Agent, (workspace_id, agent_name))
     if a is None:
         raise HTTPException(status_code=404, detail="agent not found")
-    return {
-        "name": a.name,
-        "daily_cost_cap_usd": a.daily_cost_cap_usd,
-        "created_at": a.created_at.isoformat(),
-        "updated_at": a.updated_at.isoformat(),
-    }
+    return _serialize_agent(a)
 
 
 @app.patch("/agents/{agent_name}")
@@ -317,15 +315,19 @@ def patch_agent(
     a = session.get(Agent, (workspace_id, agent_name))
     if a is None:
         raise HTTPException(status_code=500, detail="agent ensure failed")
-    a.daily_cost_cap_usd = body.daily_cost_cap_usd
+    # Only update fields the caller actually included. None means "clear".
+    fields = body.model_fields_set
+    if "daily_cost_cap_usd" in fields:
+        a.daily_cost_cap_usd = body.daily_cost_cap_usd
+    if "system_prompt" in fields:
+        # blank/whitespace -> clear; otherwise store as-is
+        if body.system_prompt and body.system_prompt.strip():
+            a.system_prompt = body.system_prompt
+        else:
+            a.system_prompt = None
     a.updated_at = now
     session.flush()
-    return {
-        "name": a.name,
-        "daily_cost_cap_usd": a.daily_cost_cap_usd,
-        "created_at": a.created_at.isoformat(),
-        "updated_at": a.updated_at.isoformat(),
-    }
+    return _serialize_agent(a)
 
 
 @app.post("/workspaces")
@@ -973,14 +975,27 @@ def claim_thread_turn(
         )
         .order_by(ThreadMessage.created_at)
     ).scalars().all()
+    messages = [{"role": m.role, "content": m.content} for m in history]
+
+    # Prepend the agent's configured system prompt if set and not already
+    # present at the start of the thread.
+    agent_row = session.get(Agent, (workspace_id, agent_name))
+    if (
+        agent_row is not None
+        and agent_row.system_prompt
+        and not (messages and messages[0].get("role") == "system")
+    ):
+        messages = [
+            {"role": "system", "content": agent_row.system_prompt},
+            *messages,
+        ]
+
     session.flush()
     return {
         "turn": {
             "message_id": msg.id,
             "thread_id": msg.thread_id,
-            "messages": [
-                {"role": m.role, "content": m.content} for m in history
-            ],
+            "messages": messages,
         }
     }
 
