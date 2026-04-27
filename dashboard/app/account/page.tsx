@@ -5,7 +5,9 @@ import { useEffect, useState } from "react";
 import {
   ApiKeySummary,
   createApiKey,
+  deleteSecret,
   fetchApiKeys,
+  fetchSecrets,
   fetchSessions,
   fetchWorkspace,
   getStoredUser,
@@ -16,8 +18,10 @@ import {
   SessionSummary,
   SessionUser,
   SessionWorkspace,
+  setSecret,
   setSession,
   UnauthorizedError,
+  WorkspaceSecretMeta,
 } from "../api";
 import Header from "../Header";
 
@@ -45,19 +49,25 @@ export default function AccountPage() {
   );
 
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
+  const [secrets, setSecrets] = useState<WorkspaceSecretMeta[]>([]);
+  const [secretName, setSecretName] = useState("");
+  const [secretValue, setSecretValue] = useState("");
+  const [savingSecret, setSavingSecret] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const loadAll = async () => {
     try {
-      const [ws, ks, ss] = await Promise.all([
+      const [ws, ks, ss, sc] = await Promise.all([
         fetchWorkspace(),
         fetchApiKeys(),
         fetchSessions(),
+        fetchSecrets().catch(() => [] as WorkspaceSecretMeta[]),
       ]);
       setWorkspace(ws);
       setName(ws.name);
       setKeys(ks);
       setSessions(ss);
+      setSecrets(sc);
       setError(null);
     } catch (e) {
       if (e instanceof UnauthorizedError) {
@@ -121,6 +131,32 @@ export default function AccountPage() {
     if (!confirm("Revoke this session?")) return;
     try {
       await revokeSession(id);
+      await loadAll();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const onSaveSecret = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!secretName.trim() || !secretValue) return;
+    setSavingSecret(true);
+    try {
+      await setSecret(secretName.trim(), secretValue);
+      setSecretName("");
+      setSecretValue("");
+      await loadAll();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSavingSecret(false);
+    }
+  };
+
+  const onDeleteSecret = async (name: string) => {
+    if (!confirm(`Delete secret ${name}? Anything reading it stops working.`)) return;
+    try {
+      await deleteSecret(name);
       await loadAll();
     } catch (e) {
       setError(String(e));
@@ -293,6 +329,100 @@ export default function AccountPage() {
             )}
           </tbody>
         </table>
+        </div>
+      </section>
+
+      {/* --- Secrets --- */}
+      <section className="mb-12">
+        <h2 className="text-[11px] font-semibold text-gray-500 mb-2 uppercase tracking-wider">
+          Workspace secrets
+        </h2>
+        <p className="text-xs text-gray-500 mb-4">
+          Encrypted KV store for API keys and other config your bot needs.
+          Read from your code with{" "}
+          <code className="font-mono">lightsei.get_secret(&quot;NAME&quot;)</code>.
+        </p>
+
+        <form onSubmit={onSaveSecret} className="grid grid-cols-12 gap-3 mb-5">
+          <div className="col-span-4">
+            <label className="block text-sm font-medium text-gray-700 mb-1.5">
+              Name
+            </label>
+            <input
+              value={secretName}
+              onChange={(e) => setSecretName(e.target.value)}
+              placeholder="OPENAI_API_KEY"
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-accent-500/30 focus:border-accent-500"
+            />
+          </div>
+          <div className="col-span-6">
+            <label className="block text-sm font-medium text-gray-700 mb-1.5">
+              Value
+            </label>
+            <input
+              type="password"
+              value={secretValue}
+              onChange={(e) => setSecretValue(e.target.value)}
+              placeholder="sk-…"
+              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-accent-500/30 focus:border-accent-500"
+            />
+          </div>
+          <div className="col-span-2 flex items-end">
+            <button
+              type="submit"
+              disabled={savingSecret || !secretName.trim() || !secretValue}
+              className="w-full px-4 py-2 bg-accent-600 hover:bg-accent-700 text-white rounded-md text-sm font-medium disabled:opacity-50 transition-colors"
+            >
+              {savingSecret ? "saving…" : "save"}
+            </button>
+          </div>
+        </form>
+
+        <div className="rounded-lg border border-gray-200 overflow-hidden">
+          <table className="w-full text-left text-sm">
+            <thead className="bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500">
+              <tr>
+                <th className="px-4 py-3 font-medium">Name</th>
+                <th className="px-4 py-3 font-medium">Created</th>
+                <th className="px-4 py-3 font-medium">Updated</th>
+                <th className="px-4 py-3 font-medium"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {secrets.map((s, i) => (
+                <tr
+                  key={s.name}
+                  className={
+                    i !== secrets.length - 1 ? "border-b border-gray-100" : ""
+                  }
+                >
+                  <td className="px-4 py-3 font-mono text-gray-800">{s.name}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-gray-600">
+                    {fmt(s.created_at)}
+                  </td>
+                  <td className="px-4 py-3 font-mono text-xs text-gray-600">
+                    {fmt(s.updated_at)}
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    <button
+                      type="button"
+                      onClick={() => onDeleteSecret(s.name)}
+                      className="text-red-600 hover:text-red-700 text-xs font-medium"
+                    >
+                      delete
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {secrets.length === 0 && (
+                <tr>
+                  <td className="px-4 py-4 text-gray-400 italic text-sm" colSpan={4}>
+                    no secrets yet
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
         </div>
       </section>
 

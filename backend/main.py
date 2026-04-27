@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 import limits
 import policies
+import secrets_crypto
 from auth import AuthResult, get_authenticated, get_workspace_id
 from cost import agent_cost_since, utc_day_start
 from db import ensure_agent, get_session
@@ -37,6 +38,7 @@ from models import (
     ThreadMessage,
     User,
     Workspace,
+    WorkspaceSecret,
 )
 from passwords import hash_password, verify_password
 
@@ -134,6 +136,16 @@ class InstanceHeartbeatIn(BaseModel):
     pid: Optional[int] = None
     sdk_version: Optional[str] = None
     started_at: Optional[datetime] = None
+
+
+# Secret names look like env vars: ASCII letter, then letters/digits/underscores.
+# Cap at 64 chars so the URL stays sane and the index is small.
+import re as _re
+SECRET_NAME_RE = _re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+
+
+class SecretSetIn(BaseModel):
+    value: str = Field(min_length=0, max_length=8192)
 
 
 def _serialize_api_key(k: ApiKey) -> dict[str, Any]:
@@ -468,6 +480,123 @@ def revoke_my_key(
         row.revoked_at = utcnow()
     session.flush()
     return _serialize_api_key(row)
+
+
+# ---------- /workspaces/me/secrets ---------- #
+
+def _serialize_secret_meta(s: WorkspaceSecret) -> dict[str, Any]:
+    """Metadata only — never exposes the encrypted blob or decrypted value."""
+    return {
+        "name": s.name,
+        "created_at": s.created_at.isoformat(),
+        "updated_at": s.updated_at.isoformat(),
+    }
+
+
+def _validate_secret_name(name: str) -> None:
+    if not SECRET_NAME_RE.match(name):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "secret name must start with a letter and contain only letters, "
+                "digits, or underscores (max 64 chars)"
+            ),
+        )
+
+
+def _require_secrets_available() -> None:
+    if not secrets_crypto.is_available():
+        raise HTTPException(
+            status_code=503,
+            detail="secrets store unavailable: LIGHTSEI_SECRETS_KEY is not configured",
+        )
+
+
+@app.get("/workspaces/me/secrets")
+def list_secrets(
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Names + timestamps only. Values are never included in this endpoint —
+    fetch each one individually via GET /workspaces/me/secrets/{name}."""
+    rows = session.execute(
+        select(WorkspaceSecret)
+        .where(WorkspaceSecret.workspace_id == workspace_id)
+        .order_by(WorkspaceSecret.name)
+    ).scalars().all()
+    return {"secrets": [_serialize_secret_meta(s) for s in rows]}
+
+
+@app.get("/workspaces/me/secrets/{name}")
+def get_secret(
+    name: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Returns the decrypted value. Anyone holding a workspace credential can
+    read every secret in that workspace, by design — secrets are *not*
+    a per-user permission boundary."""
+    _validate_secret_name(name)
+    _require_secrets_available()
+    row = session.get(WorkspaceSecret, (workspace_id, name))
+    if row is None:
+        raise HTTPException(status_code=404, detail="secret not found")
+    try:
+        value = secrets_crypto.decrypt(row.encrypted_value)
+    except Exception as e:
+        # An encrypted blob that can't be decrypted is almost always the master
+        # key changing without a rotation. Surface that clearly rather than
+        # returning gibberish.
+        raise HTTPException(
+            status_code=500,
+            detail=f"failed to decrypt secret (master key may have changed): {e}",
+        )
+    return {"name": row.name, "value": value}
+
+
+@app.put("/workspaces/me/secrets/{name}")
+def put_secret(
+    name: str,
+    body: SecretSetIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Idempotent create/update. The value is encrypted before being written
+    to the row — plaintext never reaches disk."""
+    _validate_secret_name(name)
+    _require_secrets_available()
+    now = utcnow()
+    blob = secrets_crypto.encrypt(body.value)
+    row = session.get(WorkspaceSecret, (workspace_id, name))
+    if row is None:
+        row = WorkspaceSecret(
+            workspace_id=workspace_id,
+            name=name,
+            encrypted_value=blob,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(row)
+    else:
+        row.encrypted_value = blob
+        row.updated_at = now
+    session.flush()
+    return _serialize_secret_meta(row)
+
+
+@app.delete("/workspaces/me/secrets/{name}")
+def delete_secret(
+    name: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, str]:
+    _validate_secret_name(name)
+    row = session.get(WorkspaceSecret, (workspace_id, name))
+    if row is None:
+        raise HTTPException(status_code=404, detail="secret not found")
+    session.delete(row)
+    session.flush()
+    return {"status": "ok"}
 
 
 # ---------- /auth ---------- #

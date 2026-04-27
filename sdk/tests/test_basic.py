@@ -9,17 +9,40 @@ import pytest
 
 import lightsei
 from lightsei._client import _client
+from lightsei._secrets import _reset_cache_for_tests as _reset_secret_cache
 
 
 @pytest.fixture(autouse=True)
 def _reset_client():
     yield
     _client._reset_for_tests()
+    _reset_secret_cache()
 
 
 @contextmanager
-def fake_backend(received: list[dict]) -> Iterator[str]:
+def fake_backend(
+    received: list[dict],
+    *,
+    secrets: dict[str, str] | None = None,
+) -> Iterator[str]:
+    secrets = secrets or {}
+
     class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            if self.path.startswith("/workspaces/me/secrets/"):
+                name = self.path.rsplit("/", 1)[-1]
+                if name in secrets:
+                    body = json.dumps({"name": name, "value": secrets[name]}).encode()
+                    self.send_response(200)
+                    self.send_header("content-type", "application/json")
+                    self.send_header("content-length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                else:
+                    self.send_error(404)
+            else:
+                self.send_error(404)
+
         def do_POST(self):  # noqa: N802
             length = int(self.headers.get("content-length", "0") or "0")
             body = self.rfile.read(length) if length else b""
@@ -145,6 +168,41 @@ def test_heartbeat_registers_on_init():
     assert h["pid"]
     assert h["hostname"]
     assert h["_path"] == "/agents/demo/instances/heartbeat"
+
+
+def test_get_secret_fetches_and_caches():
+    received: list[dict] = []
+    secrets = {"OPENAI_API_KEY": "sk-pretend"}
+    with fake_backend(received, secrets=secrets) as url:
+        lightsei.init(api_key="k", agent_name="demo", base_url=url)
+
+        # Block the heartbeat thread from racing with the test by tearing down
+        # the fake backend's view of "received" — heartbeats POST and won't
+        # show up in our GETs. So just exercise the secret fetch.
+        v1 = lightsei.get_secret("OPENAI_API_KEY")
+        assert v1 == "sk-pretend"
+
+        # Mutate the server-side value; cached call should not see it.
+        secrets["OPENAI_API_KEY"] = "sk-changed"
+        v2 = lightsei.get_secret("OPENAI_API_KEY")
+        assert v2 == "sk-pretend"
+
+        # ttl_s=0 forces a refetch.
+        v3 = lightsei.get_secret("OPENAI_API_KEY", ttl_s=0)
+        assert v3 == "sk-changed"
+
+
+def test_get_secret_404_raises_clear_error():
+    with fake_backend([]) as url:
+        lightsei.init(api_key="k", agent_name="demo", base_url=url)
+        with pytest.raises(lightsei.LightseiError) as exc:
+            lightsei.get_secret("MISSING")
+        assert "not set" in str(exc.value)
+
+
+def test_get_secret_before_init_raises():
+    with pytest.raises(lightsei.LightseiError):
+        lightsei.get_secret("ANYTHING")
 
 
 def test_policy_check_fails_open_when_offline():

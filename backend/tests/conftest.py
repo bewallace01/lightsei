@@ -85,6 +85,15 @@ if not _test_url:
     atexit.register(_teardown_owned_pg)
 os.environ["LIGHTSEI_DATABASE_URL"] = _test_url
 
+# Provide a deterministic master key so secrets_crypto is "available" in tests.
+# Override only when not already set so an opinionated test suite (e.g.
+# verifying the 503 fail-closed path) can choose its own value.
+os.environ.setdefault(
+    "LIGHTSEI_SECRETS_KEY",
+    # 32 bytes of zeroes, base64-encoded. Fine for tests; never use in prod.
+    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+)
+
 
 # Now safe to import backend modules.
 from fastapi.testclient import TestClient  # noqa: E402

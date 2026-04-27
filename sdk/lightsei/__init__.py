@@ -16,6 +16,7 @@ from ._chat import on_chat
 from ._client import _client
 from ._commands import on_command
 from ._context import get_run_id
+from ._secrets import get_secret as _impl_get_secret
 from ._track import track
 from .errors import LightseiError, LightseiPolicyError
 
@@ -29,6 +30,7 @@ __all__ = [
     "shutdown",
     "check_policy",
     "get_run_id",
+    "get_secret",
     "on_command",
     "on_chat",
     "LightseiError",
@@ -118,3 +120,16 @@ def flush(timeout: float = 2.0) -> None:
 
 def shutdown() -> None:
     _client.shutdown()
+
+
+def get_secret(name: str, *, ttl_s: Optional[float] = None) -> str:
+    """Fetch a workspace secret stored in the dashboard. Cached for 5 minutes
+    by default; pass ttl_s=0 to force a refetch.
+
+    Typical use:
+        OPENAI_API_KEY = lightsei.get_secret("OPENAI_API_KEY")
+
+    Raises LightseiError if the backend is unreachable or the secret is
+    unset — secrets are usually keys, so failing closed is the right default.
+    """
+    return _impl_get_secret(_client, name, ttl_s=ttl_s)

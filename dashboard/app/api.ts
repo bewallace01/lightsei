@@ -331,6 +331,38 @@ export async function revokeSession(sessionId: string): Promise<SessionSummary> 
   })) as SessionSummary;
 }
 
+// ----- Workspace secrets -----
+
+export type WorkspaceSecretMeta = {
+  name: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export async function fetchSecrets(): Promise<WorkspaceSecretMeta[]> {
+  const body = (await authedJson("/workspaces/me/secrets")) as {
+    secrets: WorkspaceSecretMeta[];
+  };
+  return body.secrets;
+}
+
+export async function setSecret(
+  name: string,
+  value: string,
+): Promise<WorkspaceSecretMeta> {
+  return (await authedJson(`/workspaces/me/secrets/${encodeURIComponent(name)}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ value }),
+  })) as WorkspaceSecretMeta;
+}
+
+export async function deleteSecret(name: string): Promise<void> {
+  await authedJson(`/workspaces/me/secrets/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+}
+
 // ----- Commands -----
 
 export type Command = {

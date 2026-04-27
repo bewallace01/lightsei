@@ -240,6 +240,24 @@ class AgentInstance(Base):
     )
 
 
+class WorkspaceSecret(Base):
+    __tablename__ = "workspace_secrets"
+
+    workspace_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    name: Mapped[str] = mapped_column(String, primary_key=True)
+    encrypted_value: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
 class Command(Base):
     __tablename__ = "commands"
 

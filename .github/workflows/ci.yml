@@ -31,6 +31,9 @@ jobs:
       # Tell conftest.py where the test DB lives so it doesn't try to spawn
       # one via docker (we don't have docker-in-docker in GH Actions runners).
       LIGHTSEI_TEST_DATABASE_URL: postgresql+psycopg://test:test@127.0.0.1:5432/test
+      # Deterministic master key for the secrets-store tests. NEVER use this
+      # value in production — it's 32 bytes of zeroes, base64-encoded.
+      LIGHTSEI_SECRETS_KEY: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
 
     steps:
       - uses: actions/checkout@v4
