@@ -4,7 +4,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 6.3: Backend latest-plan endpoint**
+> **Phase 6.4: Dashboard "Polaris" view**
 
 Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. See "Runtime decision (2026-04-27)" in MEMORY.md for the architecture call (single-host worker now, managed runtime in 5B). Phase 6 dogfoods Phase 5: Polaris is itself a Lightsei bot deployed via the PaaS we just built.
 
@@ -119,13 +119,9 @@ Phase 5A scope: single-host worker, in-process subprocess per bot, only safe for
 
 ### 6.2 Plan event schema + emit + change detection ✅ done 2026-04-27 (see Done Log)
 
-### 6.3 Backend: latest-plan endpoint (NOW)
+### 6.3 Backend: latest-plan endpoint ✅ done 2026-04-27 (see Done Log)
 
-- `GET /workspaces/me/agents/{name}/latest-plan` — returns the most recent `polaris.plan` event payload for any run of that agent. Workspace-scoped, 404 if no plan exists yet.
-- No new tables; reuse the `events` table with kind `polaris.plan`.
-- Guard against the agent not being a Polaris bot: just return whatever the latest `polaris.plan` event is, regardless of agent name. Caller decides what to render.
-
-### 6.4 Dashboard "Polaris" view
+### 6.4 Dashboard "Polaris" view (NOW)
 
 - New `/polaris` route (separate from the agent page so it's a top-level concept, not buried). If the workspace has no `polaris.plan` events yet, render a "deploy Polaris" empty state with a copy-pasteable command.
 - Latest plan rendered as: summary up top, next-actions as a numbered list, parking-lot promotions and drift in collapsible sections, doc-hash chip + last-generated-at footer.
@@ -185,6 +181,14 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-04-27 — Phase 6.3 Backend latest-plan endpoint
+- [x] `GET /agents/{agent_name}/latest-plan` returns the most recent `polaris.plan` event for the named agent in the calling workspace. 404 when no plan event has been emitted yet. The full event payload is wrapped in `{event_id, run_id, agent_name, timestamp, payload}`.
+- [x] **Plan-deviation note (URL).** The Phase 6 plan committed earlier listed this endpoint at `/workspaces/me/agents/{name}/latest-plan`. Switched to `/agents/{agent_name}/latest-plan` to match existing convention: `/agents/{name}` and `/agents/{name}/cost` and `/agents/{name}/commands` are all top-level routes scoped via the `get_workspace_id` dep, not via URL prefix. `/workspaces/me/...` is reserved for workspace-level resources (api-keys, secrets, deployments). Treating `latest-plan` as workspace-level would have been a one-off inconsistency.
+- [x] Reused the existing `events` table — no new migration. Query is `SELECT FROM events WHERE workspace_id = $1 AND agent_name = $2 AND kind = 'polaris.plan' ORDER BY timestamp DESC, id DESC LIMIT 1`. Composite index `idx_events_ws_agent_kind_ts` (added in Phase 4.2) covers it.
+- [x] **Endpoint is agent-name-agnostic by design.** It doesn't require the agent to be named "polaris" — any agent emitting `polaris.plan` events works. This matches the original phase plan's "caller decides what to render" intent and keeps the door open for "Polaris-style" agents under different names later.
+- [x] 7 new tests in `backend/tests/test_polaris.py` covering: 404 on no events, 200 with full payload, latest-wins ordering, ignoring non-polaris-plan kinds (run_started / tick_skipped don't count), cross-workspace isolation (alice can't see bob's plan even on the same agent name), works for arbitrary agent names, 401 unauthorized.
+- Verified: `pytest tests/test_polaris.py -v` → 7/7 pass. Full backend suite → 105/105 pass (was 98 before this change). Run-time: 57s.
 
 ### 2026-04-27 — Phase 6.2 Plan event schema + emit + change detection
 - [x] **Schema for `polaris.plan` events** (carried in the event payload, not a DB column — `events.payload` is JSONB):

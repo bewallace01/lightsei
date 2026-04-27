@@ -392,6 +392,42 @@ def patch_agent(
     return _serialize_agent(a)
 
 
+@app.get("/agents/{agent_name}/latest-plan")
+def get_agent_latest_plan(
+    agent_name: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Most recent `polaris.plan` event for the given agent, scoped
+    to the calling workspace. Returns 404 when the agent has no plan
+    events yet.
+
+    The endpoint does not require the agent's name to be `polaris` —
+    any agent emitting `polaris.plan` events is fair game. The caller
+    decides what to render. The dashboard's `/polaris` view currently
+    expects the agent to be `polaris`, but routing is flexible.
+    """
+    row = session.execute(
+        select(Event)
+        .where(
+            Event.workspace_id == workspace_id,
+            Event.agent_name == agent_name,
+            Event.kind == "polaris.plan",
+        )
+        .order_by(Event.timestamp.desc(), Event.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="no plan yet")
+    return {
+        "event_id": row.id,
+        "run_id": row.run_id,
+        "agent_name": row.agent_name,
+        "timestamp": row.timestamp.isoformat(),
+        "payload": row.payload or {},
+    }
+
+
 @app.post("/workspaces")
 def create_workspace(
     body: WorkspaceCreateIn, session: Session = Depends(get_session)
