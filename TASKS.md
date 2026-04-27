@@ -4,9 +4,9 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 6: TBD** — pick the next phase. Open candidates listed below.
+> **Phase 6.1: Polaris bot scaffold**
 
-Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. See "Runtime decision (2026-04-27)" in MEMORY.md for the architecture call (single-host worker now, managed runtime in 5B).
+Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. See "Runtime decision (2026-04-27)" in MEMORY.md for the architecture call (single-host worker now, managed runtime in 5B). Phase 6 dogfoods Phase 5: Polaris is itself a Lightsei bot deployed via the PaaS we just built.
 
 Phases 1-4 shipped 2026-04-25. Production-readiness items (DB backups, tests + CI, rate limits + body cap, bot instance identity, secrets store) shipped 2026-04-26. See Done Log.
 
@@ -107,13 +107,80 @@ Phase 5A scope: single-host worker, in-process subprocess per bot, only safe for
 
 ---
 
-## Phase 6+: TBD
+## Phase 6: Polaris (project orchestrator bot)
 
-Open candidates for the next phase, set after Phase 5 ships:
-- Phase 5B: cut single-host worker over to Fly Machines / Modal sandboxes (gates external users).
+**Demo at end of phase**: From a fresh terminal, `lightsei deploy ./polaris` (with this project's `MEMORY.md` + `TASKS.md` copied into the bundle) deploys the Polaris bot via the Phase 5 PaaS. Within ~5 minutes the dashboard's Polaris view renders a generated plan against this project's own docs, with at least 3 next-action recommendations, parking-lot evaluation, and any drift it spots between MEMORY.md and TASKS.md. Re-running the bot without changing the docs is idempotent (skips the LLM call via doc-hash check). The plan is "good enough" — sanity check is whether *I* would have picked the same next move.
+
+**Phase 6A scope: read-only.** Polaris produces visible plans and recommendations only. No PRs, no command dispatch to other agents, no external system writes. Layers 3-5 of the guardrail roadmap (output validation, behavioral rules, continuous eval) come in 6B+, with Polaris as the dogfood bot that forces each one into existence.
+
+**Why Polaris dogfoods itself.** Polaris is Lightsei's first own product running on Lightsei's own infra. Every roughness in Phase 5 (deploy UX, log streaming, secrets injection, heartbeat semantics) gets re-felt while we operate Polaris in production. That's the point.
+
+### 6.1 Polaris bot scaffold (NOW)
+
+- New `polaris/` directory at repo root with:
+  - `bot.py` — main loop: read MEMORY.md + TASKS.md from cwd, hash them, call Claude with the orchestrator prompt, emit a `polaris.plan` event, sleep, repeat.
+  - `system_prompt.md` — the orchestrator instructions Claude sees on every run.
+  - `requirements.txt` — `anthropic`, plus the local lightsei wheel reference (Phase 5 demo pattern).
+  - `lightsei-0.0.1-py3-none-any.whl` — bundled wheel, rebuilt from `./sdk` per deploy.
+- Configurable via env: `POLARIS_POLL_S` (default 3600), `POLARIS_MODEL` (default `claude-opus-4-7`), `POLARIS_DOCS_DIR` (default `.`).
+- Workspace secrets needed: `LIGHTSEI_API_KEY` (already convention from Phase 5), `ANTHROPIC_API_KEY`.
+
+### 6.2 Plan event schema + emit + change detection
+
+- Define payload schema for `polaris.plan` events:
+  ```
+  {
+    "summary": str,                          // 1-2 sentence state of the project
+    "next_actions": [{task, why, blocked_by}],  // 3-5 specific, actionable items
+    "parking_lot_promotions": [{item, why}],     // items ready to promote
+    "drift": [{between, observation}],           // contradictions between MEMORY/TASKS/code
+    "doc_hashes": {"memory_md": sha, "tasks_md": sha},
+    "model": str,
+    "tokens_in": int,
+    "tokens_out": int,
+  }
+  ```
+- Hash MEMORY.md + TASKS.md before each tick. If both unchanged since last `polaris.plan`, skip the LLM call and emit a lightweight `polaris.tick_skipped` event so the dashboard can show "no docs change since 11:23 PM, didn't burn tokens."
+- Use `lightsei.emit()` so the event lands on the active run and gets ingested through the existing pipeline.
+
+### 6.3 Backend: latest-plan endpoint
+
+- `GET /workspaces/me/agents/{name}/latest-plan` — returns the most recent `polaris.plan` event payload for any run of that agent. Workspace-scoped, 404 if no plan exists yet.
+- No new tables; reuse the `events` table with kind `polaris.plan`.
+- Guard against the agent not being a Polaris bot: just return whatever the latest `polaris.plan` event is, regardless of agent name. Caller decides what to render.
+
+### 6.4 Dashboard "Polaris" view
+
+- New `/polaris` route (separate from the agent page so it's a top-level concept, not buried). If the workspace has no `polaris.plan` events yet, render a "deploy Polaris" empty state with a copy-pasteable command.
+- Latest plan rendered as: summary up top, next-actions as a numbered list, parking-lot promotions and drift in collapsible sections, doc-hash chip + last-generated-at footer.
+- Plan history: a sidebar listing previous plans by timestamp, click to view a frozen version.
+- Polls every 30s.
+
+### 6.5 System prompt iteration
+
+- Draft the orchestrator system prompt in `polaris/system_prompt.md`. Hand-test against this very project's `MEMORY.md` + `TASKS.md` outside the bot loop (just hit the Anthropic API directly with the prompt) until the structured JSON output is stable and the recommendations match the user's intuition for what's next.
+- Pin temperature low (~0.2). Use Claude's structured-output / JSON mode if the SDK exposes it cleanly; otherwise add a strict format example and a parse-and-retry loop in `bot.py`.
+- Capture one representative plan and embed it in `polaris/README.md` as the canonical "this is what Polaris produces" example.
+
+### 6.6 Phase 6 demo
+
+- Build the wheel into the bundle (Phase 5 demo pattern), copy this project's MEMORY.md + TASKS.md into `polaris/`, set `ANTHROPIC_API_KEY` and `LIGHTSEI_API_KEY` as workspace secrets, deploy via `lightsei deploy ./polaris --agent polaris`.
+- Wait for first plan generation. Capture a screenshot of `/polaris` rendering the plan.
+- Sanity-check: does the plan's `next_actions[0]` match what *I* would have picked? If yes, demo passes. If no, iterate the system prompt (back to 6.5) until it does.
+- Done Log: include the screenshot + the verbatim plan text + a short note on whether Polaris's recommendation matched user intuition.
+
+---
+
+## Phase 7+: TBD
+
+Open candidates for after Polaris ships. The Polaris-driven priorities (6B onwards) are the natural next thing; the others are still on the table.
+
+- **Polaris 6B: act, don't just plan.** Layer 3 (output validation: structured-output schema, JSON validity, no-PII), then layer 4 (behavioral rules: loop detection, runaway-token guards), then optional command dispatch — Polaris uses `lightsei.send_command()` to drive specifically-configured executor agents.
+- **Polaris 6C: continuous eval (layer 5).** Judge-LLM scores Polaris's past plans against actual outcomes. Closes the loop on whether the orchestrator is actually any good.
+- **Phase 5B**: cut single-host worker over to Fly Machines / Modal sandboxes (gates external users).
 - GitHub OAuth + push-to-deploy.
 - Buildpacks / Dockerfile support beyond the fixed Python runtime.
-- N replicas + cron scheduling.
+- N replicas + cron scheduling natively in the worker (Polaris currently does its own sleep loop; a real cron primitive would be cleaner).
 
 ---
 
