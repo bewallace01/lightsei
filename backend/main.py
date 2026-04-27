@@ -34,6 +34,7 @@ from models import (
     Command,
     Deployment,
     DeploymentBlob,
+    DeploymentLog,
     Event,
     Run,
     Session as SessionRow,
@@ -43,6 +44,7 @@ from models import (
     Workspace,
     WorkspaceSecret,
 )
+from worker_auth import get_worker
 from passwords import hash_password, verify_password
 
 SESSION_TTL = timedelta(days=30)
@@ -50,9 +52,15 @@ COMMAND_TTL = timedelta(hours=24)
 # An instance is "active" if we heard from it within this window. Tuned for a
 # default 30s SDK heartbeat with two missed beats of slack.
 INSTANCE_ACTIVE_WINDOW = timedelta(seconds=90)
+# A worker that hasn't heartbeated for this long loses its claim — any other
+# worker can re-claim the deployment. Tuned for a 30s worker heartbeat.
+WORKER_CLAIM_TTL = timedelta(seconds=120)
 # Max upload bytes for a deployment zip. Mirrors limits.MAX_UPLOAD_BYTES so
 # the per-route check matches the middleware's cap.
 MAX_DEPLOYMENT_BLOB_BYTES = 10 * 1024 * 1024
+# A single deployment keeps the most recent N log lines on the server.
+# Older lines are pruned on insert.
+MAX_DEPLOYMENT_LOG_LINES = 1000
 
 
 def utcnow() -> datetime:
@@ -746,6 +754,222 @@ def delete_deployment(
                 session.delete(blob)
     session.flush()
     return {"status": "ok"}
+
+
+# ---------- /worker/* (Phase 5.2) ---------- #
+#
+# Worker-facing surface. All endpoints require a bearer matching
+# LIGHTSEI_WORKER_TOKEN — see backend/worker_auth.py for the threat model.
+# The worker is treated as a trusted system component; a stolen token grants
+# cross-tenant access.
+
+
+class WorkerStatusUpdateIn(BaseModel):
+    status: str = Field(min_length=1)
+    error: Optional[str] = None
+
+
+class WorkerLogLineIn(BaseModel):
+    ts: Optional[datetime] = None
+    stream: str = Field(default="stdout")
+    line: str = Field(default="")
+
+
+class WorkerLogAppendIn(BaseModel):
+    lines: list[WorkerLogLineIn] = Field(default_factory=list)
+
+
+@app.post("/worker/deployments/claim")
+def worker_claim_deployment(
+    worker_id: str,
+    session: Session = Depends(get_session),
+    _: None = Depends(get_worker),
+) -> dict[str, Any]:
+    """Atomically grab the oldest queued (or stale-claimed) deployment whose
+    user wants it running. SKIP LOCKED matches the pattern used for commands
+    and chat turns.
+
+    "Stale-claimed" means another worker took it but hasn't heartbeated within
+    WORKER_CLAIM_TTL — almost certainly that worker died. Re-claiming is safe
+    because the dead worker can't possibly be running a bot anymore.
+    """
+    now = utcnow()
+    stale_cutoff = now - WORKER_CLAIM_TTL
+    row = session.execute(
+        text(
+            """
+            SELECT id FROM deployments
+            WHERE desired_state = 'running'
+              AND status IN ('queued', 'building', 'running')
+              AND (claimed_by IS NULL OR heartbeat_at < :stale_cutoff)
+            ORDER BY created_at ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+            """
+        ),
+        {"stale_cutoff": stale_cutoff},
+    ).first()
+    if row is None:
+        return {"deployment": None}
+    dep = session.get(Deployment, row.id)
+    if dep is None:
+        return {"deployment": None}
+    dep.claimed_by = worker_id
+    dep.claimed_at = now
+    dep.heartbeat_at = now
+    if dep.status == "queued":
+        dep.status = "building"
+    dep.updated_at = now
+    session.flush()
+    return {
+        "deployment": _serialize_deployment(dep),
+        "workspace_id": dep.workspace_id,
+    }
+
+
+@app.post("/worker/deployments/{deployment_id}/status")
+def worker_update_status(
+    deployment_id: str,
+    body: WorkerStatusUpdateIn,
+    session: Session = Depends(get_session),
+    _: None = Depends(get_worker),
+) -> dict[str, Any]:
+    """Worker reports a status transition. Sets started_at/stopped_at as
+    appropriate. Invalid transitions are accepted (server doesn't know what
+    the worker is doing) but the status string is checked against the known
+    enum to catch typos."""
+    valid = {"queued", "building", "running", "stopped", "failed"}
+    if body.status not in valid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unknown status {body.status!r}; must be one of {sorted(valid)}",
+        )
+    dep = session.get(Deployment, deployment_id)
+    if dep is None:
+        raise HTTPException(status_code=404, detail="deployment not found")
+    now = utcnow()
+    dep.status = body.status
+    dep.error = body.error
+    dep.heartbeat_at = now
+    if body.status == "running" and dep.started_at is None:
+        dep.started_at = now
+    if body.status in ("stopped", "failed"):
+        dep.stopped_at = now
+    dep.updated_at = now
+    session.flush()
+    return _serialize_deployment(dep)
+
+
+@app.post("/worker/deployments/{deployment_id}/heartbeat")
+def worker_heartbeat(
+    deployment_id: str,
+    session: Session = Depends(get_session),
+    _: None = Depends(get_worker),
+) -> dict[str, str]:
+    dep = session.get(Deployment, deployment_id)
+    if dep is None:
+        raise HTTPException(status_code=404, detail="deployment not found")
+    dep.heartbeat_at = utcnow()
+    session.flush()
+    return {"status": "ok"}
+
+
+@app.post("/worker/deployments/{deployment_id}/logs")
+def worker_append_logs(
+    deployment_id: str,
+    body: WorkerLogAppendIn,
+    session: Session = Depends(get_session),
+    _: None = Depends(get_worker),
+) -> dict[str, int]:
+    """Append log lines. Bounded to MAX_DEPLOYMENT_LOG_LINES per deployment
+    by deleting the oldest rows after each insert."""
+    dep = session.get(Deployment, deployment_id)
+    if dep is None:
+        raise HTTPException(status_code=404, detail="deployment not found")
+    if not body.lines:
+        return {"appended": 0}
+    now = utcnow()
+    rows = [
+        DeploymentLog(
+            deployment_id=deployment_id,
+            ts=line.ts or now,
+            stream=line.stream,
+            line=line.line,
+        )
+        for line in body.lines
+    ]
+    session.add_all(rows)
+    session.flush()
+    # Prune older rows beyond the cap. Keep this cheap: count + DELETE.
+    count = session.execute(
+        select(text("COUNT(*)")).select_from(DeploymentLog)
+        .where(DeploymentLog.deployment_id == deployment_id)
+    ).scalar_one()
+    overflow = count - MAX_DEPLOYMENT_LOG_LINES
+    if overflow > 0:
+        session.execute(
+            text(
+                """
+                DELETE FROM deployment_logs
+                WHERE id IN (
+                  SELECT id FROM deployment_logs
+                  WHERE deployment_id = :dep
+                  ORDER BY id ASC LIMIT :n
+                )
+                """
+            ),
+            {"dep": deployment_id, "n": overflow},
+        )
+    return {"appended": len(rows)}
+
+
+@app.get("/worker/blobs/{blob_id}")
+def worker_get_blob(
+    blob_id: str,
+    session: Session = Depends(get_session),
+    _: None = Depends(get_worker),
+):
+    """Return the raw bytes of a deployment blob (the zipped bot directory)."""
+    blob = session.get(DeploymentBlob, blob_id)
+    if blob is None:
+        raise HTTPException(status_code=404, detail="blob not found")
+    from fastapi.responses import Response as RawResponse
+    return RawResponse(
+        content=blob.data,
+        media_type="application/octet-stream",
+        headers={
+            "x-lightsei-blob-sha256": blob.sha256,
+            "x-lightsei-blob-size": str(blob.size_bytes),
+        },
+    )
+
+
+@app.get("/worker/workspaces/{workspace_id}/secrets")
+def worker_list_workspace_secrets(
+    workspace_id: str,
+    session: Session = Depends(get_session),
+    _: None = Depends(get_worker),
+) -> dict[str, Any]:
+    """Decrypted secrets for a workspace, indexed by name. The worker
+    injects these as env vars when spawning a bot."""
+    if not secrets_crypto.is_available():
+        raise HTTPException(
+            status_code=503,
+            detail="secrets store unavailable: LIGHTSEI_SECRETS_KEY is not configured",
+        )
+    rows = session.execute(
+        select(WorkspaceSecret).where(WorkspaceSecret.workspace_id == workspace_id)
+    ).scalars().all()
+    out: dict[str, str] = {}
+    for s in rows:
+        try:
+            out[s.name] = secrets_crypto.decrypt(s.encrypted_value)
+        except Exception:
+            # A single corrupt row should not poison the rest of the dict.
+            # The user will see the bot fail to read this secret and can
+            # re-set it from the dashboard.
+            continue
+    return {"secrets": out}
 
 
 # ---------- /auth ---------- #

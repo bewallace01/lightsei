@@ -93,6 +93,8 @@ os.environ.setdefault(
     # 32 bytes of zeroes, base64-encoded. Fine for tests; never use in prod.
     "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
 )
+# Same idea for the worker shared secret.
+os.environ.setdefault("LIGHTSEI_WORKER_TOKEN", "test-worker-token")
 
 
 # Now safe to import backend modules.

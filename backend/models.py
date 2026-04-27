@@ -307,6 +307,22 @@ class Deployment(Base):
     )
 
 
+class DeploymentLog(Base):
+    __tablename__ = "deployment_logs"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    deployment_id: Mapped[str] = mapped_column(
+        String, ForeignKey("deployments.id", ondelete="CASCADE"), nullable=False
+    )
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    stream: Mapped[str] = mapped_column(String, nullable=False)
+    line: Mapped[str] = mapped_column(Text, nullable=False)
+
+    __table_args__ = (
+        Index("idx_deployment_logs_dep", "deployment_id", "id"),
+    )
+
+
 class WorkspaceSecret(Base):
     __tablename__ = "workspace_secrets"
 
