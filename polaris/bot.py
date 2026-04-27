@@ -1,22 +1,25 @@
 """Polaris — project orchestrator bot.
 
 Reads a project's MEMORY.md and TASKS.md from the bundle root on every
-tick, calls Claude with the orchestrator system prompt, parses the
-structured plan, and emits it as a `polaris.plan` event so the
-dashboard can render it.
+tick, calls Claude via a forced `submit_plan` tool call (strict schema
+guarantees the structured output), and emits the result as a
+`polaris.plan` event so the dashboard can render it.
 
 Phase 6A scope: read-only. No PRs, no command dispatch. Polaris produces
 visible recommendations only. See TASKS.md "Phase 6" for the demo
 criterion and the 6B+ roadmap.
 
-Phase 6.2 added structured-plan schema + hash-skip change detection:
-the bot remembers the last successfully-emitted doc hashes in process
-memory and skips the LLM call when both files are byte-identical. A
-fresh deploy resets that state, so re-deploying always regenerates a
-plan even on unchanged docs (intentional — confirms the new bundle's
-prompt still produces good output).
+Phase 6.5 switched the structured-output mechanism from "ask for JSON
+in the prompt and parse" to Anthropic tool use with `strict: true` and
+`tool_choice` forced to `submit_plan`. The model now returns a typed
+input dict directly — no JSON parser, no parse-error retry path. Also
+opted into adaptive thinking with effort=high since orchestrator
+planning is intelligence-sensitive (skill guidance for 4.7).
 
-Real orchestrator prompt iteration lands in 6.5.
+Phase 6.2 added in-process change detection: the bot remembers the
+last successfully-emitted doc hashes and skips the LLM call when both
+files are byte-identical. A fresh deploy resets that state, so
+re-deploying always regenerates a plan even on unchanged docs.
 
 Env (defaults in parens):
   POLARIS_POLL_S     seconds between ticks (3600)
@@ -65,7 +68,116 @@ def _read_docs() -> dict:
     }
 
 
+SUBMIT_PLAN_TOOL = {
+    "name": "submit_plan",
+    "description": (
+        "Submit the orchestrator plan for the project. Call this tool exactly "
+        "once with a structured plan. next_actions must contain 3 to 5 items; "
+        "lead with the current NOW task and fill remaining slots with the "
+        "obvious follow-ons in the active phase."
+    ),
+    "strict": True,
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "summary": {
+                "type": "string",
+                "description": (
+                    "1-2 sentences on the current project state. Lead with "
+                    "the active phase number and what just shipped."
+                ),
+            },
+            "next_actions": {
+                "type": "array",
+                "description": "3 to 5 next actions, ordered by priority.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "task": {
+                            "type": "string",
+                            "description": (
+                                "The action. Cite phase / task numbers and "
+                                "file paths when applicable."
+                            ),
+                        },
+                        "why": {
+                            "type": "string",
+                            "description": (
+                                "1-2 sentences on why this is the right next "
+                                "step given the current state."
+                            ),
+                        },
+                        "blocked_by": {
+                            "anyOf": [{"type": "string"}, {"type": "null"}],
+                            "description": (
+                                "What blocks this action (a missing secret, "
+                                "an upstream dependency, a decision), or "
+                                "null if unblocked."
+                            ),
+                        },
+                    },
+                    "required": ["task", "why", "blocked_by"],
+                    "additionalProperties": False,
+                },
+            },
+            "parking_lot_promotions": {
+                "type": "array",
+                "description": (
+                    "Parking-lot items that look ready to promote given the "
+                    "current state. Empty list is fine if nothing stands out."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "item": {"type": "string"},
+                        "why": {"type": "string"},
+                    },
+                    "required": ["item", "why"],
+                    "additionalProperties": False,
+                },
+            },
+            "drift": {
+                "type": "array",
+                "description": (
+                    "Real contradictions between MEMORY.md, TASKS.md, and "
+                    "the Done Log. Stylistic differences don't count. "
+                    "Empty list is fine."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "between": {
+                            "type": "string",
+                            "description": (
+                                "Which files / sections the contradiction is "
+                                "between, e.g. 'MEMORY.md vs TASKS.md'."
+                            ),
+                        },
+                        "observation": {"type": "string"},
+                    },
+                    "required": ["between", "observation"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": [
+            "summary",
+            "next_actions",
+            "parking_lot_promotions",
+            "drift",
+        ],
+        "additionalProperties": False,
+    },
+}
+
+
 def _call_claude(system_prompt: str, docs: dict) -> dict:
+    """Calls Claude with a forced submit_plan tool call.
+
+    `strict: true` + `tool_choice` to a specific tool guarantees the
+    response contains exactly one tool_use block whose `input` matches
+    the schema. No JSON parsing, no retry-on-parse-error path.
+    """
     import anthropic
 
     user_msg = (
@@ -73,47 +185,42 @@ def _call_claude(system_prompt: str, docs: dict) -> dict:
         f"<TASKS.md>\n{docs['tasks_md']}\n</TASKS.md>"
     )
     client = anthropic.Anthropic()
+    # Note: adaptive thinking is incompatible with `tool_choice` forcing a
+    # specific tool (Opus 4.7 returns 400). For Polaris we want the
+    # guaranteed schema match more than the visible reasoning, so we drop
+    # thinking and rely on effort=high. If we ever want both, switch to
+    # `tool_choice: {"type": "any"}` (still forces a tool call, but allows
+    # thinking) — works because `submit_plan` is the only tool defined.
     resp = client.messages.create(
         model=MODEL,
-        max_tokens=2000,
-        temperature=0.2,
+        max_tokens=4000,
+        output_config={"effort": "high"},
         system=system_prompt,
+        tools=[SUBMIT_PLAN_TOOL],
+        tool_choice={"type": "tool", "name": "submit_plan"},
         messages=[{"role": "user", "content": user_msg}],
     )
-    text = resp.content[0].text if resp.content else ""
+
+    tool_block = next(
+        (b for b in resp.content if b.type == "tool_use"
+         and b.name == "submit_plan"),
+        None,
+    )
+    if tool_block is None:
+        # Forced tool_choice should make this unreachable, but guard anyway:
+        # surface the stop_reason so it lands in logs / dashboard.
+        raise RuntimeError(
+            f"no submit_plan tool_use in response (stop_reason="
+            f"{resp.stop_reason})"
+        )
+
     return {
-        "text": text,
-        "model": MODEL,
+        "input": tool_block.input,
+        "model": resp.model,
         "tokens_in": resp.usage.input_tokens,
         "tokens_out": resp.usage.output_tokens,
+        "stop_reason": resp.stop_reason,
     }
-
-
-def _parse_plan(text: str) -> tuple[Optional[dict], Optional[str]]:
-    """Parse Claude's JSON response into structured plan fields.
-
-    Returns (parsed, parse_error). Exactly one is None.
-    Tolerates the common case where Claude wraps the JSON in a
-    ```json fence despite being told not to.
-    """
-    candidate = text.strip()
-    if candidate.startswith("```"):
-        # strip leading fence with optional language tag
-        candidate = candidate.split("\n", 1)[1] if "\n" in candidate else ""
-        if candidate.endswith("```"):
-            candidate = candidate[: -len("```")].rstrip()
-    try:
-        data = json.loads(candidate)
-    except json.JSONDecodeError as e:
-        return None, f"json decode: {e}"
-    if not isinstance(data, dict):
-        return None, "top-level value is not a JSON object"
-    return {
-        "summary": data.get("summary"),
-        "next_actions": data.get("next_actions") or [],
-        "parking_lot_promotions": data.get("parking_lot_promotions") or [],
-        "drift": data.get("drift") or [],
-    }, None
 
 
 @lightsei.track
@@ -142,35 +249,33 @@ def tick() -> None:
 
     system_prompt = SYSTEM_PROMPT_PATH.read_text()
     result = _call_claude(system_prompt, docs)
-    parsed, parse_error = _parse_plan(result["text"])
+    plan = result["input"]
 
     payload = {
-        "text": result["text"],
+        # Pretty-print the structured input so the dashboard's "raw response"
+        # expander has something readable. The structured fields below are
+        # the source of truth for rendering.
+        "text": json.dumps(plan, indent=2),
         "doc_hashes": docs["hashes"],
         "model": result["model"],
         "tokens_in": result["tokens_in"],
         "tokens_out": result["tokens_out"],
+        "summary": plan["summary"],
+        "next_actions": plan["next_actions"],
+        "parking_lot_promotions": plan["parking_lot_promotions"],
+        "drift": plan["drift"],
     }
-    if parsed is not None:
-        payload.update(parsed)
-        print(
-            f"plan: {len(parsed['next_actions'])} actions, "
-            f"{len(parsed['parking_lot_promotions'])} promotions, "
-            f"{len(parsed['drift'])} drift items "
-            f"({result['tokens_in']} in / {result['tokens_out']} out)",
-            flush=True,
-        )
-    else:
-        payload["parse_error"] = parse_error
-        print(f"plan parse failed: {parse_error}", flush=True)
+
+    print(
+        f"plan: {len(plan['next_actions'])} actions, "
+        f"{len(plan['parking_lot_promotions'])} promotions, "
+        f"{len(plan['drift'])} drift items "
+        f"({result['tokens_in']} in / {result['tokens_out']} out)",
+        flush=True,
+    )
 
     lightsei.emit("polaris.plan", payload)
-
-    # Update the last-seen hashes only when we got a clean parse, so a
-    # transient parse failure retries on the next tick instead of silently
-    # waiting for the docs to change.
-    if parsed is not None:
-        _last_hashes = docs["hashes"]
+    _last_hashes = docs["hashes"]
 
 
 def main() -> None:

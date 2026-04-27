@@ -4,7 +4,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 6.5: System prompt iteration**
+> **Phase 6.6: Phase 6 demo**
 
 Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. See "Runtime decision (2026-04-27)" in MEMORY.md for the architecture call (single-host worker now, managed runtime in 5B). Phase 6 dogfoods Phase 5: Polaris is itself a Lightsei bot deployed via the PaaS we just built.
 
@@ -123,13 +123,9 @@ Phase 5A scope: single-host worker, in-process subprocess per bot, only safe for
 
 ### 6.4 Dashboard "Polaris" view ✅ done 2026-04-27 (see Done Log)
 
-### 6.5 System prompt iteration (NOW)
+### 6.5 System prompt iteration ✅ done 2026-04-27 (see Done Log)
 
-- Draft the orchestrator system prompt in `polaris/system_prompt.md`. Hand-test against this very project's `MEMORY.md` + `TASKS.md` outside the bot loop (just hit the Anthropic API directly with the prompt) until the structured JSON output is stable and the recommendations match the user's intuition for what's next.
-- Pin temperature low (~0.2). Use Claude's structured-output / JSON mode if the SDK exposes it cleanly; otherwise add a strict format example and a parse-and-retry loop in `bot.py`.
-- Capture one representative plan and embed it in `polaris/README.md` as the canonical "this is what Polaris produces" example.
-
-### 6.6 Phase 6 demo
+### 6.6 Phase 6 demo (NOW)
 
 - Build the wheel into the bundle (Phase 5 demo pattern), copy this project's MEMORY.md + TASKS.md into `polaris/`, set `ANTHROPIC_API_KEY` and `LIGHTSEI_API_KEY` as workspace secrets, deploy via `lightsei deploy ./polaris --agent polaris`.
 - Wait for first plan generation. Capture a screenshot of `/polaris` rendering the plan.
@@ -176,6 +172,20 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-04-27 — Phase 6.5 System prompt iteration
+- [x] **Switched the structured-output mechanism from "ask for JSON, parse text" to Anthropic strict tool use.** `polaris/bot.py` now defines a single `submit_plan` tool with `strict: true` and a JSON-Schema `input_schema` covering `summary`, `next_actions[task, why, blocked_by]`, `parking_lot_promotions[item, why]`, and `drift[between, observation]`. `tool_choice` forces the model to call exactly that tool, so the response is guaranteed to contain a `tool_use` block whose `input` matches the schema verbatim. The old `_parse_plan` helper is deleted; the bot reads `tool_block.input` directly into the event payload.
+- [x] **Plan-deviation note: parse-and-retry loop dropped.** The 6.5 task description listed a parse-and-retry loop as the fallback path "if Claude's structured-output / JSON mode isn't cleanly exposed by the SDK." The Anthropic SDK does expose strict tool calling cleanly, so we took that path and dropped the retry loop. The Phase 6.2 tolerant `_parse_plan` parser was load-bearing only under the old text-output strategy and is now gone.
+- [x] **Plan-deviation note: temperature dropped (forced by Opus 4.7).** The 6.5 task description said to "pin temperature low (~0.2)." Opus 4.7 returns a 400 if `temperature` is sent — sampling parameters are removed in that model. Replaced with `output_config={"effort": "high"}`, which the Claude API skill's Opus 4.7 guidance recommends as the minimum for intelligence-sensitive work.
+- [x] **Constraint surfaced and worked around: forced `tool_choice` is incompatible with thinking on Opus 4.7.** First call attempt with both `thinking: {type: "adaptive"}` and `tool_choice: {type: "tool", name: "submit_plan"}` returned `400 invalid_request_error: "Thinking may not be enabled when tool_choice forces tool use."`. Dropped thinking; kept `effort: "high"` and the forced tool call. Comment in `bot.py:_call_claude` notes the alternative (`tool_choice: {type: "any"}` allows thinking, would still effectively force `submit_plan` since it is the only tool defined) for if we want both later.
+- [x] **System prompt rewritten** (`polaris/system_prompt.md`). Role-focused now that the JSON shape is encoded in the tool's `input_schema`. Two iterations against this project's real docs:
+  - **Pass 1** (5 next-actions, 1181 output tokens): correctly identified Phase 6.5 as `next_actions[0]`. Issues: peppered with em dashes (project preference is none), included a Phase 7+ "pick next phase" recommendation that was outside the active phase.
+  - **Pass 2** (4 next-actions, 829 output tokens): no em dashes, all four items inside Phase 6, sharper phrasing. `next_actions[0]` still correctly identified Phase 6.5. Items 2 and 3 echoed the original 6.5 task wording (parse-and-retry, temperature 0.2) which is faithful to TASKS.md as written and will resolve once this Done Log entry lands.
+- [x] **System prompt now bans em dashes explicitly** (project preference from CLAUDE.md, which Polaris does not currently see). If we later have Polaris read CLAUDE.md too, this rule can move.
+- [x] **System prompt instructs the model to trust the Done Log over older task descriptions when they conflict.** Surfaced from pass 1, where the model treated the 6.5 task wording as more authoritative than the 6.2-and-later Done Log.
+- [x] **Canonical plan captured in `polaris/README.md`** along with how Polaris works, how to deploy, and a cost note (~31K in / ~830 out per plan, ~$0.18 each at hourly default; hash-skip keeps steady-state cost near zero when docs are stable).
+- Cost of the 6.5 iteration loop: 2 calls × ~$0.18 = ~$0.36 against `claude-opus-4-7` at `effort: "high"`. Iteration script lives at `/tmp/lightsei-demo/iterate_polaris.py` for future prompt tweaks (not committed; throwaway tooling).
+- Demo criterion check: pass 2's `next_actions[0]` ("Phase 6.5: draft polaris/system_prompt.md and hand-test it...") matches what I would have picked. Phase 6.5 closed.
 
 ### 2026-04-27 — Phase 6.4 Dashboard "Polaris" view
 - [x] **New `/polaris` route** at `dashboard/app/polaris/page.tsx`. Top-level concept, separate from agent pages (which still serve as the per-agent control plane). Linked from the global Header next to "account" so it's discoverable from anywhere in the dashboard.
