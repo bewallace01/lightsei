@@ -232,6 +232,7 @@ class DeploymentSupervisor:
             self._log_system("pip install -r requirements.txt")
             cp = subprocess.run(
                 [str(python), "-m", "pip", "install", "-q", "-r", str(req)],
+                cwd=str(bot_dir),
                 capture_output=True, text=True, timeout=PIP_TIMEOUT_S,
             )
             if cp.returncode != 0:
