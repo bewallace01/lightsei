@@ -4,9 +4,9 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 5.1: deployments schema + zip upload**
+> **Phase 6: TBD** — pick the next phase. Open candidates listed below.
 
-Phase 5 is committed: PaaS-for-agents. See "Runtime decision (2026-04-27)" in MEMORY.md for the architecture call (build single-host worker now, swap for managed runtime in 5B).
+Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. See "Runtime decision (2026-04-27)" in MEMORY.md for the architecture call (single-host worker now, managed runtime in 5B).
 
 Phases 1-4 shipped 2026-04-25. Production-readiness items (DB backups, tests + CI, rate limits + body cap, bot instance identity, secrets store) shipped 2026-04-26. See Done Log.
 
@@ -94,31 +94,16 @@ That's it. No styling, no auth, no extras. If the demo works, Phase 1 is done.
 
 Phase 5A scope: single-host worker, in-process subprocess per bot, only safe for *our own* bots. Per the Runtime decision in MEMORY.md, isolation comes in 5B (Fly Machines / Modal).
 
-### 5.1 Deployments schema + zip upload (NOW)
+### 5.1 Deployments schema + zip upload ✅ done 2026-04-26 (see Done Log)
+### 5.2 Worker-facing endpoints ✅ done 2026-04-26 (see Done Log)
+### 5.3 Worker process ✅ done 2026-04-26 (see Done Log)
+### 5.4 Streaming logs ✅ done 2026-04-26 (see Done Log)
+### 5.5 SDK CLI: `lightsei deploy` ✅ done 2026-04-26 (see Done Log)
+### 5.6 Dashboard "Deployments" tab ✅ done 2026-04-26 (see Done Log)
 
-- Migration creating `deployments` (id, workspace_id, agent_name, status, desired_state, source_blob_id, error, claimed_by, claimed_at, heartbeat_at, started_at, stopped_at, created_at, updated_at) and `deployment_blobs` (id, workspace_id, size_bytes, sha256, data BYTEA, created_at).
-- SQLAlchemy models.
-- Bump body-size middleware to allow 10 MB on `multipart/form-data` requests (JSON stays at 1 MB).
-- Endpoints: `POST /workspaces/me/deployments` (multipart upload), `GET /workspaces/me/deployments`, `GET /workspaces/me/deployments/{id}`, `DELETE /workspaces/me/deployments/{id}`.
-- Tests: roundtrip upload, list scoped to workspace, blob > cap → 413, cross-workspace 404.
+### 5.7 Phase 5 demo ✅ done 2026-04-26 (see Done Log)
 
-### 5.2 Worker-facing endpoints
-Atomic claim (SKIP LOCKED), status updates, heartbeat-from-worker, log append. Backend only at this stage; no worker process yet.
-
-### 5.3 Worker process
-Standalone `worker/runner.py` that polls `/worker/deployments/claim`, downloads the blob, builds a venv, spawns `python bot.py` with workspace secrets injected, manages lifecycle, posts logs. Lifts the shape from `worker/run_local.py`.
-
-### 5.4 Streaming logs
-Worker tees stdout/stderr to the backend; dashboard polls a tail endpoint with auto-scroll. Cap at last 1000 lines per deployment for v1.
-
-### 5.5 SDK CLI: `lightsei deploy`
-Zips a directory (excluding `__pycache__`, `.venv`, `node_modules`, `.git`), POSTs to the backend, polls until `running` or fails fast.
-
-### 5.6 Dashboard "Deployments" tab
-On the agent page, a new tab listing deployments with status pill, started_at, stop/redeploy buttons, and a logs viewer.
-
-### 5.7 Phase 5 demo
-End-to-end deploy of a real bot through the CLI, with the worker running on the user's machine pointed at prod. Screenshots in the Done Log.
+**Phase 5 complete 2026-04-26.**
 
 ---
 
@@ -157,6 +142,48 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-04-26 — Phase 5 PaaS for agents COMPLETE 🎯
+Demo criterion (from MEMORY.md / Phase 5 header): *"From a fresh terminal, `lightsei deploy ./my-bot` zips the directory, uploads it, and a worker process spawns the bot. Within a minute the dashboard shows the deployment as `running`, the bot's instance heartbeats are visible, and logs stream into a Deployments tab. Stop and redeploy from the dashboard work end-to-end. Nothing about the user's bot code changes between local and hosted runs."* — passed.
+
+Demo run pointed at prod (`https://api.lightsei.com`, real Postgres, real workspace `Bailey's Agent Monitor`).
+
+- [x] **Bundle**: `examples/demo_deploy/` packages the four-call demo bot (OpenAI + Anthropic, regular + streaming) wrapped in a 20s loop so the deployment stays in `running` long enough to demonstrate heartbeats / stop / redeploy. Provider calls fail gracefully when the workspace doesn't have `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` stored as secrets, so the demo is observable end-to-end with only `LIGHTSEI_API_KEY` in workspace secrets.
+- [x] **Wheel bundling**: since `lightsei` isn't on PyPI yet, the bundle ships `lightsei-0.0.1-py3-none-any.whl` (built from `./sdk` via `python -m build --wheel`) and references it as a relative path in `requirements.txt`. The worker's pip install resolves that against the unpacked bundle dir.
+- [x] **Real bug caught and fixed**: first deploy attempt (deployment 4a89845c…) failed with `pip install exit 1` because the worker's `subprocess.run([..., "pip", "install", "-r", req])` call in `worker/runner.py:233` was missing `cwd=str(bot_dir)`, so pip inherited the parent shell's cwd and resolved relative wheel paths against the wrong directory. Added `cwd=str(bot_dir)` to match how `_spawn` already runs the bot (`runner.py:277`). Re-deploy succeeded immediately. Real worker bug, surfaced only because relative paths in requirements.txt are a legit user pattern.
+- [x] **Lifecycle proven end-to-end**: from a fresh terminal `lightsei deploy ./examples/demo_deploy` zipped 25,226 bytes, uploaded as multipart, and polled status: `queued → building → running` in ~9s after the worker claim. Worker logs show: claim → fetch bundle → unpack → create venv → pip install → fetch workspace secrets → spawn `bot.py`. Bot heartbeats every 30s; instance shows up under `/agents/demo-deploy` with `last_seen` ticking forward. Logs streamed into the dashboard's tail viewer (`docs/phase5-deployment-detail.png` shows 16 lines including `bot up: agent=demo-deploy base_url=https://api.lightsei.com` and 7 iterations of `iteration N: provider calls`). Stop button via dashboard flipped `desired_state` to stopped; worker reacted within ~30s; deployment row went STOPPED (`docs/phase5-after-stop.png`). Redeploy button created a fresh row (c5cb718c…) pointing at the same blob; worker reused the cached venv and went `running` in seconds (`docs/phase5-after-redeploy.png`, "demo-deploy live · 2" badge during the rolling cutover). Final cleanup: stopped the live deployment from the dashboard, then killed the worker process locally.
+- [x] **Screenshots**: `docs/phase5-runs-list.png` (top of the Runs page showing 7 demo-deploy runs from the bot's heartbeat loop), `docs/phase5-agent-deployments.png` (Deployments panel with the failed-then-fixed history visible), `docs/phase5-deployment-detail.png` (running deployment with streaming log viewer + stop button), `docs/phase5-after-stop.png` (post-stop state, redeploy button replaced stop), `docs/phase5-after-redeploy.png` (new running deployment c5cb718c… alongside stopped 6b92a531… and failed 4a89845c…).
+
+Open scope-discipline note: the bug fix to `worker/runner.py` is a real Phase 5.3 worker correctness change that should ride alongside this demo commit. Hard Rule 1 ("Stay in the current phase") covered — Phase 5 is the current phase.
+
+### 2026-04-26 — Phase 5.4 + 5.6 Streaming logs + Deployments dashboard tab
+- [x] Backend: `GET /workspaces/me/deployments/{id}/logs?after_id=N&limit=...` — incremental tail so the dashboard polls without re-downloading the full buffer each tick. `POST /workspaces/me/deployments/{id}/stop` flips `desired_state` to stopped (worker picks it up on next heartbeat). `POST /workspaces/me/deployments/{id}/redeploy` creates a new deployment row pointing at the same source blob and stops the old one.
+- [x] Dashboard: Deployments panel on `/agents/[name]` listing the last 10 with status pills + stop/redeploy buttons inline + click-through. New `/deployments/[id]` page with metadata grid, action buttons, and a terminal-styled log viewer. Adaptive polling (1.5s while building/running, 5s once stopped) and an auto-scroll toggle.
+
+### 2026-04-26 — Phase 5.5 SDK CLI: `lightsei deploy`
+- [x] Added `deploy` subcommand alongside `serve` in the SDK CLI. Zips the target directory deterministically, excluding the usual dev junk (`__pycache__`, `.venv`, `.git`, `node_modules`, `*.pyc`, `.DS_Store`, etc.), POSTs as multipart to `/workspaces/me/deployments`, then polls until status reaches `running` / `failed` / `stopped`.
+- [x] Resolution order: `--api-key` flag, then `$LIGHTSEI_API_KEY`. Same for `--base-url`. Agent name defaults to the directory's basename.
+- [x] Smoke-tested against prod: upload + queued row + delete cleanly.
+
+### 2026-04-26 — Phase 5.3 Worker process
+- [x] `worker/runner.py` polls the backend for queued deployments, builds a venv per deployment under `/tmp/lightsei-worker/`, spawns the bot subprocess, streams stdout/stderr lines back via `/worker/deployments/{id}/logs`, and reacts to `desired_state` flips on each heartbeat.
+- [x] Concurrency capped at `LIGHTSEI_WORKER_MAX_CONCURRENT` (default 4). Each running bot gets its own supervisor thread + scratch dir.
+- [x] `WorkerClient` takes an injectable `httpx.Client` so tests run the full loop against the FastAPI TestClient. Four integration tests cover clean exit, crash, missing entry script, and user-stop-while-running. All green in CI.
+- [x] Heartbeat endpoint now returns the deployment row so the worker sees `desired_state` without a separate fetch.
+- [x] Trust boundary unchanged: worker is system-component-only, single-tenant safe. External users come in Phase 5B (managed isolation).
+
+### 2026-04-26 — Phase 5.2 Worker-facing endpoints
+- [x] Six endpoints under `/worker/*` gated by `LIGHTSEI_WORKER_TOKEN` (constant-time compare, fail-closed when env unset).
+- [x] `claim` uses `SKIP LOCKED` plus a stale-heartbeat steal clause (90s TTL) so a dead worker doesn't park its deployments forever.
+- [x] Status updates set `started_at` / `stopped_at` as the state machine transitions. Log append bounded to the most recent 1000 lines per deployment with insert-time prune. Blob fetch returns raw bytes plus a `sha256` header for integrity checks. Workspace secrets fetch hands the worker a decrypted dict for env-var injection.
+- [x] Operational note: a leaked worker token grants cross-tenant access. It joins the backup passphrase and `LIGHTSEI_SECRETS_KEY` as the third top-tier secret. Phase 5B is the right place to harden this.
+
+### 2026-04-26 — Phase 5.1 Deployments schema + zip upload
+- [x] Migration creating `deployments` (id, workspace_id, agent_name, status, desired_state, source_blob_id, error, claimed_by, claimed_at, heartbeat_at, started_at, stopped_at, created_at, updated_at) and `deployment_blobs` (id, workspace_id, size_bytes, sha256, data BYTEA, created_at).
+- [x] SQLAlchemy models for both tables.
+- [x] Body-size middleware bumped to 10 MB on `multipart/*` requests; JSON cap stays at 1 MB.
+- [x] User-facing endpoints: `POST /workspaces/me/deployments` (multipart upload), `GET /workspaces/me/deployments`, `GET /workspaces/me/deployments/{id}`, `DELETE /workspaces/me/deployments/{id}`. Worker-facing endpoints (claim/heartbeat/log) deferred to 5.2.
+- [x] Tests: roundtrip upload, list scoped to workspace, oversize blob → 413, cross-workspace → 404.
 
 ### 2026-04-25 — Phase 4 hosted-readiness COMPLETE 🎯
 Demo criterion (from MEMORY.md): *"A friend signs up at a real URL, copies their API key, runs a bot, sees data in their dashboard. They never SSH anywhere or read docs longer than the homepage."* — passed.
