@@ -9,6 +9,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
 )
@@ -237,6 +238,72 @@ class AgentInstance(Base):
             "idx_agent_instances_ws_agent",
             "workspace_id", "agent_name", last_heartbeat_at.desc(),
         ),
+    )
+
+
+class DeploymentBlob(Base):
+    __tablename__ = "deployment_blobs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String, nullable=False)
+    data: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        Index("idx_deployment_blobs_workspace", "workspace_id"),
+    )
+
+
+class Deployment(Base):
+    __tablename__ = "deployments"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_name: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="queued")
+    desired_state: Mapped[str] = mapped_column(
+        String, nullable=False, default="running"
+    )
+    source_blob_id: Mapped[Optional[str]] = mapped_column(
+        String,
+        ForeignKey("deployment_blobs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    claimed_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    claimed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    heartbeat_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    stopped_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        Index(
+            "idx_deployments_ws_agent",
+            "workspace_id", "agent_name", created_at.desc(),
+        ),
+        Index("idx_deployments_claimable", "status", "desired_state"),
     )
 
 

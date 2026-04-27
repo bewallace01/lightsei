@@ -17,37 +17,55 @@ from fastapi import HTTPException, Request
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import Response
 
-# Default 1 MB. The biggest legitimate payload is an /events row whose JSONB
-# `payload` carries an LLM message history. 1 MB fits ~2,000 turns of typical
-# chat — anything larger is almost certainly accidental or hostile.
+# Default 1 MB for JSON bodies. The biggest legitimate JSON payload is an
+# /events row whose JSONB `payload` carries an LLM message history. 1 MB
+# fits ~2,000 turns of typical chat — anything larger is almost certainly
+# accidental or hostile. File uploads use a separate, larger cap below.
 MAX_BODY_BYTES = int(os.environ.get("LIGHTSEI_MAX_BODY_BYTES", str(1 * 1024 * 1024)))
+
+# Multipart uploads (deployment zips) get a higher cap. The 10 MB ceiling
+# fits a typical bot directory after gzip compression. Bigger means we'd
+# want object storage anyway (Phase 5B).
+MAX_UPLOAD_BYTES = int(
+    os.environ.get("LIGHTSEI_MAX_UPLOAD_BYTES", str(10 * 1024 * 1024))
+)
 
 
 class BodySizeLimitMiddleware(BaseHTTPMiddleware):
-    """Reject requests whose Content-Length exceeds MAX_BODY_BYTES.
+    """Reject requests whose Content-Length exceeds the limit for their
+    content type.
 
-    Honors the header when present (cheap, runs before any body is buffered).
-    For chunked uploads without Content-Length we'd need streaming inspection,
-    but our SDK and dashboard always send Content-Length.
+    Honors the header when present (cheap, runs before any body is
+    buffered). For chunked uploads without Content-Length we'd need
+    streaming inspection, but our SDK and dashboard always send it.
     """
 
-    def __init__(self, app, max_bytes: int = MAX_BODY_BYTES) -> None:
+    def __init__(
+        self,
+        app,
+        max_bytes: int = MAX_BODY_BYTES,
+        max_upload_bytes: int = MAX_UPLOAD_BYTES,
+    ) -> None:
         super().__init__(app)
         self._max = max_bytes
+        self._max_upload = max_upload_bytes
 
     async def dispatch(self, request: Request, call_next):
         cl = request.headers.get("content-length")
-        if cl is not None:
-            try:
-                n = int(cl)
-            except ValueError:
-                n = 0
-            if n > self._max:
-                return Response(
-                    content=f'{{"detail":"payload too large; max {self._max} bytes"}}',
-                    status_code=413,
-                    media_type="application/json",
-                )
+        if cl is None:
+            return await call_next(request)
+        try:
+            n = int(cl)
+        except ValueError:
+            n = 0
+        ct = request.headers.get("content-type", "")
+        cap = self._max_upload if ct.startswith("multipart/") else self._max
+        if n > cap:
+            return Response(
+                content=f'{{"detail":"payload too large; max {cap} bytes"}}',
+                status_code=413,
+                media_type="application/json",
+            )
         return await call_next(request)
 
 

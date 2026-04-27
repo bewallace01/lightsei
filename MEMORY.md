@@ -110,6 +110,26 @@ Phase 2.1 asked: OPA or custom Python?
 
 Keep policies in `backend/policies/` as small pure functions taking a request dict and returning `{"allow": bool, "reason": str | None, ...}`.
 
+## Runtime decision (2026-04-27)
+
+Phase 5 is "PaaS for agents": user runs `lightsei deploy ./bot`, Lightsei hosts the bot process and shows logs/status in the dashboard.
+
+**Picked: build our own single-host worker for v1, swap for a managed runtime (Fly Machines, Modal sandboxes) in Phase 5B.** Reasoning:
+
+- The control-plane shape (start, run, log, restart, stop) is the same regardless of where the container lives. Validating that shape doesn't require microVM isolation.
+- Building on a vendor primitive in v1 means spending on vendor + integration work before knowing if anyone wants this. The throwaway POC under `worker/run_local.py` already proved the lifecycle.
+- Phase 5A is *only safe for our own bots*. We do NOT accept other users' code on the worker until we cut over to per-bot microVMs. The bot runs as the worker's user; any escape is full host compromise.
+- We'll abstract a `Runtime` interface so that swapping `LocalSubprocessRuntime` for `FlyMachinesRuntime` later is a one-file change. Don't let vendor primitives leak past `worker/`.
+
+**Switch trigger** (Phase 5A → 5B). Cut over to a managed isolation runtime when ANY of these is true:
+- We want to onboard external users (the moment isolation becomes a security requirement, not a nice-to-have).
+- The single-host worker is saturating CPU/memory regularly.
+- Multi-region presence becomes a real requirement.
+
+**Storage decisions:**
+- Uploaded zips live in a `deployment_blobs` BYTEA column for v1 (cap 10 MB). Move to Cloudflare R2 in Phase 5B if/when the DB feels bloated.
+- Logs land in a `deployment_logs` table (worker streams lines, dashboard polls). Same future pivot to object storage for archival.
+
 ## Reference projects
 
 When stuck on architecture, look at these:

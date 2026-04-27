@@ -4,9 +4,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 5: TBD — set after watching at least one real user onboard**
+> **Phase 5.1: deployments schema + zip upload**
 
-Phases 1-4 shipped 2026-04-25. Demos passed. See Done Log.
+Phase 5 is committed: PaaS-for-agents. See "Runtime decision (2026-04-27)" in MEMORY.md for the architecture call (build single-host worker now, swap for managed runtime in 5B).
+
+Phases 1-4 shipped 2026-04-25. Production-readiness items (DB backups, tests + CI, rate limits + body cap, bot instance identity, secrets store) shipped 2026-04-26. See Done Log.
 
 Live URLs:
 - dashboard https://app.lightsei.com (signup/login here)
@@ -86,9 +88,47 @@ That's it. No styling, no auth, no extras. If the demo works, Phase 1 is done.
 
 ---
 
-## Phase 5+: TBD
+## Phase 5: Hosted runtime (PaaS for agents)
 
-Set after the Phase 4 demo runs and you've watched at least one real user onboard. The friction they hit defines Phase 5.
+**Demo at end of phase**: From a fresh terminal, `lightsei deploy ./my-bot` zips the directory, uploads it, and a worker process spawns the bot. Within a minute the dashboard shows the deployment as `running`, the bot's instance heartbeats are visible, and logs stream into a Deployments tab. Stop and redeploy from the dashboard work end-to-end. Nothing about the user's bot code changes between local and hosted runs.
+
+Phase 5A scope: single-host worker, in-process subprocess per bot, only safe for *our own* bots. Per the Runtime decision in MEMORY.md, isolation comes in 5B (Fly Machines / Modal).
+
+### 5.1 Deployments schema + zip upload (NOW)
+
+- Migration creating `deployments` (id, workspace_id, agent_name, status, desired_state, source_blob_id, error, claimed_by, claimed_at, heartbeat_at, started_at, stopped_at, created_at, updated_at) and `deployment_blobs` (id, workspace_id, size_bytes, sha256, data BYTEA, created_at).
+- SQLAlchemy models.
+- Bump body-size middleware to allow 10 MB on `multipart/form-data` requests (JSON stays at 1 MB).
+- Endpoints: `POST /workspaces/me/deployments` (multipart upload), `GET /workspaces/me/deployments`, `GET /workspaces/me/deployments/{id}`, `DELETE /workspaces/me/deployments/{id}`.
+- Tests: roundtrip upload, list scoped to workspace, blob > cap → 413, cross-workspace 404.
+
+### 5.2 Worker-facing endpoints
+Atomic claim (SKIP LOCKED), status updates, heartbeat-from-worker, log append. Backend only at this stage; no worker process yet.
+
+### 5.3 Worker process
+Standalone `worker/runner.py` that polls `/worker/deployments/claim`, downloads the blob, builds a venv, spawns `python bot.py` with workspace secrets injected, manages lifecycle, posts logs. Lifts the shape from `worker/run_local.py`.
+
+### 5.4 Streaming logs
+Worker tees stdout/stderr to the backend; dashboard polls a tail endpoint with auto-scroll. Cap at last 1000 lines per deployment for v1.
+
+### 5.5 SDK CLI: `lightsei deploy`
+Zips a directory (excluding `__pycache__`, `.venv`, `node_modules`, `.git`), POSTs to the backend, polls until `running` or fails fast.
+
+### 5.6 Dashboard "Deployments" tab
+On the agent page, a new tab listing deployments with status pill, started_at, stop/redeploy buttons, and a logs viewer.
+
+### 5.7 Phase 5 demo
+End-to-end deploy of a real bot through the CLI, with the worker running on the user's machine pointed at prod. Screenshots in the Done Log.
+
+---
+
+## Phase 6+: TBD
+
+Open candidates for the next phase, set after Phase 5 ships:
+- Phase 5B: cut single-host worker over to Fly Machines / Modal sandboxes (gates external users).
+- GitHub OAuth + push-to-deploy.
+- Buildpacks / Dockerfile support beyond the fixed Python runtime.
+- N replicas + cron scheduling.
 
 ---
 

@@ -1,8 +1,9 @@
+import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import desc, select, text
@@ -31,6 +32,8 @@ from models import (
     AgentInstance,
     ApiKey,
     Command,
+    Deployment,
+    DeploymentBlob,
     Event,
     Run,
     Session as SessionRow,
@@ -47,6 +50,9 @@ COMMAND_TTL = timedelta(hours=24)
 # An instance is "active" if we heard from it within this window. Tuned for a
 # default 30s SDK heartbeat with two missed beats of slack.
 INSTANCE_ACTIVE_WINDOW = timedelta(seconds=90)
+# Max upload bytes for a deployment zip. Mirrors limits.MAX_UPLOAD_BYTES so
+# the per-route check matches the middleware's cap.
+MAX_DEPLOYMENT_BLOB_BYTES = 10 * 1024 * 1024
 
 
 def utcnow() -> datetime:
@@ -595,6 +601,149 @@ def delete_secret(
     if row is None:
         raise HTTPException(status_code=404, detail="secret not found")
     session.delete(row)
+    session.flush()
+    return {"status": "ok"}
+
+
+# ---------- /workspaces/me/deployments (Phase 5.1) ---------- #
+#
+# A "deployment" is a snapshot of bot source code (zipped) plus the lifecycle
+# state of one running copy of it. Phase 5.1 only covers the upload + listing
+# surface — claim/heartbeat/log endpoints land in 5.2 and the worker process
+# in 5.3.
+
+
+def _serialize_deployment(d: Deployment) -> dict[str, Any]:
+    return {
+        "id": d.id,
+        "agent_name": d.agent_name,
+        "status": d.status,
+        "desired_state": d.desired_state,
+        "source_blob_id": d.source_blob_id,
+        "error": d.error,
+        "claimed_by": d.claimed_by,
+        "claimed_at": d.claimed_at.isoformat() if d.claimed_at else None,
+        "heartbeat_at": d.heartbeat_at.isoformat() if d.heartbeat_at else None,
+        "started_at": d.started_at.isoformat() if d.started_at else None,
+        "stopped_at": d.stopped_at.isoformat() if d.stopped_at else None,
+        "created_at": d.created_at.isoformat(),
+        "updated_at": d.updated_at.isoformat(),
+    }
+
+
+@app.post("/workspaces/me/deployments")
+async def upload_deployment(
+    agent_name: str = Form(..., min_length=1),
+    bundle: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Upload a bundled bot directory as a new deployment.
+
+    The bundle is a gzipped tar (or zip) the SDK CLI produced from a local
+    directory. We store the bytes verbatim in deployment_blobs and create a
+    `queued` deployment row that the worker (Phase 5.3) will pick up.
+
+    Bundle is read in full so we can compute size + hash up front. The
+    multipart cap (10 MB) is enforced by BodySizeLimitMiddleware before
+    we get here; this is a defense-in-depth check.
+    """
+    data = await bundle.read()
+    if len(data) == 0:
+        raise HTTPException(status_code=400, detail="empty bundle")
+    if len(data) > MAX_DEPLOYMENT_BLOB_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"bundle too large; max {MAX_DEPLOYMENT_BLOB_BYTES} bytes",
+        )
+
+    now = utcnow()
+    sha = hashlib.sha256(data).hexdigest()
+
+    blob = DeploymentBlob(
+        id=str(uuid.uuid4()),
+        workspace_id=workspace_id,
+        size_bytes=len(data),
+        sha256=sha,
+        data=data,
+        created_at=now,
+    )
+    session.add(blob)
+    session.flush()
+
+    ensure_agent(session, workspace_id, agent_name, now)
+    dep = Deployment(
+        id=str(uuid.uuid4()),
+        workspace_id=workspace_id,
+        agent_name=agent_name,
+        status="queued",
+        desired_state="running",
+        source_blob_id=blob.id,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(dep)
+    session.flush()
+    return _serialize_deployment(dep)
+
+
+@app.get("/workspaces/me/deployments")
+def list_deployments(
+    agent_name: Optional[str] = None,
+    limit: int = 50,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """List deployments scoped to this workspace, newest first.
+    Optionally filter to one agent."""
+    limit = max(1, min(limit, 200))
+    q = select(Deployment).where(Deployment.workspace_id == workspace_id)
+    if agent_name is not None:
+        q = q.where(Deployment.agent_name == agent_name)
+    rows = session.execute(
+        q.order_by(desc(Deployment.created_at)).limit(limit)
+    ).scalars().all()
+    return {"deployments": [_serialize_deployment(d) for d in rows]}
+
+
+@app.get("/workspaces/me/deployments/{deployment_id}")
+def get_deployment(
+    deployment_id: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    d = session.get(Deployment, deployment_id)
+    if d is None or d.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="deployment not found")
+    return _serialize_deployment(d)
+
+
+@app.delete("/workspaces/me/deployments/{deployment_id}")
+def delete_deployment(
+    deployment_id: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, str]:
+    """Delete a deployment row. The associated blob is removed too unless
+    other deployments reference it (none should, but the FK uses SET NULL
+    so an orphaned blob would just sit until an explicit prune)."""
+    d = session.get(Deployment, deployment_id)
+    if d is None or d.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="deployment not found")
+    blob_id = d.source_blob_id
+    session.delete(d)
+    session.flush()  # so the still_used query sees the deletion
+    if blob_id:
+        # Only purge the blob if no other deployment references it.
+        still_used = session.execute(
+            select(Deployment.id)
+            .where(Deployment.source_blob_id == blob_id)
+            .limit(1)
+        ).scalar_one_or_none()
+        if still_used is None:
+            blob = session.get(DeploymentBlob, blob_id)
+            if blob is not None:
+                session.delete(blob)
     session.flush()
     return {"status": "ok"}
 
