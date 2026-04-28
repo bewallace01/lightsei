@@ -4,7 +4,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 7.1: Validator interface + schema-strict validator**
+> **Phase 7.2: Content-rules validator**
 
 Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. Phase 6 shipped 2026-04-27: Polaris, the project orchestrator bot, deployed via the Phase 5 PaaS against this project's own docs. Phase 7 picks up the dogfood loop with output validation (MEMORY.md guardrail layer 3) — Polaris validates its own plans before they're treated as trustworthy by the dashboard. Layer 4 (behavioral rules) and command dispatch land in later phases once we trust Polaris's outputs enough to act on them.
 
@@ -139,14 +139,9 @@ Phase 5A scope: single-host worker, in-process subprocess per bot, only safe for
 
 **Why this phase exists.** MEMORY.md's five guardrail layers describe Lightsei's actual product surface; only layer 2 (pre-action gate, the Phase 2 cost-cap policy) is built. Layer 3 (output validation) is the next one in the stack and the prerequisite for Polaris graduating from describe → execute. Validators are also a generally useful platform feature: any agent emitting structured events benefits from "this output matches the schema" + "this output doesn't contain things it shouldn't."
 
-### 7.1 Validator interface + schema-strict validator (NOW)
+### 7.1 Validator interface + schema-strict validator ✅ done 2026-04-27 (see Done Log)
 
-- New `backend/validators/` package. Validator interface: pure function `(payload: dict, config: dict) -> ValidationResult`, where `ValidationResult` is `{"ok": bool, "violations": [{"rule": str, "message": str, ...}]}`. No state, no I/O — keeps validators cheap and testable.
-- Ship the first concrete validator: **schema-strict**. Config carries a JSON schema; the validator runs `jsonschema.validate(payload, config["schema"])` and converts errors to violations. The schema for `polaris.plan` is the existing `submit_plan` tool's `input_schema` from `polaris/bot.py` (lift it into a shared spot the backend can also import, or duplicate it for now — flag the duplication).
-- Tests: schema match → ok=True, missing required field → one violation, wrong type → one violation, additional property → one violation.
-- No backend wiring yet — that's 7.3. This task delivers the abstraction + first impl + tests.
-
-### 7.2 Content-rules validator
+### 7.2 Content-rules validator (NOW)
 
 - Second concrete validator: pattern-based checks. Config shape: `{"rules": [{"name": str, "pattern": str, "fields": [str], "severity": "fail"|"warn"}]}`. The validator walks each named JSON path inside `fields`, runs the regex against any string values it finds, and emits a violation when the pattern matches (or doesn't, depending on the rule's `mode: "must_not_match" | "must_match"`).
 - Ship a default rule pack the demo will use: `email_in_summary` (must_not_match: `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}` against `summary`), `banned_destructive_verbs` (must_not_match: `\b(delete|drop|truncate|destroy|nuke)\b` against `next_actions[].task`).
@@ -223,6 +218,16 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-04-27 — Phase 7.1 Validator interface + schema-strict validator
+- [x] **New `backend/validators/` package** with three files: `_types.py` (the `Violation` and `ValidationResult` types — plain dicts / TypedDict so storage in the future `event_validations` table is JSON-trivial), `schema_strict.py` (the first concrete validator), and `__init__.py` (a `REGISTRY` dict + a `validate(name, payload, config)` entry point).
+- [x] **Validator contract**: pure function `(payload: Any, config: dict) -> ValidationResult`. No I/O, no side effects. Result is `{"ok": bool, "violations": list[dict]}` where each violation has at least `rule` and `message`. Validators may attach extra fields (schema-strict adds `path`, content-rules will add `matched`/`severity` in 7.2). Pure-function constraint keeps the future pipeline (Phase 7.3, synchronous post-emit) cheap and trivially parallelizable later.
+- [x] **schema-strict** uses `jsonschema` Draft 2020-12 (matches Anthropic's strict tool-use schemas — the same draft Polaris's `submit_plan` `input_schema` targets). Reports every violation in the payload, not just the first, so the dashboard's eventual violation panel can render a complete picture instead of a one-error-at-a-time game of whack-a-mole. Configuration errors (missing schema, malformed schema, unresolvable `$ref`) are themselves reported as violations rather than raised — the pipeline must stay crash-free even when an operator mis-registers a config.
+- [x] **Real bug caught and fixed during testing**: first impl wrapped only `Draft202012Validator(schema)` construction, but jsonschema's `iter_errors()` raises `UnknownType` (not `SchemaError`) when a schema references a non-existent type. Fixed by calling `Draft202012Validator.check_schema(schema)` upfront to validate the meta-schema, plus wrapping `iter_errors()` in a `SchemaError` catch for evaluation-time failures (unresolvable `$ref`). One real bug per phase; this one would have crashed the Phase 7.3 pipeline on any deployment with a typo in its registered schema.
+- [x] **`jsonschema==4.23.0` added to `backend/requirements.txt`.** Stable, widely-used, last-modified mid-2024.
+- [x] **`polaris.plan` schema lift deferred to Phase 7.3.** The phase plan flagged the option of lifting the schema into a shared spot. Skipped here because the cleaner shape is "Polaris registers its schema as the validator config on its workspace at deploy time" — the backend doesn't need a static import of the polaris schema, it gets it from the registry. 7.3 ships `polaris/setup_validators.py` for that.
+- [x] **11 new tests in `backend/tests/test_validators.py`** covering: clean payload passes, missing required field, wrong type, additional-property rejection, multi-violation collection in one pass, JSON-pointer path on nested errors, `missing_config` violation when schema absent, `invalid_schema` violation when meta-schema fails, registry routing via `validate(name, ...)`, KeyError on unknown validator name, registry contains the canonical `schema_strict` key (rename guard).
+- Verified: `pytest tests/test_validators.py -v` → 11/11 pass. Full backend suite → **121/121** (was 110; +11 for validators). No I/O in any validator code path; tests run in 0.89s.
 
 ### 2026-04-27 — Phase 6 Polaris (project orchestrator bot) COMPLETE 🎯
 Demo criterion (from MEMORY.md / Phase 6 header): *"From a fresh terminal, `lightsei deploy ./polaris` (with this project's MEMORY.md + TASKS.md copied into the bundle) deploys the Polaris bot via the Phase 5 PaaS. Within ~5 minutes the dashboard's Polaris view renders a generated plan against this project's own docs, with at least 3 next-action recommendations, parking-lot evaluation, and any drift it spots. The plan is 'good enough' — sanity check is whether I would have picked the same next move."* — passed.
