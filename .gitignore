@@ -28,3 +28,9 @@ tsconfig.tsbuildinfo
 .env
 .env.local
 .env.*.local
+
+# Polaris deploy-time copies of planning docs.
+# `lightsei deploy ./polaris` requires MEMORY.md + TASKS.md inside the bundle,
+# but the source-of-truth copies live at repo root. Don't commit duplicates.
+polaris/MEMORY.md
+polaris/TASKS.md

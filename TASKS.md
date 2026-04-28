@@ -4,9 +4,9 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 6.6: Phase 6 demo**
+> **Phase 7: TBD** — pick the next phase. Open candidates listed under Phase 7+.
 
-Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. See "Runtime decision (2026-04-27)" in MEMORY.md for the architecture call (single-host worker now, managed runtime in 5B). Phase 6 dogfoods Phase 5: Polaris is itself a Lightsei bot deployed via the PaaS we just built.
+Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. Phase 6 shipped 2026-04-27: Polaris, the project orchestrator bot, deployed via the Phase 5 PaaS against this project's own docs. See "Runtime decision (2026-04-27)" in MEMORY.md for the 5A→5B architecture call.
 
 Phases 1-4 shipped 2026-04-25. Production-readiness items (DB backups, tests + CI, rate limits + body cap, bot instance identity, secrets store) shipped 2026-04-26. See Done Log.
 
@@ -125,12 +125,9 @@ Phase 5A scope: single-host worker, in-process subprocess per bot, only safe for
 
 ### 6.5 System prompt iteration ✅ done 2026-04-27 (see Done Log)
 
-### 6.6 Phase 6 demo (NOW)
+### 6.6 Phase 6 demo ✅ done 2026-04-27 (see Done Log)
 
-- Build the wheel into the bundle (Phase 5 demo pattern), copy this project's MEMORY.md + TASKS.md into `polaris/`, set `ANTHROPIC_API_KEY` and `LIGHTSEI_API_KEY` as workspace secrets, deploy via `lightsei deploy ./polaris --agent polaris`.
-- Wait for first plan generation. Capture a screenshot of `/polaris` rendering the plan.
-- Sanity-check: does the plan's `next_actions[0]` match what *I* would have picked? If yes, demo passes. If no, iterate the system prompt (back to 6.5) until it does.
-- Done Log: include the screenshot + the verbatim plan text + a short note on whether Polaris's recommendation matched user intuition.
+**Phase 6 complete 2026-04-27.**
 
 ---
 
@@ -172,6 +169,37 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-04-27 — Phase 6 Polaris (project orchestrator bot) COMPLETE 🎯
+Demo criterion (from MEMORY.md / Phase 6 header): *"From a fresh terminal, `lightsei deploy ./polaris` (with this project's MEMORY.md + TASKS.md copied into the bundle) deploys the Polaris bot via the Phase 5 PaaS. Within ~5 minutes the dashboard's Polaris view renders a generated plan against this project's own docs, with at least 3 next-action recommendations, parking-lot evaluation, and any drift it spots. The plan is 'good enough' — sanity check is whether I would have picked the same next move."* — passed.
+
+Polaris is dogfood. The bot deployed in prod literally identified its own deployment as `next_actions[0]`. Recursive.
+
+Demo run pointed at prod (`https://api.lightsei.com`, `https://app.lightsei.com`, real Postgres, workspace `Bailey's Agent Monitor`).
+
+- [x] **Pushed 9 commits to `origin/main`**: worker pip-cwd bugfix, .gitignore for build artifacts, Phase 5 demo, Phase 6 plan, and Phase 6.1 through 6.5. All 9 had been hand-tested locally; full backend suite was 110/110 before push. Railway auto-deploy on push isn't wired up here, so triggered both services manually with `railway up backend --service lightsei-backend --ci` and `railway up dashboard --service lightsei-dashboard --ci`. Both `SUCCESS`. Deploy time: ~30s backend, ~60s dashboard.
+- [x] **Verified the new endpoints landed in prod**: `GET /agents/polaris/plans?limit=1` → `{"plans": []}` (200), `GET /agents/polaris/latest-plan` → `{"detail": "no plan yet"}` (404), `https://app.lightsei.com/polaris` → 200. Existing `/health` and `/auth/me` still green throughout.
+- [x] **Bundle**: built wheel from `./sdk` (`python -m build --wheel`), copied `lightsei-0.0.1-py3-none-any.whl` + `MEMORY.md` + `TASKS.md` into `polaris/`. Final zip: 60,347 bytes. Bundle ships the project's own docs so Polaris reads what it'll plan against; the `POLARIS_DOCS_DIR` default (`.`) resolves them inside the unpacked deployment dir.
+- [x] **Workspace secrets**: `LIGHTSEI_API_KEY` already there from Phase 5 demo. Stored `ANTHROPIC_API_KEY` via `PUT /workspaces/me/secrets/ANTHROPIC_API_KEY`. Both auto-injected by the worker into the bot's env on spawn.
+- [x] **Lifecycle proven end-to-end**: `lightsei deploy ./polaris --agent polaris` zipped, uploaded, status went `queued → building → running` in ~9s after the worker claim (the build step reused the cached venv — pip install completed quickly because all deps were already present from the Phase 5 demo's `examples/demo_deploy/` deployment). Bot started, ticked once, called Claude `claude-opus-4-7` at `effort: "high"` with the forced `submit_plan` tool, emitted the structured plan to `/events`. The dashboard's `/polaris` view picked it up via `/agents/polaris/latest-plan` within seconds.
+- [x] **Verbatim plan from the deployed bot** (event_id 146, run 8a9e33d2, 32,656 in / 841 out tokens, ~$0.18):
+
+  > **Summary.** Phase 6 is at the final demo task (6.6): Polaris's scaffold, plan schema, backend endpoint, dashboard view, and tuned system prompt all shipped 2026-04-27. What remains is deploying Polaris via the Phase 5 PaaS against this project's own docs and confirming the first plan's top recommendation matches user intuition.
+  >
+  > **Next actions:**
+  >
+  > 1. **Execute Phase 6.6: build the lightsei wheel, copy MEMORY.md + TASKS.md into polaris/, set ANTHROPIC_API_KEY and LIGHTSEI_API_KEY as workspace secrets, then run `lightsei deploy ./polaris --agent polaris` against api.lightsei.com.** This is the NOW task and the only remaining item before Phase 6 closes. The 6.5 Done Log already validated the prompt against these exact docs in a local harness, so deploying via the PaaS is the last unverified link. *Blocked by: ANTHROPIC_API_KEY and LIGHTSEI_API_KEY need to be present in the workspace secrets store before deploy.*
+  >
+  > 2. **Wait for the first scheduled tick, capture a screenshot of /polaris rendering the plan, and sanity-check that next_actions[0] matches what you would have picked.** Phase 6 demo criterion explicitly requires the screenshot, the verbatim plan text, and the intuition-match call. Without that artifact the phase isn't done per the project's "each phase ends with a demo" principle. *Blocked by: Polaris deploy reaching `running` and one tick completing (~5 minutes per the phase header).*
+  >
+  > 3. **If next_actions[0] doesn't match intuition, loop back to 6.5 and iterate polaris/system_prompt.md, then redeploy; if it does match, write the 6.6 Done Log entry with screenshot path, verbatim plan, and the match note.** The phase header makes prompt iteration the explicit fallback path. Either way the Done Log entry is what closes Phase 6 and unblocks the Phase 7+ decision. *Blocked by: First plan output from the previous step.*
+  >
+  > Parking-lot promotions: none.
+  > Drift: none.
+
+- [x] **Intuition check**: `next_actions[0]` is "execute Phase 6.6", which was *literally what I was doing while reading the plan*. The plan correctly identifies its own deployment as the active task, then the screenshot step (which I am about to do), then the close-or-iterate decision. The 3-action shape, the `blocked_by` callouts, and the "no em dashes / no padded recommendations" output matches the prompt iteration from 6.5 exactly. **Demo passes.**
+- [x] **Screenshot**: `docs/phase6-polaris-prod.png` — `/polaris` against prod, summary in serif in the dark hero band, three numbered next-actions in the body, doc-hash chips at the bottom, sidebar with a single past-readings entry.
+- [x] **Cleanup**: stopped the deployment via `POST /workspaces/me/deployments/{id}/stop`, waited for the worker to wind down (~35s), killed the local worker process. Polaris is no longer running in prod; the deployment row sits in `stopped` state as the artifact. Phase 6A always intended to be on-demand, not always-on; that's a Phase 6B concern alongside the act-don't-just-plan work.
 
 ### 2026-04-27 — Phase 6.5 System prompt iteration
 - [x] **Switched the structured-output mechanism from "ask for JSON, parse text" to Anthropic strict tool use.** `polaris/bot.py` now defines a single `submit_plan` tool with `strict: true` and a JSON-Schema `input_schema` covering `summary`, `next_actions[task, why, blocked_by]`, `parking_lot_promotions[item, why]`, and `drift[between, observation]`. `tool_choice` forces the model to call exactly that tool, so the response is guaranteed to contain a `tool_use` block whose `input` matches the schema verbatim. The old `_parse_plan` helper is deleted; the bot reads `tool_block.input` directly into the event payload.
