@@ -4,9 +4,9 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 7: TBD** — pick the next phase. Open candidates listed under Phase 7+.
+> **Phase 7.1: Validator interface + schema-strict validator**
 
-Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. Phase 6 shipped 2026-04-27: Polaris, the project orchestrator bot, deployed via the Phase 5 PaaS against this project's own docs. See "Runtime decision (2026-04-27)" in MEMORY.md for the 5A→5B architecture call.
+Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. Phase 6 shipped 2026-04-27: Polaris, the project orchestrator bot, deployed via the Phase 5 PaaS against this project's own docs. Phase 7 picks up the dogfood loop with output validation (MEMORY.md guardrail layer 3) — Polaris validates its own plans before they're treated as trustworthy by the dashboard. Layer 4 (behavioral rules) and command dispatch land in later phases once we trust Polaris's outputs enough to act on them.
 
 Phases 1-4 shipped 2026-04-25. Production-readiness items (DB backups, tests + CI, rate limits + body cap, bot instance identity, secrets store) shipped 2026-04-26. See Done Log.
 
@@ -131,12 +131,66 @@ Phase 5A scope: single-host worker, in-process subprocess per bot, only safe for
 
 ---
 
-## Phase 7+: TBD
+## Phase 7: Output validation (guardrail layer 3)
 
-Open candidates for after Polaris ships. The Polaris-driven priorities (6B onwards) are the natural next thing; the others are still on the table.
+**Demo at end of phase**: Polaris's `polaris.plan` events flow through a validator pipeline before being treated as trustworthy by the dashboard. The `/polaris` view's history sidebar shows a small PASS / FAIL / WARN chip next to each plan; clicking a failed plan reveals the specific violations in the main pane. Two concrete validator types ship: **schema-strict** (payload matches a registered JSON schema) and **content-rules** (regex / keyword checks like "no email-like patterns in summary", "no banned destructive verbs"). Demo run: deploy Polaris with a normal prompt → validators pass → dashboard shows green PASS chips. Then briefly inject a bad pattern (e.g., temporarily prompt Polaris to include a fake email in `summary`) → validators flag it → dashboard shows FAIL with the matched rule. Polaris itself doesn't change behavior on failures yet (Phase 7A is advisory); the value here is the visible signal that "this output is suspect, don't trust it blindly."
 
-- **Polaris 6B: act, don't just plan.** Layer 3 (output validation: structured-output schema, JSON validity, no-PII), then layer 4 (behavioral rules: loop detection, runaway-token guards), then optional command dispatch — Polaris uses `lightsei.send_command()` to drive specifically-configured executor agents.
-- **Polaris 6C: continuous eval (layer 5).** Judge-LLM scores Polaris's past plans against actual outcomes. Closes the loop on whether the orchestrator is actually any good.
+**Phase 7A scope: advisory, post-emit, server-side.** Validators run after the event lands in the DB, write their results to a sibling table, and don't block ingestion. The dashboard renders the result; Polaris's emit path isn't aware of validation status. **Phase 7B (later) makes validators blocking + pre-emit**, and is what unlocks "act, don't just plan" — Polaris can dispatch commands once we trust the validation gate to catch bad outputs before they land.
+
+**Why this phase exists.** MEMORY.md's five guardrail layers describe Lightsei's actual product surface; only layer 2 (pre-action gate, the Phase 2 cost-cap policy) is built. Layer 3 (output validation) is the next one in the stack and the prerequisite for Polaris graduating from describe → execute. Validators are also a generally useful platform feature: any agent emitting structured events benefits from "this output matches the schema" + "this output doesn't contain things it shouldn't."
+
+### 7.1 Validator interface + schema-strict validator (NOW)
+
+- New `backend/validators/` package. Validator interface: pure function `(payload: dict, config: dict) -> ValidationResult`, where `ValidationResult` is `{"ok": bool, "violations": [{"rule": str, "message": str, ...}]}`. No state, no I/O — keeps validators cheap and testable.
+- Ship the first concrete validator: **schema-strict**. Config carries a JSON schema; the validator runs `jsonschema.validate(payload, config["schema"])` and converts errors to violations. The schema for `polaris.plan` is the existing `submit_plan` tool's `input_schema` from `polaris/bot.py` (lift it into a shared spot the backend can also import, or duplicate it for now — flag the duplication).
+- Tests: schema match → ok=True, missing required field → one violation, wrong type → one violation, additional property → one violation.
+- No backend wiring yet — that's 7.3. This task delivers the abstraction + first impl + tests.
+
+### 7.2 Content-rules validator
+
+- Second concrete validator: pattern-based checks. Config shape: `{"rules": [{"name": str, "pattern": str, "fields": [str], "severity": "fail"|"warn"}]}`. The validator walks each named JSON path inside `fields`, runs the regex against any string values it finds, and emits a violation when the pattern matches (or doesn't, depending on the rule's `mode: "must_not_match" | "must_match"`).
+- Ship a default rule pack the demo will use: `email_in_summary` (must_not_match: `[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-z]{2,}` against `summary`), `banned_destructive_verbs` (must_not_match: `\b(delete|drop|truncate|destroy|nuke)\b` against `next_actions[].task`).
+- Tests: clean payload → ok=True, payload with email in summary → fail with rule name + matched substring redacted, payload with destructive verb → fail.
+
+### 7.3 Validation pipeline + event annotation
+
+- Migration: new table `event_validations` (id, event_id FK, validator_name, status `pass|fail|warn`, violations JSONB, created_at). One row per (event, validator) pair. Index on `(event_id, validator_name)`.
+- Validator registry: workspace-scoped map of `(event_kind, validator_name) → config`. Stored in a new `validator_configs` table or as a JSON column on `agents` — pick whichever feels cleaner once we look at the Phase 4 multi-tenancy model. Registration via `PUT /workspaces/me/validators/{event_kind}/{validator_name}`.
+- Pipeline: when `POST /events` ingests an event, look up the workspace's validators for that event's kind and run them synchronously after the insert. Cap to 200ms total per event (validators are pure functions; if any takes longer, treat as a `warn` with `timeout` reason and move on). Write results to `event_validations`.
+- Polaris setup script: small one-shot that registers schema-strict + content-rules for `polaris.plan` events on the calling workspace. Lives at `polaris/setup_validators.py` and is documented in `polaris/README.md` as a one-time post-deploy step.
+
+### 7.4 Backend endpoints for validation results
+
+- `GET /events/{event_id}/validations` — list validations for one event. Workspace-scoped. 404 if event not in workspace.
+- Extend `GET /agents/{name}/plans` and `GET /agents/{name}/latest-plan` to include a `validations` field on each returned plan (joined from `event_validations` by event_id). `validations: [{"validator": str, "status": str, "violations": [...]}]`.
+- The latest-plan/plans endpoints are dashboard-facing; including validations directly avoids an N+1 fetch on the sidebar. Keep them lean: just `validator`, `status`, and the count of violations on the list endpoint; full violation details only on the per-event endpoint.
+- Tests in `backend/tests/test_validators.py`: fixture seeds a polaris.plan event + validations, list/detail endpoints return them, cross-workspace isolation, 404 paths.
+
+### 7.5 Dashboard shows validation status
+
+- `/polaris` view additions:
+  - History sidebar: each plan entry gets a chip — green PASS / red FAIL / amber WARN, derived from the worst status across the event's validations (any FAIL → FAIL, any WARN → WARN, all PASS → PASS, none → "unchecked" gray dot).
+  - Plan detail pane: when the selected plan has any non-PASS validations, render a section above the next-actions block listing the validators and their violations (rule name + message, with the matched substring redacted to "***" for any rule flagged as PII-related).
+- API types: extend `PolarisPlan` in `dashboard/app/api.ts` with `validations: ValidationResult[]`.
+- Polls every 30s like the rest of the page; validation results show up as soon as the next backend pull lands them.
+
+### 7.6 Phase 7 demo
+
+- Run Polaris in prod. Register the two validators via `setup_validators.py`. Wait for the next plan (or trigger one by tweaking TASKS.md to bust the doc-hash cache). Confirm the dashboard shows green PASS chips. Screenshot.
+- For the failure case, temporarily edit `polaris/system_prompt.md` to include "Mention an example email like alice@example.com in the summary." Redeploy. Wait for the next plan. Confirm `email_in_summary` fires, dashboard shows FAIL with the rule name. Screenshot. Revert the prompt + redeploy.
+- Done Log: both screenshots, the verbatim violation, and a note on whether the validation chip in the sidebar surfaced the failure clearly enough to be useful.
+- Cleanup: stop the deployment + worker as in the Phase 6 demo. Validators stay registered so the next time Polaris runs, validation continues automatically.
+
+---
+
+## Phase 8+: TBD
+
+Open candidates for after output validation ships:
+
+- **Phase 7B**: make validators blocking + pre-emit. Required before "act, don't just plan."
+- **Polaris 8: act, don't just plan.** Polaris dispatches commands via `lightsei.send_command()` to user-deployed executor agents. Gated on 7B.
+- **Polaris 9: continuous eval (layer 5).** Judge-LLM scores past plans against actual outcomes.
+- **Layer 4: behavioral rules.** Loop detection, runaway-token guards, escalating-permission patterns. Streaming detection across a run.
 - **Phase 5B**: cut single-host worker over to Fly Machines / Modal sandboxes (gates external users).
 - GitHub OAuth + push-to-deploy.
 - Buildpacks / Dockerfile support beyond the fixed Python runtime.
