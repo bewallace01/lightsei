@@ -4,7 +4,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 8.1: Validator-mode migration + endpoint update**
+> **Phase 8.2: Pipeline pre-emit blocking on FAIL**
 
 Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. Phase 6 shipped 2026-04-27: Polaris orchestrator bot deployed via the Phase 5 PaaS. Phase 7 shipped 2026-04-28: output validation (guardrail layer 3, advisory) — Polaris's plans flow through schema-strict + content-rules validators, dashboard chips render PASS/FAIL/WARN. Phase 8 closes the layer-3 story by making validators BLOCKING when the operator opts in: a failing payload is rejected at ingestion, never lands. This is the "act, don't just plan" prerequisite — Polaris can safely dispatch commands once we trust the validation gate to catch bad outputs before they enter the system.
 
@@ -163,15 +163,9 @@ Phase 5A scope: single-host worker, in-process subprocess per bot, only safe for
 
 **Phase 8 scope**: server-side blocking + SDK graceful-degradation on 422. The bot doesn't get rejection-aware logic in this phase (that would require sync emit, which is its own design); a rejected plan just disappears from the timeline and the worker log records it. Phase 8B can later add `emit_sync` and a `polaris.plan_rejected` advisory event for stronger feedback in the dashboard.
 
-### 8.1 Validator-mode migration + endpoint update (NOW)
+### 8.1 Validator-mode migration + endpoint update ✅ done 2026-04-28 (see Done Log)
 
-- Migration `0014_validator_mode`: add `mode VARCHAR(16) NOT NULL DEFAULT 'advisory'` to `validator_configs`. Existing rows backfill to `advisory` automatically (Phase 7A's behavior is unchanged).
-- ORM model update: `ValidatorConfig.mode` field. CHECK that values are restricted to `advisory` | `blocking` (use a string column with app-side validation rather than an enum — keeps adding new modes a code-only change).
-- `PUT /workspaces/me/validators/{event_kind}/{validator_name}` body adds optional `mode: "advisory" | "blocking"` (default `advisory`). Reject other values with 400.
-- `GET /workspaces/me/validators` includes `mode` per row.
-- 4 new tests: PUT with `mode=blocking` round-trips, PUT with `mode=advisory` round-trips, PUT with bad mode 400s, default is `advisory`.
-
-### 8.2 Pipeline: pre-emit blocking on FAIL
+### 8.2 Pipeline: pre-emit blocking on FAIL (NOW)
 
 - Rewrite `POST /events`: split validators into `blocking` and `advisory` lists upfront. Run blocking validators **before** `session.add(event)`; if any returns `status=fail`, raise `HTTPException(422)` with `{"detail": "event rejected by blocking validator", "violations": [...]}`. Advisory validators run after insert as today.
 - The 422 response carries the list of violating rules so the SDK can log them usefully. Format: `{"detail": str, "violations": [{"validator": str, "rule": str, "message": str, ...}]}`.
@@ -234,6 +228,13 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-04-28 — Phase 8.1 Validator-mode migration + endpoint update
+- [x] **Migration `0014_validator_mode`** adds `mode VARCHAR(16) NOT NULL DEFAULT 'advisory'` to `validator_configs`. The `server_default` makes the upgrade atomic: every existing row is backfilled to `advisory` in the same DDL pass, so Phase 7A's behavior is unchanged on rollout. The default also covers the API path — a PUT that omits `mode` lands advisory, which is what Phase 7A clients send.
+- [x] **ORM model update**: `ValidatorConfig.mode` field with a Python-side default of `"advisory"`. Stored as a free `String(16)` rather than an enum so adding a new mode in the future (e.g., `"shadow"` — run the validator but only log) is a code-only change with no migration needed.
+- [x] **Endpoints**: `PUT /workspaces/me/validators/{event_kind}/{validator_name}` accepts an optional `mode` field (default `"advisory"`) and validates it against `{"advisory", "blocking"}` — anything else 400s with `mode must be one of [...]`. `GET /workspaces/me/validators` now includes `mode` per row.
+- [x] **5 new tests** in `backend/tests/test_validation_pipeline.py` covering the operator flow: omit-mode-defaults-to-advisory, round-trip with `mode=blocking`, round-trip with `mode=advisory` set explicitly, unknown mode (e.g., `"shadow"`) returns 400, and PUT can promote an existing advisory config to blocking in place (the upsert path updates `mode` rather than creating a new row).
+- Verified: `pytest tests/test_validation_pipeline.py -v` → **21/21** pass (was 16; +5 for mode). Full backend suite → **166/166** (was 160; +5 mode tests, +1 from a small adjustment elsewhere). Phase 7A behavior preserved end-to-end — the existing pipeline integration tests (advisory rows ingest cleanly, validations land, summaries render) all pass without touching them.
 
 ### 2026-04-28 — Phase 7 Output validation (guardrail layer 3) COMPLETE 🎯
 Demo criterion (from MEMORY.md / Phase 7 header): *"Polaris's `polaris.plan` events flow through a validator pipeline before being treated as trustworthy by the dashboard. The `/polaris` view's history sidebar shows a small PASS / FAIL / WARN chip next to each plan; clicking a failed plan reveals the specific violations in the main pane. Demo run: deploy Polaris with a normal prompt → validators pass → dashboard shows green PASS chips. Then briefly inject a bad pattern → validators flag it → dashboard shows FAIL with the matched rule."* — passed.

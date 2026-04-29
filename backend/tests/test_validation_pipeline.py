@@ -352,3 +352,84 @@ def test_pipeline_isolates_workspaces(client, alice, bob):
             select(EventValidation).where(EventValidation.event_id == bob_ev["id"])
         ).scalars().all()
     assert rows == []
+
+
+# ---------- Phase 8.1: validator mode (advisory | blocking) ---------- #
+
+
+def _register_with_mode(client, headers, kind, name, config, mode):
+    return client.put(
+        f"/workspaces/me/validators/{kind}/{name}",
+        json={"config": config, "mode": mode},
+        headers=headers,
+    )
+
+
+def test_put_defaults_mode_to_advisory(client, alice):
+    """Phase 7A clients omit `mode` entirely. They land as advisory —
+    the existing post-emit-tag behavior."""
+    h = auth_headers(alice["api_key"]["plaintext"])
+    r = client.put(
+        "/workspaces/me/validators/polaris.plan/schema_strict",
+        json={"config": {"schema": _PLAN_SCHEMA}},  # no `mode`
+        headers=h,
+    )
+    assert r.status_code == 200
+    assert r.json()["mode"] == "advisory"
+
+
+def test_put_round_trips_mode_blocking(client, alice):
+    h = auth_headers(alice["api_key"]["plaintext"])
+    r = _register_with_mode(
+        client, h, "polaris.plan", "schema_strict",
+        {"schema": _PLAN_SCHEMA}, "blocking",
+    )
+    assert r.status_code == 200
+    assert r.json()["mode"] == "blocking"
+
+    # And the GET listing reports the same.
+    listed = client.get("/workspaces/me/validators", headers=h).json()
+    assert listed["validators"][0]["mode"] == "blocking"
+
+
+def test_put_round_trips_mode_advisory_explicit(client, alice):
+    """Same as the default path, but with the value passed explicitly —
+    pins the contract for callers that want to set the mode every time."""
+    h = auth_headers(alice["api_key"]["plaintext"])
+    r = _register_with_mode(
+        client, h, "polaris.plan", "schema_strict",
+        {"schema": _PLAN_SCHEMA}, "advisory",
+    )
+    assert r.status_code == 200
+    assert r.json()["mode"] == "advisory"
+
+
+def test_put_rejects_unknown_mode(client, alice):
+    """Anything outside {advisory, blocking} 400s — keeps the API
+    surface tight so a typo doesn't silently land an unintended
+    behavior."""
+    h = auth_headers(alice["api_key"]["plaintext"])
+    r = _register_with_mode(
+        client, h, "polaris.plan", "schema_strict",
+        {"schema": _PLAN_SCHEMA}, "shadow",
+    )
+    assert r.status_code == 400
+    assert "mode must be one of" in r.json()["detail"]
+
+
+def test_put_can_promote_existing_advisory_to_blocking(client, alice):
+    """Operator-flow regression: register a validator in advisory mode,
+    observe Phase 7A behavior, then PUT again with mode=blocking to
+    promote. The same row updates rather than a new row appearing."""
+    h = auth_headers(alice["api_key"]["plaintext"])
+    _register_with_mode(
+        client, h, "polaris.plan", "schema_strict",
+        {"schema": _PLAN_SCHEMA}, "advisory",
+    )
+    _register_with_mode(
+        client, h, "polaris.plan", "schema_strict",
+        {"schema": _PLAN_SCHEMA}, "blocking",
+    )
+    listed = client.get("/workspaces/me/validators", headers=h).json()
+    assert len(listed["validators"]) == 1
+    assert listed["validators"][0]["mode"] == "blocking"

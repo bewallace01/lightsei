@@ -173,14 +173,20 @@ class ValidatorConfigSetIn(BaseModel):
     (schema-strict expects `{schema: ...}`, content-rules expects
     `{rules: [...]}`) and the validator function is what defines the
     contract. We just store and forward.
+
+    `mode` defaults to "advisory" so a Phase 7A caller that omits the
+    field gets the existing behavior. "blocking" opts the validator
+    into pre-emit rejection (Phase 8.2 wires that path).
     """
     config: dict[str, Any] = Field(default_factory=dict)
+    mode: str = "advisory"
 
 
 # Validator-name and event-kind validation: same character class as
 # secret names since these strings end up in URL paths and DB columns.
 VALIDATOR_NAME_RE = _re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 EVENT_KIND_RE = _re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
+VALIDATOR_MODES = ("advisory", "blocking")
 
 
 def _serialize_api_key(k: ApiKey) -> dict[str, Any]:
@@ -843,6 +849,7 @@ def _serialize_validator_config(c: ValidatorConfig) -> dict[str, Any]:
         "event_kind": c.event_kind,
         "validator_name": c.validator_name,
         "config": c.config,
+        "mode": c.mode,
         "created_at": c.created_at.isoformat(),
         "updated_at": c.updated_at.isoformat(),
     }
@@ -870,6 +877,14 @@ def put_validator(
     workspace_id: str = Depends(get_workspace_id),
 ) -> dict[str, Any]:
     _validate_validator_path(event_kind, validator_name)
+    if body.mode not in VALIDATOR_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"mode must be one of {list(VALIDATOR_MODES)}; got "
+                f"{body.mode!r}"
+            ),
+        )
     now = utcnow()
     existing = session.get(
         ValidatorConfig, (workspace_id, event_kind, validator_name)
@@ -880,12 +895,14 @@ def put_validator(
             event_kind=event_kind,
             validator_name=validator_name,
             config=body.config,
+            mode=body.mode,
             created_at=now,
             updated_at=now,
         )
         session.add(row)
     else:
         existing.config = body.config
+        existing.mode = body.mode
         existing.updated_at = now
         row = existing
     session.flush()

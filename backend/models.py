@@ -379,6 +379,15 @@ class ValidatorConfig(Base):
     The pipeline reads this on every POST /events to find which validators
     to run against the new event's payload. Composite PK is the natural
     upsert key for `PUT /workspaces/me/validators/{event_kind}/{validator_name}`.
+
+    `mode` controls whether a fail result blocks ingestion or just tags
+    the event:
+      - "advisory" (default): the validator runs after insert, results
+        land in event_validations as a chip on the dashboard. The event
+        always lands.
+      - "blocking": the validator runs before insert; on `fail` the API
+        returns 422 with the violations and the event never lands.
+    See Phase 8.2 for the pipeline integration.
     """
     __tablename__ = "validator_configs"
 
@@ -390,6 +399,12 @@ class ValidatorConfig(Base):
     event_kind: Mapped[str] = mapped_column(String(64), primary_key=True)
     validator_name: Mapped[str] = mapped_column(String(64), primary_key=True)
     config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # "advisory" | "blocking". Stored as a free string (not an enum) so
+    # adding a new mode (e.g., "shadow" — run validator but log instead
+    # of writing event_validations) is a code-only change.
+    mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="advisory"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
