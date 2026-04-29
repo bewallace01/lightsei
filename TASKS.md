@@ -4,9 +4,9 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 8: TBD** — pick the next phase. Open candidates listed under Phase 8+.
+> **Phase 8.1: Validator-mode migration + endpoint update**
 
-Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. Phase 6 shipped 2026-04-27: Polaris orchestrator bot deployed via the Phase 5 PaaS. Phase 7 shipped 2026-04-28: output validation (guardrail layer 3) — Polaris's plans flow through schema-strict + content-rules validators, dashboard chips render PASS/FAIL/WARN, demo verified end-to-end against prod with both clean and injected-fail runs.
+Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. Phase 6 shipped 2026-04-27: Polaris orchestrator bot deployed via the Phase 5 PaaS. Phase 7 shipped 2026-04-28: output validation (guardrail layer 3, advisory) — Polaris's plans flow through schema-strict + content-rules validators, dashboard chips render PASS/FAIL/WARN. Phase 8 closes the layer-3 story by making validators BLOCKING when the operator opts in: a failing payload is rejected at ingestion, never lands. This is the "act, don't just plan" prerequisite — Polaris can safely dispatch commands once we trust the validation gate to catch bad outputs before they enter the system.
 
 Phases 1-4 shipped 2026-04-25. Production-readiness items (DB backups, tests + CI, rate limits + body cap, bot instance identity, secrets store) shipped 2026-04-26. See Done Log.
 
@@ -155,15 +155,54 @@ Phase 5A scope: single-host worker, in-process subprocess per bot, only safe for
 
 ---
 
-## Phase 8+: TBD
+## Phase 8: Blocking validators (guardrail layer 3, pre-emit)
 
-Open candidates for after output validation ships:
+**Demo at end of phase**: Promote `polaris.plan / schema_strict` from advisory to blocking via `PUT /workspaces/me/validators/polaris.plan/schema_strict` with `{"mode": "blocking"}`. Inject a schema-failing case in `polaris/system_prompt.md` (e.g., instruct Polaris to omit `summary`). Deploy. The worker's logs show a `422` from `POST /events` with the violation list, the bot keeps running (graceful), and **no new plan appears in the dashboard's `/polaris` view** — the rejected event never landed. Revert the injection, the next tick produces a clean plan that does land. The demo's evidence is what *isn't* there: a rejected event leaves no trace in the events table, just a worker-log line.
 
-- **Phase 7B**: make validators blocking + pre-emit. Required before "act, don't just plan."
-- **Polaris 8: act, don't just plan.** Polaris dispatches commands via `lightsei.send_command()` to user-deployed executor agents. Gated on 7B.
-- **Polaris 9: continuous eval (layer 5).** Judge-LLM scores past plans against actual outcomes.
+**Why this matters.** Phase 7A made layer 3 visible. Phase 8 makes it enforceable. Operators choose per-validator: advisory for soft signals (the content-rules pack stays advisory by default), blocking for invariants the rest of the system relies on (schema-strict is the natural blocking candidate). Once a validator is blocking, downstream consumers can trust the events table — no row past the gate violates that validator's rules. That's the guarantee Phase 9 (Polaris dispatch) will need.
+
+**Phase 8 scope**: server-side blocking + SDK graceful-degradation on 422. The bot doesn't get rejection-aware logic in this phase (that would require sync emit, which is its own design); a rejected plan just disappears from the timeline and the worker log records it. Phase 8B can later add `emit_sync` and a `polaris.plan_rejected` advisory event for stronger feedback in the dashboard.
+
+### 8.1 Validator-mode migration + endpoint update (NOW)
+
+- Migration `0014_validator_mode`: add `mode VARCHAR(16) NOT NULL DEFAULT 'advisory'` to `validator_configs`. Existing rows backfill to `advisory` automatically (Phase 7A's behavior is unchanged).
+- ORM model update: `ValidatorConfig.mode` field. CHECK that values are restricted to `advisory` | `blocking` (use a string column with app-side validation rather than an enum — keeps adding new modes a code-only change).
+- `PUT /workspaces/me/validators/{event_kind}/{validator_name}` body adds optional `mode: "advisory" | "blocking"` (default `advisory`). Reject other values with 400.
+- `GET /workspaces/me/validators` includes `mode` per row.
+- 4 new tests: PUT with `mode=blocking` round-trips, PUT with `mode=advisory` round-trips, PUT with bad mode 400s, default is `advisory`.
+
+### 8.2 Pipeline: pre-emit blocking on FAIL
+
+- Rewrite `POST /events`: split validators into `blocking` and `advisory` lists upfront. Run blocking validators **before** `session.add(event)`; if any returns `status=fail`, raise `HTTPException(422)` with `{"detail": "event rejected by blocking validator", "violations": [...]}`. Advisory validators run after insert as today.
+- The 422 response carries the list of violating rules so the SDK can log them usefully. Format: `{"detail": str, "violations": [{"validator": str, "rule": str, "message": str, ...}]}`.
+- Blocking-mode validators that return `error` or `timeout` do NOT block — only an explicit `fail`. A buggy validator can't take the API down.
+- Update existing `test_validation_pipeline.py` and add new cases: blocking + clean payload → 200, blocking + bad payload → 422 with violations in detail, advisory + bad payload → 200 with fail row (unchanged), mixed (one blocking + one advisory) + advisory-only-fail → 200, blocking validator with `error` status → 200 (don't block on validator bugs).
+
+### 8.3 SDK: graceful 422 handling
+
+- The SDK's `lightsei.emit()` queues to a background thread that POSTs to `/events`. Currently any non-2xx response is logged at debug. Phase 8 elevates 422 specifically: log a `warning` with `validator: rule: message` for each violation in the response, increment an `event_rejected` counter, drop the event from the queue.
+- Crucially: **don't raise**. The user's bot keeps running. Per CLAUDE.md Hard Rule 4 ("Graceful degradation is non-negotiable. SDK code must never crash the user's program if Lightsei's backend is unreachable"), an explicit rejection is treated the same as a transient backend error from the bot's perspective — log + continue.
+- 3 new tests in `sdk/tests/`: 422 response logs the violations + drops the event, 422 doesn't raise, repeated 422s don't accumulate stuck-state.
+
+### 8.4 Phase 8 demo
+
+- Promote schema-strict for `polaris.plan` to blocking via curl. (No new API surface needed — `PUT` already accepts mode.) Verify via `GET /workspaces/me/validators` that the row reads `mode: "blocking"`.
+- Inject a schema-violating case in `polaris/system_prompt.md`: instruct Polaris to omit the `summary` field entirely. The schema requires it, so the strict-mode tool call from Anthropic actually can't produce that output — Anthropic's strict tool use would itself reject. Workaround for the demo: the injection asks Polaris to use a non-string value for `summary` (e.g., return an empty list), which the tool may or may not accept. **If injecting a fail-the-schema case proves hard given strict tool calling, fall back to**: temporarily change the registered schema to require an extra field (e.g., `required: ["summary", "next_actions", "verified_by"]`), so any normal Polaris plan trips it. Either way, the demo is the rejection — what's IN the system_prompt vs what's IN the schema can flex.
+- Deploy Polaris. Watch worker logs: SDK warning lines should call out the rejection per-violation. `GET /agents/polaris/latest-plan` should still return the *previous* clean plan, not a new failing one. The dashboard's sidebar shouldn't show a new entry for this tick.
+- Revert the injection (or the schema, depending on which path we took), redeploy. Next tick produces a clean plan that lands; sidebar gets a new green-PASS row.
+- Done Log: worker log snippet showing the rejection + a screenshot of the dashboard "skipping" the failing tick (i.e., the latest plan timestamp not updating despite a new tick attempt).
+
+---
+
+## Phase 9+: TBD
+
+Open candidates for after blocking validators ship:
+
+- **Phase 9: act, don't just plan.** Polaris dispatches commands via `lightsei.send_command()` to user-deployed executor agents. Now safe — the validation gate catches bad outputs before they reach the dispatch path.
+- **Polaris 10: continuous eval (layer 5).** Judge-LLM scores past plans against actual outcomes.
 - **Layer 4: behavioral rules.** Loop detection, runaway-token guards, escalating-permission patterns. Streaming detection across a run.
 - **Phase 5B**: cut single-host worker over to Fly Machines / Modal sandboxes (gates external users).
+- **Phase 8B**: SDK `emit_sync` + Polaris `polaris.plan_rejected` advisory events. Strengthens the rejection feedback loop so the dashboard can render rejected plans explicitly rather than relying on absence.
 - GitHub OAuth + push-to-deploy.
 - Buildpacks / Dockerfile support beyond the fixed Python runtime.
 - N replicas + cron scheduling natively in the worker (Polaris currently does its own sleep loop; a real cron primitive would be cleaner).
