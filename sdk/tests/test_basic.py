@@ -24,8 +24,17 @@ def fake_backend(
     received: list[dict],
     *,
     secrets: dict[str, str] | None = None,
+    reject_kinds: dict[str, dict] | None = None,
 ) -> Iterator[str]:
+    """Fake Lightsei backend.
+
+    `reject_kinds` is a map of `event.kind -> 422 response body to return`.
+    When a posted event's kind is in the map, the backend returns 422 with
+    that body instead of 200. Used by Phase 8.3 SDK tests to simulate the
+    backend's blocking-validator rejection.
+    """
     secrets = secrets or {}
+    reject_kinds = reject_kinds or {}
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
@@ -52,6 +61,15 @@ def fake_backend(
                 data = {}
 
             if self.path == "/events":
+                kind = data.get("kind") if isinstance(data, dict) else None
+                if kind in reject_kinds:
+                    payload = json.dumps(reject_kinds[kind]).encode()
+                    self.send_response(422)
+                    self.send_header("content-type", "application/json")
+                    self.send_header("content-length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
                 received.append(data)
                 self.send_response(200)
                 self.send_header("content-type", "application/json")
@@ -214,3 +232,128 @@ def test_policy_check_fails_open_when_offline():
     )
     decision = lightsei.check_policy("openai.chat.completions.create")
     assert decision == {"allow": True}
+
+
+# ---------- Phase 8.3: 422 graceful handling ---------- #
+
+
+_REJECTION_BODY = {
+    "detail": {
+        "message": "event rejected by blocking validator",
+        "violations": [
+            {
+                "validator": "schema_strict",
+                "rule": "required",
+                "message": "'summary' is a required property",
+            },
+            {
+                "validator": "schema_strict",
+                "rule": "type",
+                "message": "123 is not of type 'string'",
+                "path": "/summary",
+            },
+        ],
+    }
+}
+
+
+def test_emit_logs_and_drops_on_422_rejection(caplog):
+    """A 422 response from /events is treated as a deliberate rejection
+    (Phase 8.2 blocking validator). The SDK logs each violation as a
+    WARNING, drops the event from the queue, and does NOT retry."""
+    received: list[dict] = []
+    with fake_backend(
+        received, reject_kinds={"forbidden_kind": _REJECTION_BODY}
+    ) as url:
+        lightsei.init(
+            api_key="k", agent_name="demo", base_url=url,
+            flush_interval=0.05, max_retries=3,
+        )
+
+        @lightsei.track
+        def do_work():
+            lightsei.emit("forbidden_kind", {"x": 1})
+            return "ok"
+
+        with caplog.at_level("WARNING", logger="lightsei"):
+            assert do_work() == "ok"
+            lightsei.flush(timeout=2.0)
+            time.sleep(0.2)
+
+    # Event was dropped — none of the rejected events landed.
+    assert all(e.get("kind") != "forbidden_kind" for e in received)
+
+    # Each violation produced its own warning line so a multi-rule
+    # rejection is visible at a glance in worker output.
+    rejection_logs = [
+        r.getMessage() for r in caplog.records
+        if "event rejected" in r.getMessage()
+    ]
+    assert any("schema_strict/required" in m for m in rejection_logs)
+    assert any("schema_strict/type" in m for m in rejection_logs)
+
+
+def test_422_does_not_crash_the_bot():
+    """Per Hard Rule 4 (graceful degradation), a backend rejection must
+    never crash the user's code. emit + flush both return normally."""
+    received: list[dict] = []
+    with fake_backend(
+        received, reject_kinds={"forbidden_kind": _REJECTION_BODY}
+    ) as url:
+        lightsei.init(
+            api_key="k", agent_name="demo", base_url=url,
+            flush_interval=0.05, max_retries=3,
+        )
+
+        @lightsei.track
+        def does_a_thing():
+            # Mix rejected + accepted emits inside one tracked call —
+            # the rejection of the first must not interrupt the run.
+            lightsei.emit("forbidden_kind", {"x": 1})
+            lightsei.emit("ok_kind", {"x": 1})
+            return "done"
+
+        # No raise from the @track wrapper, return value preserved.
+        assert does_a_thing() == "done"
+        lightsei.flush(timeout=2.0)
+        time.sleep(0.2)
+
+    # The accepted kind landed; the rejected one didn't.
+    kinds = [e.get("kind") for e in received]
+    assert "ok_kind" in kinds
+    assert "forbidden_kind" not in kinds
+    # The bot's run lifecycle events still landed even though one of
+    # its emits was rejected mid-run.
+    assert "run_started" in kinds
+    assert "run_ended" in kinds
+
+
+def test_event_rejected_counter_increments_per_rejection():
+    """A rejection counter is exposed on the client so a long-running
+    bot can detect a sustained rejection pattern (e.g., to back off
+    or alert). Increments per-rejected-event, no leakage across
+    accepted events."""
+    received: list[dict] = []
+    with fake_backend(
+        received, reject_kinds={"forbidden_kind": _REJECTION_BODY}
+    ) as url:
+        lightsei.init(
+            api_key="k", agent_name="demo", base_url=url,
+            flush_interval=0.05, max_retries=3,
+        )
+
+        @lightsei.track
+        def do_work():
+            # Three rejected emits, two accepted within one tracked run.
+            # Counter should land at 3 regardless.
+            lightsei.emit("forbidden_kind", {"x": 1})
+            lightsei.emit("ok_kind", {"x": 2})
+            lightsei.emit("forbidden_kind", {"x": 3})
+            lightsei.emit("ok_kind", {"x": 4})
+            lightsei.emit("forbidden_kind", {"x": 5})
+
+        do_work()
+        lightsei.flush(timeout=2.0)
+        time.sleep(0.2)
+
+    assert _client._event_rejected_count == 3

@@ -4,7 +4,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 8.3: SDK graceful 422 handling**
+> **Phase 8.4: Phase 8 demo**
 
 Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. Phase 6 shipped 2026-04-27: Polaris orchestrator bot deployed via the Phase 5 PaaS. Phase 7 shipped 2026-04-28: output validation (guardrail layer 3, advisory) — Polaris's plans flow through schema-strict + content-rules validators, dashboard chips render PASS/FAIL/WARN. Phase 8 closes the layer-3 story by making validators BLOCKING when the operator opts in: a failing payload is rejected at ingestion, never lands. This is the "act, don't just plan" prerequisite — Polaris can safely dispatch commands once we trust the validation gate to catch bad outputs before they enter the system.
 
@@ -167,13 +167,9 @@ Phase 5A scope: single-host worker, in-process subprocess per bot, only safe for
 
 ### 8.2 Pipeline: pre-emit blocking on FAIL ✅ done 2026-04-28 (see Done Log)
 
-### 8.3 SDK: graceful 422 handling (NOW)
+### 8.3 SDK: graceful 422 handling ✅ done 2026-04-28 (see Done Log)
 
-- The SDK's `lightsei.emit()` queues to a background thread that POSTs to `/events`. Currently any non-2xx response is logged at debug. Phase 8 elevates 422 specifically: log a `warning` with `validator: rule: message` for each violation in the response, increment an `event_rejected` counter, drop the event from the queue.
-- Crucially: **don't raise**. The user's bot keeps running. Per CLAUDE.md Hard Rule 4 ("Graceful degradation is non-negotiable. SDK code must never crash the user's program if Lightsei's backend is unreachable"), an explicit rejection is treated the same as a transient backend error from the bot's perspective — log + continue.
-- 3 new tests in `sdk/tests/`: 422 response logs the violations + drops the event, 422 doesn't raise, repeated 422s don't accumulate stuck-state.
-
-### 8.4 Phase 8 demo
+### 8.4 Phase 8 demo (NOW)
 
 - Promote schema-strict for `polaris.plan` to blocking via curl. (No new API surface needed — `PUT` already accepts mode.) Verify via `GET /workspaces/me/validators` that the row reads `mode: "blocking"`.
 - Inject a schema-violating case in `polaris/system_prompt.md`: instruct Polaris to omit the `summary` field entirely. The schema requires it, so the strict-mode tool call from Anthropic actually can't produce that output — Anthropic's strict tool use would itself reject. Workaround for the demo: the injection asks Polaris to use a non-string value for `summary` (e.g., return an empty list), which the tool may or may not accept. **If injecting a fail-the-schema case proves hard given strict tool calling, fall back to**: temporarily change the registered schema to require an extra field (e.g., `required: ["summary", "next_actions", "verified_by"]`), so any normal Polaris plan trips it. Either way, the demo is the rejection — what's IN the system_prompt vs what's IN the schema can flex.
@@ -223,6 +219,15 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-04-28 — Phase 8.3 SDK graceful 422 handling
+- [x] **`sdk/lightsei/_client.py:_post_event` recognizes 422 explicitly.** Before this change, every non-2xx fell through `r.raise_for_status()` into the retry loop, so a deliberate rejection from a blocking validator would be retried `max_retries` times before being dropped — wasted work, since the same payload would always be rejected. Phase 8.3 checks `r.status_code == 422` BEFORE `raise_for_status()`, calls a dedicated `_handle_rejection`, and returns immediately. Other status codes still go through the existing exception path with retry.
+- [x] **`_handle_rejection` parses the `{detail: {message, violations}}` shape** the backend ships in 8.2 and logs one `WARNING` per violation as `lightsei event rejected (kind): validator/rule — message`. Multi-rule rejections produce multi-line output so the operator can see each thing that fired in their worker logs at a glance. Falls back gracefully on unparseable bodies, missing detail dicts, and old-shape responses (older deploy mid-rollout) — never raises.
+- [x] **`_event_rejected_count` counter** on the client increments per rejected event. Surfaced as a debug aid for long-running bots that want to detect a sustained rejection pattern (e.g., to back off, alert, or page on). Never used by the SDK itself for any decision — the contract stays "log and drop" per Hard Rule 4 (graceful degradation).
+- [x] **No exceptions raised on 422 path.** Verified by a test that runs both rejected and accepted emits inside one `@track`-wrapped call and confirms the function returns its declared value with the rejected emit's run lifecycle (`run_started`, `run_ended`) still landing.
+- [x] **Fake backend extended** with a `reject_kinds: dict[str, dict]` param that returns 422 with the given body when an event of a matching kind is posted. Lets the test fixture express "reject this kind" without forking a whole second backend.
+- [x] **3 new tests** in `sdk/tests/test_basic.py`: rejection produces per-violation WARNING log lines and drops the event from the queue; 422 doesn't crash the bot mid-run; rejection counter increments per-event with no leakage across accepted events. Each test wraps emits in `@lightsei.track` because the SDK silently drops emits without a run_id (caught while writing the tests — `lightsei.emit` requires an active context, surfaced loud-failing in the manual repro before a single test even ran).
+- Verified: `pytest tests/test_basic.py -v` → **12/12** pass (was 9; +3 for 422 cases). SDK suite → **19/19** including the unchanged CLI tests. Backend suite → **173/173** unchanged. Phase 8 SDK + backend story is end-to-end green; only the demo (8.4) remains.
 
 ### 2026-04-28 — Phase 8.2 Pipeline pre-emit blocking on FAIL
 - [x] **`backend/validation_pipeline.py` refactored** into three stages: `evaluate_validators(session, workspace_id, event_kind, payload) → list[ValidationOutcome]` (pure compute, no DB writes), `find_blocking_failures(outcomes) → list[ValidationOutcome]` (filters to mode='blocking' AND status='fail'), and `write_validation_rows(session, event_id, outcomes) → None` (audit-trail persist). The split lets `POST /events` evaluate before deciding whether the event row gets created at all.

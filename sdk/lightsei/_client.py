@@ -46,6 +46,11 @@ class _Client:
         self._command_poller = None  # set in init() if needed
         self._chat_poller = None     # set in init() if needed
         self._heartbeat = None       # set in init() if agent_name set
+        # Counter for events the backend rejected via 422 (Phase 8.3).
+        # Surfaced as a debug aid — bots can read it to detect a sustained
+        # rejection pattern and back off, but the SDK never exposes
+        # rejection as a return value or exception (graceful degradation).
+        self._event_rejected_count: int = 0
 
     def is_initialized(self) -> bool:
         return self._initialized
@@ -272,6 +277,14 @@ class _Client:
         for attempt in range(self.max_retries):
             try:
                 r = self._http.post("/events", json=event)
+                # 422 = blocking-validator rejection (Phase 8.2). Distinct
+                # from a transient error: the backend deliberately refused
+                # the event, so retrying with the same payload would just
+                # get rejected again. Log the violations once, drop the
+                # event, never raise.
+                if r.status_code == 422:
+                    self._handle_rejection(event, r)
+                    return
                 r.raise_for_status()
                 return
             except Exception as e:
@@ -282,6 +295,55 @@ class _Client:
                     )
                     return
                 time.sleep(min(0.1 * (2 ** attempt), 1.0))
+
+    def _handle_rejection(self, event: dict[str, Any], response: "httpx.Response") -> None:
+        """Log a 422 rejection cleanly and update the rejected counter.
+
+        Per Hard Rule 4 (graceful degradation), this never raises — the
+        user's bot continues running. The log lines are the only signal
+        from the SDK; the backend's event_validations table is the
+        durable record.
+        """
+        self._event_rejected_count += 1
+        kind = event.get("kind", "?")
+        try:
+            body = response.json()
+        except Exception:
+            logger.warning(
+                "lightsei event rejected (%s): backend returned 422 with "
+                "an unparseable body",
+                kind,
+            )
+            return
+
+        detail = body.get("detail") if isinstance(body, dict) else None
+        if not isinstance(detail, dict):
+            # Older backend or unexpected shape — fall back to logging
+            # whatever string we got.
+            logger.warning(
+                "lightsei event rejected (%s): %s",
+                kind, detail or body,
+            )
+            return
+
+        message = detail.get("message", "event rejected")
+        violations = detail.get("violations", []) or []
+
+        if not violations:
+            logger.warning("lightsei event rejected (%s): %s", kind, message)
+            return
+
+        # One log line per violation so a multi-rule rejection is visible
+        # at a glance in worker output. Each line carries enough to map
+        # back to the registered validator + rule.
+        for v in violations:
+            logger.warning(
+                "lightsei event rejected (%s): %s/%s — %s",
+                kind,
+                v.get("validator", "?"),
+                v.get("rule", "?"),
+                v.get("message", "?"),
+            )
 
     def shutdown(self) -> None:
         if not self._initialized:
@@ -359,6 +421,7 @@ class _Client:
             self._command_poller = None
             self._chat_poller = None
             self._heartbeat = None
+            self._event_rejected_count = 0
 
 
 _client = _Client()
