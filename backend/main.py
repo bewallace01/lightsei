@@ -421,14 +421,70 @@ def patch_agent(
     return _serialize_agent(a)
 
 
-def _serialize_plan_event(row: Event) -> dict[str, Any]:
-    return {
+def _serialize_plan_event(
+    row: Event, validations: list[dict[str, Any]] | None = None
+) -> dict[str, Any]:
+    base: dict[str, Any] = {
         "event_id": row.id,
         "run_id": row.run_id,
         "agent_name": row.agent_name,
         "timestamp": row.timestamp.isoformat(),
         "payload": row.payload or {},
     }
+    if validations is not None:
+        base["validations"] = validations
+    return base
+
+
+def _validation_summaries_for_events(
+    session: Session, event_ids: list[int]
+) -> dict[int, list[dict[str, Any]]]:
+    """Bulk-fetch validation summaries for a list of event ids.
+
+    Returns `{event_id: [{validator, status, violation_count}]}`. Used by
+    the list-plans endpoint to avoid an N+1 fetch when rendering
+    sidebar chips. Each entry is the lite view: enough to render a
+    PASS / FAIL / WARN chip but no actual violation details.
+    """
+    if not event_ids:
+        return {}
+    rows = session.execute(
+        select(EventValidation)
+        .where(EventValidation.event_id.in_(event_ids))
+        .order_by(EventValidation.event_id, EventValidation.validator_name)
+    ).scalars().all()
+    out: dict[int, list[dict[str, Any]]] = {eid: [] for eid in event_ids}
+    for v in rows:
+        out[v.event_id].append({
+            "validator": v.validator_name,
+            "status": v.status,
+            "violation_count": len(v.violations or []),
+        })
+    return out
+
+
+def _validations_for_event(
+    session: Session, event_id: int
+) -> list[dict[str, Any]]:
+    """Full validation rows for one event, including violation details.
+
+    Used by `/latest-plan` (single plan, fine to be fat) and
+    `/events/{id}/validations`. The list-plans endpoint uses
+    `_validation_summaries_for_events` instead to keep responses lean.
+    """
+    rows = session.execute(
+        select(EventValidation)
+        .where(EventValidation.event_id == event_id)
+        .order_by(EventValidation.validator_name)
+    ).scalars().all()
+    return [
+        {
+            "validator": v.validator_name,
+            "status": v.status,
+            "violations": v.violations or [],
+        }
+        for v in rows
+    ]
 
 
 @app.get("/agents/{agent_name}/latest-plan")
@@ -441,10 +497,11 @@ def get_agent_latest_plan(
     to the calling workspace. Returns 404 when the agent has no plan
     events yet.
 
-    The endpoint does not require the agent's name to be `polaris` —
-    any agent emitting `polaris.plan` events is fair game. The caller
-    decides what to render. The dashboard's `/polaris` view currently
-    expects the agent to be `polaris`, but routing is flexible.
+    Includes the full validation results for the plan: the dashboard
+    selects this plan by default, so we ship the violation details
+    inline to avoid a follow-up fetch on first render. The list
+    endpoint trades that off for response size and only includes
+    summary chips.
     """
     row = session.execute(
         select(Event)
@@ -458,7 +515,7 @@ def get_agent_latest_plan(
     ).scalar_one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="no plan yet")
-    return _serialize_plan_event(row)
+    return _serialize_plan_event(row, _validations_for_event(session, row.id))
 
 
 @app.get("/agents/{agent_name}/plans")
@@ -473,6 +530,14 @@ def list_agent_plans(
     dashboard's plan-history sidebar — returning full payloads
     means the sidebar and the detail pane share data without a
     second fetch.
+
+    Each plan carries a `validations` array of summaries
+    (`{validator, status, violation_count}`), enough to render a
+    chip on each sidebar row without inflating the response with
+    full violation lists. The dashboard fetches full violations via
+    `/events/{event_id}/validations` when the user clicks a
+    historical plan; the latest plan ships full violations on
+    `/latest-plan`.
 
     Empty list (200) when the agent has no plan events yet —
     distinct from latest-plan's 404 because callers iterating
@@ -490,7 +555,36 @@ def list_agent_plans(
         .order_by(Event.timestamp.desc(), Event.id.desc())
         .limit(limit)
     ).scalars().all()
-    return {"plans": [_serialize_plan_event(r) for r in rows]}
+    summaries = _validation_summaries_for_events(session, [r.id for r in rows])
+    return {
+        "plans": [
+            _serialize_plan_event(r, summaries.get(r.id, []))
+            for r in rows
+        ]
+    }
+
+
+@app.get("/events/{event_id}/validations")
+def get_event_validations(
+    event_id: int,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Full validation results for one event.
+
+    Workspace-scoped: 404 if the event doesn't exist or belongs to a
+    different workspace. The check is two-step (event row exists,
+    event.workspace_id matches) rather than one query so we never
+    leak cross-workspace event existence via timing — both branches
+    return the same 404 detail.
+    """
+    event = session.get(Event, event_id)
+    if event is None or event.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="event not found")
+    return {
+        "event_id": event_id,
+        "validations": _validations_for_event(session, event_id),
+    }
 
 
 @app.post("/workspaces")

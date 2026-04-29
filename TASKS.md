@@ -4,7 +4,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 7.4: Backend endpoints for validation results**
+> **Phase 7.5: Dashboard shows validation status**
 
 Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. Phase 6 shipped 2026-04-27: Polaris, the project orchestrator bot, deployed via the Phase 5 PaaS against this project's own docs. Phase 7 picks up the dogfood loop with output validation (MEMORY.md guardrail layer 3) — Polaris validates its own plans before they're treated as trustworthy by the dashboard. Layer 4 (behavioral rules) and command dispatch land in later phases once we trust Polaris's outputs enough to act on them.
 
@@ -145,14 +145,9 @@ Phase 5A scope: single-host worker, in-process subprocess per bot, only safe for
 
 ### 7.3 Validation pipeline + event annotation ✅ done 2026-04-28 (see Done Log)
 
-### 7.4 Backend endpoints for validation results (NOW)
+### 7.4 Backend endpoints for validation results ✅ done 2026-04-28 (see Done Log)
 
-- `GET /events/{event_id}/validations` — list validations for one event. Workspace-scoped. 404 if event not in workspace.
-- Extend `GET /agents/{name}/plans` and `GET /agents/{name}/latest-plan` to include a `validations` field on each returned plan (joined from `event_validations` by event_id). `validations: [{"validator": str, "status": str, "violations": [...]}]`.
-- The latest-plan/plans endpoints are dashboard-facing; including validations directly avoids an N+1 fetch on the sidebar. Keep them lean: just `validator`, `status`, and the count of violations on the list endpoint; full violation details only on the per-event endpoint.
-- Tests in `backend/tests/test_validators.py`: fixture seeds a polaris.plan event + validations, list/detail endpoints return them, cross-workspace isolation, 404 paths.
-
-### 7.5 Dashboard shows validation status
+### 7.5 Dashboard shows validation status (NOW)
 
 - `/polaris` view additions:
   - History sidebar: each plan entry gets a chip — green PASS / red FAIL / amber WARN, derived from the worst status across the event's validations (any FAIL → FAIL, any WARN → WARN, all PASS → PASS, none → "unchecked" gray dot).
@@ -209,6 +204,14 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-04-28 — Phase 7.4 Backend endpoints for validation results
+- [x] **`GET /events/{event_id}/validations`** returns the full validation rows for one event (validator + status + full violations[]). Workspace-scoped via two-step check (event exists, event.workspace_id matches) so cross-workspace event existence can't leak via timing — both branches return identical 404 detail.
+- [x] **`GET /agents/{name}/latest-plan` extended** to embed full violations inline. The dashboard selects this plan by default; shipping violations on the same response avoids a follow-up fetch on first render. Single-plan response, fine to be fat.
+- [x] **`GET /agents/{name}/plans` extended** with lite validation summaries: `[{validator, status, violation_count}]` per plan. The list endpoint powers the dashboard sidebar (50 plans × full violations would inflate responses); summaries are enough to render PASS / FAIL / WARN chips. The dashboard fetches full violations via `/events/{id}/validations` when the user clicks a historical plan.
+- [x] **Helpers in `main.py`**: `_validation_summaries_for_events(session, event_ids)` does a single bulk query (`WHERE event_id IN (...)`) and groups by event_id, avoiding N+1 on the list endpoint. `_validations_for_event(session, event_id)` is the full-detail variant for single-plan responses. `_serialize_plan_event` now takes an optional `validations` argument so the same serializer powers both the lite and the full view.
+- [x] **8 new tests** in `backend/tests/test_polaris.py` covering: full violations on `/events/{id}/validations`, 404 with no detail leak when event belongs to another workspace, 404 on unknown event id, latest-plan ships full violations (key set is `{validator, status, violations}`), list-plans ships only summaries (key set is `{validator, status, violation_count}`), violation_count reflects an actual failed validation, plans with no validators registered carry `validations: []` (distinguishable from "all passed" by the array being empty), workspace isolation on the validations field of latest-plan.
+- Verified: `pytest tests/test_polaris.py -v` → **20/20** pass (was 12; +8 for 7.4). Full backend suite → **160/160** (was 152; +8). The dashboard hookup in 7.5 has everything it needs from the API surface.
 
 ### 2026-04-28 — Phase 7.3 Validation pipeline + event annotation
 - [x] **Migration `0013_validators`** creates two tables. `validator_configs` (workspace_id FK CASCADE, event_kind, validator_name, config JSONB, timestamps) — composite PK is the natural upsert key for `PUT /workspaces/me/validators/{event_kind}/{validator_name}`. `event_validations` (id BIGSERIAL, event_id FK CASCADE, validator_name, status, violations JSONB, created_at) with `UNIQUE(event_id, validator_name)` so a re-run can't double up rows. Indexes on the hot lookup paths.
