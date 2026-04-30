@@ -240,13 +240,16 @@ def test_delete_404_for_other_workspace(client, alice, bob):
     ).status_code == 200
 
 
-# ---------- test-fire stub (Phase 9.1) ---------- #
+# ---------- test-fire (Phase 9.2 real dispatch) ---------- #
 
 
-def test_test_fire_writes_skipped_delivery_row(client, alice):
-    """The 9.1 stub writes a 'skipped' delivery row with a clear
-    reason. 9.2 will replace this with real dispatch but the endpoint
-    shape stays identical."""
+def test_test_fire_records_real_dispatch_attempt(client, alice):
+    """Phase 9.2: the test-fire endpoint now does a real HTTP-out via
+    the per-platform formatter. The configured URL doesn't reach a
+    real Slack workspace, so the delivery lands as `failed` with an
+    http_error or transport_error response_summary — but the row IS
+    written. The endpoint returns 200 either way; it doesn't surface
+    webhook failures as 5xx."""
     from db import engine
     from sqlalchemy.orm import Session as ORMSession
 
@@ -258,11 +261,18 @@ def test_test_fire_writes_skipped_delivery_row(client, alice):
     )
     assert r.status_code == 200
     body = r.json()
-    assert body["delivery"]["status"] == "skipped"
     assert body["delivery"]["trigger"] == "test"
-    assert body["delivery"]["response_summary"]["reason"] == "phase_9_2_will_deliver"
+    # The fixture URL is hooks.slack.com/services/T01ABCDEF/... — Slack
+    # itself responds 4xx with `invalid_token` for fake credentials.
+    # Either http_error (Slack served a 4xx) or transport_error
+    # (network blocked entirely) is a valid Phase 9.2 outcome; what
+    # matters is that the endpoint records the attempt cleanly.
+    assert body["delivery"]["status"] in ("sent", "failed")
+    summary = body["delivery"]["response_summary"]
+    # response_summary always has *something* — http_status on success/
+    # 4xx, error on transport-level failures.
+    assert summary, "response_summary should never be empty"
 
-    # Row landed in the DB
     with ORMSession(engine) as s:
         rows = s.execute(
             select(NotificationDelivery).where(
@@ -270,7 +280,7 @@ def test_test_fire_writes_skipped_delivery_row(client, alice):
             )
         ).scalars().all()
         assert len(rows) == 1
-        assert rows[0].status == "skipped"
+        assert rows[0].status in ("sent", "failed")
 
 
 def test_deliveries_endpoint_lists_recent_attempts(client, alice):

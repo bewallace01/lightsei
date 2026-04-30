@@ -4,9 +4,9 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 9.2: Channel-type registry + Slack / Discord / Teams / Mattermost formatters**
+> **Phase 9.3: Generic webhook channel + HMAC signing**
 
-Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. Phase 6 shipped 2026-04-27: Polaris orchestrator bot deployed via the Phase 5 PaaS. Phase 7 shipped 2026-04-28: output validation (advisory). Phase 8 shipped 2026-04-28: blocking validators. Phase 9 makes Lightsei a product people actually want to use: it tells you when something needs your attention instead of waiting for you to check. **9.0 published `lightsei` to PyPI 2026-04-29 — `pip install lightsei` now just works.** **9.1 shipped the notification-channel API surface 2026-04-29 — CRUD, masking, audit trail, test-fire stub.**
+Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. Phase 6 shipped 2026-04-27: Polaris orchestrator bot deployed via the Phase 5 PaaS. Phase 7 shipped 2026-04-28: output validation (advisory). Phase 8 shipped 2026-04-28: blocking validators. Phase 9 makes Lightsei a product people actually want to use: it tells you when something needs your attention instead of waiting for you to check. **9.0 published `lightsei` to PyPI 2026-04-29.** **9.1 shipped the notification API surface 2026-04-29.** **9.2 shipped the dispatcher + Slack / Discord / Teams / Mattermost formatters 2026-04-30.**
 
 Phases 1-4 shipped 2026-04-25. Production-readiness items (DB backups, tests + CI, rate limits + body cap, bot instance identity, secrets store) shipped 2026-04-26. See Done Log.
 
@@ -199,23 +199,9 @@ Three trigger types: `polaris.plan`, `validation.fail`, `run_failed`.
 
 ### 9.1 Notification channels: schema + endpoints ✅ done 2026-04-29 (see Done Log)
 
-### 9.2 Channel-type registry + Slack / Discord / Teams / Mattermost formatters (NOW)
+### 9.2 Channel-type registry + Slack / Discord / Teams / Mattermost formatters ✅ done 2026-04-30 (see Done Log)
 
-- New `backend/notifications/` package mirroring `backend/validators/`. The shape:
-  - `_types.py`: `Signal` (kind, payload, agent_name, dashboard_url, timestamp) and `Delivery` (status, response_summary).
-  - `slack.py`, `discord.py`, `teams.py`, `mattermost.py`, `webhook.py`: each exports a `format(signal, trigger) -> dict` (the platform-specific HTTP body) and a `post(url, body, secret_token=None) -> Delivery`.
-  - `__init__.py`: registry of `{type: (format_fn, post_fn)}` and a `dispatch(channel, signal, trigger)` entry point.
-- **Slack** uses Slack [Block Kit](https://api.slack.com/block-kit). Three message templates:
-  - **`polaris.plan`**: header "🌟 Polaris plan", section block with summary, numbered list of top 3 `next_actions`, footer "Generated {relative_time} • View full plan ↗" with the dashboard URL.
-  - **`validation.fail`**: header "🔴 Validation failed on {agent}", section showing the validator + rule + matched substring, footer "View plan ↗".
-  - **`run_failed`**: header "💥 {agent} run failed", section with the run id and (if available) the error message from the `run_failed` event payload, footer "View run ↗".
-- **Discord** uses Discord webhook [embeds](https://discord.com/developers/docs/resources/webhook#execute-webhook). Same three templates, rendered as Discord embed objects (title, description, fields, color = green for plan / amber for warn / red for fail+crash). Color is the visual cue Discord users expect that Slack handles via emoji.
-- **MS Teams** uses [Adaptive Cards 1.5+](https://adaptivecards.io/) wrapped in the Teams `application/vnd.microsoft.card.adaptive` envelope. Same three templates, rendered as Adaptive Card containers with TextBlock + FactSet + ActionSet (the "View" links become Action.OpenUrl). Microsoft has been deprecating the older MessageCard format and the legacy "Office 365 Connector" webhook URL — the supported URL today comes from the Teams app **Workflows** ("Post to a channel when a webhook request is received"). The formatter targets that flavor; we'll document it in the dashboard's URL hint so users grab the right one.
-- **Mattermost** is Slack-compatible: it accepts incoming webhooks in Slack's payload format. Reuse the Slack formatter with `mattermost` registered as a separate type (so the dashboard can label it correctly and we keep the door open for Mattermost-specific tweaks later).
-- HTTP timeout 2s per delivery; on failure write a `notification_deliveries` row with `status='failed'` and the response code/body for debugging. No retries in v1 — webhook providers usually have their own delivery guarantees, and our audit trail is enough to diagnose.
-- Tests per formatter: each emits the expected platform-specific shape (Slack Block Kit JSON, Discord embed JSON, Teams Adaptive Card JSON, Mattermost Slack-compat JSON); dispatcher routes to the right formatter by `channel.type`; 200/4xx/timeout each land their own audit row; failed delivery doesn't raise.
-
-### 9.3 Generic webhook channel
+### 9.3 Generic webhook channel (NOW)
 
 - Same dispatcher abstraction; the webhook channel POSTs a Lightsei-defined JSON envelope that any system can consume:
   ```
@@ -308,6 +294,24 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-04-30 — Phase 9.2 Channel-type registry + Slack / Discord / Teams / Mattermost formatters
+- [x] **`backend/notifications/` package** mirrors `backend/validators/`:
+  - `_types.py`: `Signal` dataclass (trigger, agent_name, dashboard_url, timestamp, payload, workspace_id) and `Delivery` (status, response_summary, attempt_count). Plain dataclasses keep storage trivially JSON-serializable.
+  - `_shared.py`: cross-platform message-text helpers (`relative_time`, `truncate`, `top_next_actions`, `first_violation_summary`, `run_failed_summary`). One source of truth for the strings each formatter renders, so a user toggling between Slack and the dashboard sees consistent labels.
+  - `_http.py`: shared `post_json()` HTTP-out with 2s timeout, 500-char response-body preview, and clean failure mapping (timeout / transport_error / http_error / post_exception). No retries — webhook providers have their own delivery story; the audit trail is the durable record.
+  - Per-platform: `slack.py`, `discord.py`, `teams.py`, `mattermost.py`. Each exports `format(signal) -> dict` and `post(url, body, secret_token=None) -> Delivery`.
+  - `__init__.py`: registry of `{type: (format_fn, post_fn)}` + a `dispatch(channel_type, target_url, signal, secret_token)` entry point that never raises.
+- [x] **Slack** uses Block Kit. Each message includes both `text` (fallback for screen readers + phone previews) and `blocks` (rich layout). Three rendered templates plus a `test` template plus a future-proof `_format_generic` so an unrecognized trigger lands a generic message instead of raising.
+- [x] **Discord** uses webhook embeds. Color-coded by signal type using the same hex values as the dashboard's STATUS_STYLES chips (green `0x10B981` for plan, amber `0xF59E0B` for warn/test, red `0xEF4444` for fail/crash). Color is the visual cue Discord users expect; Slack handles the same via emoji.
+- [x] **Teams** uses Adaptive Card 1.5 wrapped in the Bot Framework `attachments` envelope (`type: "message"`, `attachments: [{contentType: "application/vnd.microsoft.card.adaptive", contentUrl: null, content: <card>}]`). Targets the modern Workflows webhook URL — the legacy Office 365 Connector format / URLs were deprecated by Microsoft in 2025. Action.OpenUrl renders the deep link as a tap-through button. `fontType: Monospace` on the run-failed error block renders fixed-width across desktop/mobile/web Teams clients.
+- [x] **Mattermost** registered as Slack-compat: the registry entry uses `slack.format` directly with `mattermost.post`. Mattermost accepts Slack incoming-webhook JSON verbatim, so the format function is shared. Keeping `mattermost.post` separate means stack traces blame the right module and we have a place for Mattermost-specific tweaks if we ever need them.
+- [x] **Test-fire endpoint swapped from stub to real dispatch**: `POST /workspaces/me/notifications/{id}/test` now calls `notifications.dispatch()`, persists the resulting `Delivery` to `notification_deliveries`, returns 200 with the row regardless of dispatch outcome. A misconfigured channel surfaces as `status='failed'` with the http_status / error reason in `response_summary`, not as a 5xx — that's the user's problem to fix, not a server alarm.
+- [x] **`DASHBOARD_BASE_URL` configurable** via `LIGHTSEI_DASHBOARD_BASE_URL` env var (defaults to `https://app.lightsei.com`). `_dashboard_url_for(trigger, agent_name, run_id)` builds the deep link the formatters embed in the "View ↗" buttons. Self-hosters can point at their own dashboard.
+- [x] **28 new tests** in `backend/tests/test_notifications_dispatch.py`: registry contents pin (`v1 = slack/discord/teams/mattermost`); dispatch unknown-type returns `failed` not raise; helpers (`relative_time`, `truncate`, `top_next_actions`, `first_violation_summary`, `run_failed_summary`) covering happy paths + defensive paths (mixed-garbage `next_actions`, missing fields, all three error-message field-name fallbacks); per-platform shape snapshots for each formatter (Slack Block Kit `text + blocks` + header/section/context structure; Discord embed with the right `color` per trigger, `url`, `timestamp`; Teams Adaptive Card envelope including `Action.OpenUrl` action and `Attention`/`Monospace` color cues; Mattermost format equals Slack format byte-for-byte); HTTP-out paths (2xx → sent, 4xx with body preview → failed/http_error, timeout → failed/timeout, response body clipped to 500 chars); dispatch routing across all 4 channel types via `httpx.MockTransport`; formatter-exception handling produces `formatter_exception` Delivery rather than crashing the dispatcher.
+- [x] **Updated 9.1's "test-fire writes skipped row" test** to `test_test_fire_records_real_dispatch_attempt` since the stub status `skipped` was replaced. Endpoint shape unchanged so the dashboard's "send test" button doesn't need updating in 9.5.
+- Real bug surfaced in test mocking: my first attempt at patching `httpx.Client` used a lambda that didn't survive `with` context-manager re-entry. Fixed with a `mock_httpx_post(handler)` `@contextmanager` helper that uses `MockTransport` and `patch.object(notifications_http.httpx, "Client", side_effect=factory)` so subsequent `with httpx.Client(timeout=...)` calls inside `_http.post_json` get a transport-mocked client. 5 tests went from FAIL to PASS with that switch. The pattern is reusable for any future formatter test.
+- Verified: `pytest tests/test_notifications_dispatch.py -v` → **28/28** pass; `tests/test_notifications.py` (9.1's tests) → **22/22** pass with the swapped test-fire test. Full backend suite → **223/223** (was 195; +28 dispatcher). 9.4 (trigger pipeline hooked into POST /events) and 9.5 (dashboard panel) now have a real dispatcher to plug into; 9.3 adds the generic-webhook formatter as the last channel-type before the demo.
 
 ### 2026-04-29 — Phase 9.1 Notification channels: schema + endpoints
 - [x] **Migration `0015_notifications`**: two new tables. `notification_channels` (id UUID, workspace_id FK CASCADE, name, type, target_url, triggers JSONB, secret_token nullable, is_active default true, timestamps) with `UNIQUE(workspace_id, name)` so a workspace can't have two channels with the same name. `notification_deliveries` (id BIGSERIAL, channel_id FK CASCADE, event_id FK SET NULL, trigger, status, response_summary JSONB nullable, attempt_count, sent_at) with `idx_notification_deliveries_channel_sent (channel_id, sent_at)` for the "show me the last N deliveries for this channel" hot path. The `event_id` SET NULL ON DELETE choice lets an event purge keep the audit history intact.

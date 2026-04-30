@@ -1,4 +1,5 @@
 import hashlib
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -48,6 +49,7 @@ from models import (
     Workspace,
     WorkspaceSecret,
 )
+import notifications
 import validators
 from validation_pipeline import (
     evaluate_validators,
@@ -960,6 +962,28 @@ def delete_validator(
     return {"status": "ok"}
 
 
+# Dashboard base URL the formatters bake into "View ↗" links inside
+# notification messages. Configurable so a self-host can point at its
+# own dashboard. Default matches prod.
+DASHBOARD_BASE_URL = os.environ.get(
+    "LIGHTSEI_DASHBOARD_BASE_URL", "https://app.lightsei.com"
+).rstrip("/")
+
+
+def _dashboard_url_for(trigger: str, agent_name: str, run_id: Optional[str] = None) -> str:
+    """Build the deep link a notification's "View" action points at.
+
+    polaris.plan / validation.fail send users to the Polaris page;
+    run_failed sends them to the run detail. The dashboard handles
+    auth + workspace selection, so we don't pass a workspace id here.
+    """
+    if trigger == "run_failed" and run_id:
+        return f"{DASHBOARD_BASE_URL}/runs/{run_id}"
+    if agent_name == "polaris" or trigger in ("polaris.plan", "validation.fail"):
+        return f"{DASHBOARD_BASE_URL}/polaris"
+    return f"{DASHBOARD_BASE_URL}/agents/{agent_name}"
+
+
 # ---------- /workspaces/me/notifications (Phase 9.1) ---------- #
 #
 # Channels are workspace-scoped, unique-by-name, with a list of symbolic
@@ -1207,36 +1231,48 @@ def test_notification_channel(
 ) -> dict[str, Any]:
     """Fire a synthetic test message at this channel.
 
-    Phase 9.1 stub: writes a `notification_deliveries` row with
-    `status='skipped'` and a placeholder reason. Phase 9.2 replaces
-    this with a real dispatch (formatter + HTTP-out + status from
-    response). The endpoint shape stays identical across the swap so
-    the dashboard's "send test" button doesn't change.
+    Phase 9.2 swap: now does a real dispatch via the per-platform
+    formatter + HTTP-out, records the result in `notification_
+    deliveries`. Endpoint shape unchanged from Phase 9.1 so the
+    dashboard's "send test" button doesn't need updating.
+
+    Returns 200 with the delivery row regardless of dispatch outcome
+    (sent vs failed). The HTTP status of the underlying webhook lives
+    in `delivery.response_summary.http_status`. We deliberately don't
+    surface failures as 5xx — a misconfigured channel is the user's
+    problem to fix, not a server error to alert on.
     """
     row = session.get(NotificationChannel, channel_id)
     if row is None or row.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="channel not found")
+
+    signal = notifications.Signal(
+        trigger="test",
+        agent_name=row.name,  # the test message references the channel by name
+        dashboard_url=f"{DASHBOARD_BASE_URL}/account",
+        timestamp=utcnow(),
+        payload={},
+        workspace_id=workspace_id,
+    )
+    result = notifications.dispatch(
+        channel_type=row.type,
+        target_url=row.target_url,
+        signal=signal,
+        secret_token=row.secret_token,
+    )
+
     delivery = NotificationDelivery(
         channel_id=row.id,
         event_id=None,
         trigger="test",
-        status="skipped",
-        response_summary={
-            "reason": "phase_9_2_will_deliver",
-            "message": (
-                "Notification channels are configured but the dispatcher "
-                "lands in Phase 9.2. This is a stub delivery row."
-            ),
-        },
-        attempt_count=0,
+        status=result.status,
+        response_summary=result.response_summary,
+        attempt_count=result.attempt_count,
         sent_at=utcnow(),
     )
     session.add(delivery)
     session.flush()
-    return {
-        "delivery": _serialize_notification_delivery(delivery),
-        "note": "stub — actual dispatch lands in Phase 9.2",
-    }
+    return {"delivery": _serialize_notification_delivery(delivery)}
 
 
 @app.get("/workspaces/me/notifications/{channel_id}/deliveries")
