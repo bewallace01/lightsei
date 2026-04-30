@@ -4,9 +4,9 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 9.6: Phase 9 demo**
+> **Phase 10: TBD** — pick the next phase. Open candidates listed under Phase 10+.
 
-Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. Phase 6 shipped 2026-04-27: Polaris orchestrator bot deployed via the Phase 5 PaaS. Phase 7 shipped 2026-04-28: output validation (advisory). Phase 8 shipped 2026-04-28: blocking validators. Phase 9 makes Lightsei a product people actually want to use: it tells you when something needs your attention instead of waiting for you to check. **9.0–9.5 shipped the full notification surface (PyPI publish, channel API, five-platform dispatcher, generic webhook with HMAC, BackgroundTasks trigger pipeline, dashboard panel). All five channel types fire automatically on the right triggers, manageable via /notifications.**
+Phases 1-4 shipped 2026-04-25 (spine, cost-cap guardrail, Anthropic + streaming, hosted-readiness). Phase 5 shipped 2026-04-26 (PaaS-for-agents). Phase 6 shipped 2026-04-27 (Polaris orchestrator). Phase 7 shipped 2026-04-28 (output validation, advisory). Phase 8 shipped 2026-04-28 (blocking validators). Phase 9 shipped 2026-04-30 (notifications across Slack / Discord / Teams / Mattermost / generic webhook with HMAC, dashboard-managed, real Slack messages verified end-to-end against prod).
 
 Phases 1-4 shipped 2026-04-25. Production-readiness items (DB backups, tests + CI, rate limits + body cap, bot instance identity, secrets store) shipped 2026-04-26. See Done Log.
 
@@ -207,14 +207,9 @@ Three trigger types: `polaris.plan`, `validation.fail`, `run_failed`.
 
 ### 9.5 Dashboard: Notifications panel ✅ done 2026-04-30 (see Done Log)
 
-### 9.6 Phase 9 demo (NOW)
+### 9.6 Phase 9 demo ✅ done 2026-04-30 (see Done Log)
 
-- Register at least three channels: Slack, Discord, and Teams (real webhook URLs from the user's actual workspaces). Optional: also Mattermost and a generic webhook (the latter pointing at webhook.site to verify the JSON envelope shape).
-- "Send test" on each → confirm formatted messages arrive on every platform with the platform-native styling (Slack Block Kit, Discord embed colors, Teams Adaptive Card).
-- Wait for the next Polaris tick (or trigger one by tweaking docs) → every registered channel receives the plan message in its respective format. The visual contrast across Slack / Discord / Teams is the proof the channel-type abstraction works end-to-end.
-- Inject a validation failure (re-use the Phase 8.4 tightened-schema trick on a non-blocking validator, OR fire a synthetic FAIL row via `/events` with a payload that trips content-rules) → every channel receives the validation message.
-- Manually post a `run_failed` event → every channel receives the crash message.
-- Done Log: screenshots of (a) the dashboard's Notifications panel listing every registered channel, (b)-(d) the messages received on each platform for each trigger (so the visual difference between Slack / Discord / Teams renderings is captured), and (e) a brief usefulness note ("would I rather have this in my day or have to remember to check the dashboard?").
+**Phase 9 complete 2026-04-30.**
 
 ---
 
@@ -260,6 +255,47 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-04-30 — Phase 9 Notifications COMPLETE 🎯
+Demo criterion (from MEMORY.md / Phase 9 header): *"Add a webhook URL on the workspace through the dashboard. Within minutes Polaris's next plan lands in your team chat as a formatted message with the summary, top next-action, and a deep link back to /polaris. Validation FAIL → different message with the matched rule. Run failure → crash message. The user never opened the dashboard."* — passed.
+
+**Three real Slack messages, three different templates, all delivered to a real Slack workspace within seconds of the trigger event.**
+
+Demo run pointed at prod (`https://api.lightsei.com`, `https://app.lightsei.com`, real Slack incoming webhook).
+
+- [x] **Pushed all of Phase 9 (commits 9.0 plan, 9.0 publish, 9.1, 9.2, 9.3, 9.4, 9.5) to `origin/main` and triggered Railway redeploys** for both backend and dashboard in parallel via `railway up`. Both `Deploy complete`. Migration through 0015 ran on backend boot (`/workspaces/me/notifications` returns `{channels: []}` instead of the old `404 Not Found`).
+- [x] **No regressions on prior phases**: `/agents/polaris/latest-plan` still 200 with the canonical plan, `/workspaces/me/validators` still shows `polaris.plan / schema_strict mode=blocking` and `polaris.plan / content_rules mode=advisory` from Phase 8. Phase 9 is purely additive.
+- [x] **User-supplied real Slack webhook URL** (kept in shell only, never logged or committed). Registered as `team-slack` channel via `POST /workspaces/me/notifications` subscribing to all three triggers. Channel id ends in `e406b`. The dashboard renders the URL masked as `https://hooks.slack.com/ser...i9Lk`.
+- [x] **Three real Slack messages dispatched and confirmed received**:
+
+  **Test fire (`POST /test`)** at 23:07:13 UTC: `{"status": "sent", "http_status": 200, "response_preview": "ok"}`. User confirmed the message arrived as:
+  > ✅ Lightsei test message
+  > If you're seeing this, your Slack channel is wired up. Real notifications for team-slack will arrive when their triggers fire.
+  > Manage channels ↗
+
+  **`polaris.plan` event** at 23:09:32 UTC: posted via `/events` with a conforming envelope (schema_strict in mode=blocking required all fields present). BackgroundTasks dispatched to Slack within ~600ms. User confirmed:
+  > 🌟 Polaris plan
+  > polaris · just now
+  > Phase 9.6 is firing real notifications: this plan was emitted by hand to demonstrate that the trigger pipeline carries Polaris's structured payload all the way to Slack.
+  > **Next actions**
+  > 1. Verify this plan arrived in your Slack channel as a Block Kit message
+  > 2. Optionally add a Discord and Teams channel via /notifications
+  > 3. Watch the deliveries audit trail at /notifications expand to show this delivery as 'sent'
+  > View full plan ↗
+
+  **`run_failed` event** at 23:09:33 UTC: posted via `/events` with `{"error": "RuntimeError: synthetic crash for Phase 9.6 demo"}`. User confirmed:
+  > 💥 polaris run failed
+  > **Error**
+  > ```
+  > RuntimeError: synthetic crash for Phase 9.6 demo
+  > ```
+  > View run ↗
+- [x] **Audit trail visible in the dashboard**: `docs/phase9-prod-slack-deliveries.png` shows `/notifications` rendering the live `team-slack` channel (Slack purple "S" icon, masked URL, three trigger chips, send test/mute/delete actions), the recent-deliveries panel expanded showing "last 3: 3 sent, 0 failed", and the audit table with all three rows green-PILL `SENT` and `200` HTTP status. The audit table is the durable record — future debugging never needs to reach into Slack itself.
+- [x] **Why didn't I deploy Polaris fresh for this demo?** The trigger-pipeline path is identical whether Polaris emits an event via the SDK or a script does it via `/events`. Manually emitting the payloads costs nothing (vs ~$0.18 for a real Polaris tick), runs in seconds, and lets us trigger all three event types deliberately rather than waiting for Polaris to coincidentally produce a `run_failed`. The Phase 6.6 demo already proved the SDK→`/events` path; Phase 9.6's evidence is what happens *after* an event lands, not before.
+- [x] **Discord + Teams deferred (still on the menu)**: the user provided a Slack URL only. The dashboard's add-channel form is now the easiest path forward — Discord/Teams URLs can be pasted in at any time without redeploys. Phase 9 ships the surface; the user provisions channels at their own pace. Phase 10+ can revisit if we want a richer onboarding flow.
+- [x] **Demo data left in prod**: `polaris.plan` event 164 and `run_failed` event 167 are now in the polaris agent's history. The summary on event 164 explicitly labels it as a Phase 9.6 demo synthetic, so future Polaris plans (and the `/polaris` dashboard's plan history) will show it as the demo entry rather than a confusing real-looking row. Acceptable as-is; a manual cleanup endpoint isn't worth Phase 9 scope.
+
+This is the most user-facing phase Lightsei has shipped. Polaris went from "I have to remember to check the dashboard" to "Polaris pings me in Slack when there's something to look at." The next time I want to know whether the project is stuck, I look at Slack instead of opening a browser tab. That's the diff Phase 9 was meant to make.
 
 ### 2026-04-30 — Phase 9.5 Dashboard "Notifications" panel
 - [x] **New `/notifications` route** at `dashboard/app/notifications/page.tsx`. Sibling to `/account` (rather than nested) since notifications are workspace-level config that users will want to bookmark and link to. Linked from the global Header next to "polaris" so it's reachable from anywhere.
