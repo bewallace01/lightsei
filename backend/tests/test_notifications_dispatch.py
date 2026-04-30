@@ -79,9 +79,12 @@ def _signal(trigger: str, **overrides) -> Signal:
 # ---------- registry ---------- #
 
 
-def test_registry_contains_v1_native_chat_types():
-    """Pin the v1 channel-type set. webhook lands in 9.3."""
-    assert sorted(REGISTRY) == ["discord", "mattermost", "slack", "teams"]
+def test_registry_contains_v1_channel_types():
+    """Pin the v1 channel-type set. Renaming any of these requires a
+    matching migration of `notification_channels.type` rows."""
+    assert sorted(REGISTRY) == [
+        "discord", "mattermost", "slack", "teams", "webhook",
+    ]
 
 
 def test_dispatch_unknown_type_returns_failed_delivery():
@@ -364,6 +367,7 @@ def test_dispatch_routes_by_type_and_returns_delivery():
         "https://example.com/mattermost",
         "https://example.com/slack",
         "https://example.com/teams",
+        "https://example.com/webhook",
     ]
 
 
@@ -389,3 +393,184 @@ def test_dispatch_formatter_exception_lands_failed_delivery():
     assert result.status == "failed"
     assert result.response_summary["error"] == "formatter_exception"
     assert "simulated formatter bug" in result.response_summary["message"]
+
+
+# ---------- generic webhook (Phase 9.3) ---------- #
+
+
+def test_webhook_envelope_shape_polaris_plan():
+    """Pinned envelope for polaris.plan. Receivers consume this
+    programmatically — full structured fields, no truncation."""
+    body = notifications.webhook.format(_signal("polaris.plan"))
+    assert body["type"] == "polaris.plan"
+    assert body["workspace_id"] == "ws_test"
+    assert body["agent_name"] == "polaris"
+    assert body["dashboard_url"] == "https://app.lightsei.com/polaris"
+    assert body["timestamp"]
+    data = body["data"]
+    # All Polaris fields preserved verbatim — receivers can filter
+    # which ones they care about.
+    assert data["summary"]
+    assert len(data["next_actions"]) == 3
+    assert "parking_lot_promotions" in data
+    assert "drift" in data
+    assert "doc_hashes" in data
+    assert "model" in data
+    assert "tokens_in" in data
+    assert "tokens_out" in data
+
+
+def test_webhook_envelope_shape_validation_fail():
+    body = notifications.webhook.format(_signal("validation.fail"))
+    assert body["type"] == "validation.fail"
+    # Validations array passes through untouched so receivers can
+    # do their own filtering / aggregation.
+    assert body["data"]["validations"] == _signal("validation.fail").payload["validations"]
+
+
+def test_webhook_envelope_shape_run_failed():
+    body = notifications.webhook.format(_signal("run_failed"))
+    assert body["type"] == "run_failed"
+    assert "RuntimeError" in body["data"]["error"]
+
+
+def test_webhook_envelope_shape_test():
+    body = notifications.webhook.format(_signal("test"))
+    assert body["type"] == "test"
+    # Test envelope explains itself rather than shipping random fields
+    assert "test message" in body["data"]["note"].lower()
+
+
+def test_webhook_post_includes_hmac_headers_when_secret_set():
+    """When secret_token is set, the request carries
+    X-Lightsei-Signature: sha256=<hex> and X-Lightsei-Timestamp:
+    <unix>. The signature must verify against the posted bytes."""
+    captured = {}
+
+    def handler(req):
+        captured["headers"] = dict(req.headers)
+        captured["content"] = bytes(req.content)
+        return httpx.Response(200, text="ok")
+
+    body = notifications.webhook.format(_signal("polaris.plan"))
+    with mock_httpx_post(handler):
+        delivery = notifications.webhook.post(
+            url="https://example.com/hook",
+            body=body,
+            secret_token="shared-secret",
+        )
+
+    assert delivery.status == "sent"
+    headers = captured["headers"]
+    # Header names get lowercased by httpx; check both spellings just
+    # to be defensive against test infrastructure changes.
+    sig = headers.get("x-lightsei-signature") or headers.get("X-Lightsei-Signature")
+    ts = headers.get("x-lightsei-timestamp") or headers.get("X-Lightsei-Timestamp")
+    assert sig and sig.startswith("sha256=")
+    assert ts and ts.isdigit()
+
+    # Signature verification: rebuild the signing input the same way
+    # the formatter did and compare. This is the test that proves a
+    # real receiver can verify our requests.
+    import hashlib as _hashlib
+    import hmac as _hmac
+    posted = captured["content"]
+    expected = _hmac.new(
+        b"shared-secret",
+        f"{ts}.".encode("utf-8") + posted,
+        _hashlib.sha256,
+    ).hexdigest()
+    assert _hmac.compare_digest(sig[len("sha256="):], expected)
+
+
+def test_webhook_post_no_signature_without_secret():
+    """No secret_token -> no signature headers. The endpoint stays
+    accessible to dumb receivers (n8n, Zapier) that don't need
+    HMAC verification."""
+    captured = {}
+
+    def handler(req):
+        captured["headers"] = dict(req.headers)
+        return httpx.Response(200, text="ok")
+
+    body = notifications.webhook.format(_signal("polaris.plan"))
+    with mock_httpx_post(handler):
+        delivery = notifications.webhook.post(
+            url="https://example.com/hook",
+            body=body,
+            secret_token=None,
+        )
+
+    assert delivery.status == "sent"
+    h = captured["headers"]
+    assert not any(k.lower().startswith("x-lightsei-") for k in h)
+
+
+def test_webhook_post_signs_actual_posted_bytes():
+    """The bytes that get signed must equal the bytes that get
+    posted — otherwise the receiver can't verify. Locked in by
+    deterministic JSON serialization (sort_keys, compact
+    separators)."""
+    captured = {}
+
+    def handler(req):
+        captured["content"] = bytes(req.content)
+        captured["headers"] = dict(req.headers)
+        return httpx.Response(200, text="ok")
+
+    # A body whose key order would matter if we used
+    # default-serialization: 'z' before 'a' if sorted, vs the
+    # alphabetical order the formatter produces.
+    body = {"z": 1, "a": 2, "m": {"y": 3, "b": 4}}
+    with mock_httpx_post(handler):
+        notifications.webhook.post(
+            url="https://example.com/hook",
+            body=body,
+            secret_token="s",
+        )
+
+    posted = captured["content"]
+    # sort_keys + compact separators = deterministic byte sequence
+    assert posted == b'{"a":2,"m":{"b":4,"y":3},"z":1}'
+
+
+def test_webhook_post_4xx_returns_failed():
+    """Receiver returning a 4xx (e.g., HMAC mismatch on their side)
+    surfaces as status='failed' with http_status in
+    response_summary, same as native chat platforms."""
+    with mock_httpx_post(lambda req: httpx.Response(401, text="bad signature")):
+        body = notifications.webhook.format(_signal("polaris.plan"))
+        delivery = notifications.webhook.post(
+            url="https://example.com/hook",
+            body=body,
+            secret_token="s",
+        )
+    assert delivery.status == "failed"
+    assert delivery.response_summary["http_status"] == 401
+
+
+def test_webhook_dispatch_via_registry():
+    """Smoke test through the public dispatch() entry point — uses
+    the same routing machinery as Slack/Discord/etc., just lands on
+    the webhook formatter+poster."""
+    captured = {}
+
+    def handler(req):
+        captured["url"] = str(req.url)
+        captured["body"] = req.content.decode("utf-8")
+        return httpx.Response(200, text="ok")
+
+    with mock_httpx_post(handler):
+        result = dispatch(
+            channel_type="webhook",
+            target_url="https://example.com/n8n-hook",
+            signal=_signal("polaris.plan"),
+            secret_token=None,
+        )
+
+    assert result.status == "sent"
+    assert captured["url"] == "https://example.com/n8n-hook"
+    # Envelope is JSON; receiver can json.loads it
+    import json as _json
+    parsed = _json.loads(captured["body"])
+    assert parsed["type"] == "polaris.plan"

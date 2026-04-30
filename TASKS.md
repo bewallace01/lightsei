@@ -4,9 +4,9 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 9.3: Generic webhook channel + HMAC signing**
+> **Phase 9.4: Trigger pipeline — hook into event ingestion**
 
-Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. Phase 6 shipped 2026-04-27: Polaris orchestrator bot deployed via the Phase 5 PaaS. Phase 7 shipped 2026-04-28: output validation (advisory). Phase 8 shipped 2026-04-28: blocking validators. Phase 9 makes Lightsei a product people actually want to use: it tells you when something needs your attention instead of waiting for you to check. **9.0 published `lightsei` to PyPI 2026-04-29.** **9.1 shipped the notification API surface 2026-04-29.** **9.2 shipped the dispatcher + Slack / Discord / Teams / Mattermost formatters 2026-04-30.**
+Phase 5 shipped 2026-04-26: PaaS-for-agents end-to-end. Phase 6 shipped 2026-04-27: Polaris orchestrator bot deployed via the Phase 5 PaaS. Phase 7 shipped 2026-04-28: output validation (advisory). Phase 8 shipped 2026-04-28: blocking validators. Phase 9 makes Lightsei a product people actually want to use: it tells you when something needs your attention instead of waiting for you to check. **9.0 published `lightsei` to PyPI 2026-04-29.** **9.1 shipped the notification API surface 2026-04-29.** **9.2 shipped the dispatcher + Slack / Discord / Teams / Mattermost formatters 2026-04-30.** **9.3 shipped the generic webhook formatter with HMAC signing 2026-04-30.**
 
 Phases 1-4 shipped 2026-04-25. Production-readiness items (DB backups, tests + CI, rate limits + body cap, bot instance identity, secrets store) shipped 2026-04-26. See Done Log.
 
@@ -201,24 +201,9 @@ Three trigger types: `polaris.plan`, `validation.fail`, `run_failed`.
 
 ### 9.2 Channel-type registry + Slack / Discord / Teams / Mattermost formatters ✅ done 2026-04-30 (see Done Log)
 
-### 9.3 Generic webhook channel (NOW)
+### 9.3 Generic webhook channel ✅ done 2026-04-30 (see Done Log)
 
-- Same dispatcher abstraction; the webhook channel POSTs a Lightsei-defined JSON envelope that any system can consume:
-  ```
-  {
-    "type": "polaris.plan" | "validation.fail" | "run_failed",
-    "workspace_id": str,
-    "agent_name": str,
-    "timestamp": iso8601,
-    "dashboard_url": str,
-    "data": { event-specific fields: summary / next_actions / violations / error_message / etc. }
-  }
-  ```
-- HMAC signing: when `secret_token` is set on the channel, send `X-Lightsei-Signature: sha256=<hex>` and `X-Lightsei-Timestamp: <unix>` headers so the receiver can verify the payload + protect against replay. Standard webhook pattern.
-- The generic envelope is the integration path for anything not natively supported: Zapier, n8n, an internal job queue, MS Teams (until we ship a native Teams formatter), Telegram (via a thin proxy that forwards to the bot API), etc.
-- Tests: payload shape pinned, HMAC signature path, replay-protection timestamp present, missing-secret path (no signature header), failure rows recorded.
-
-### 9.4 Trigger pipeline: hook into event ingestion
+### 9.4 Trigger pipeline: hook into event ingestion (NOW)
 
 - After `POST /events` writes the event + validation rows, look up the workspace's active notification channels and figure out which triggers fire for this event:
   - `event.kind == "polaris.plan"` → `polaris.plan` trigger
@@ -294,6 +279,18 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-04-30 — Phase 9.3 Generic webhook channel + HMAC signing
+- [x] **`backend/notifications/webhook.py`** — fifth and final v1 channel type. Per-trigger envelope with a stable shape (`{type, workspace_id, agent_name, timestamp, dashboard_url, data}`); the `data` field carries the trigger-specific structured fields verbatim (no truncation, since webhook receivers consume programmatically rather than for human display). Three rendered envelopes (polaris.plan, validation.fail, run_failed) plus a self-explaining test envelope plus a future-proof passthrough so unrecognized triggers still ship the source payload.
+- [x] **HMAC-SHA256 signing** when `secret_token` is set on the channel. Each request carries:
+  - `X-Lightsei-Timestamp: <unix epoch seconds>` — fresh per request, used by receivers for replay protection
+  - `X-Lightsei-Signature: sha256=<hex>` — HMAC over `f"{ts}.".encode() + body_bytes`
+  Receivers verify by re-deriving the signing input and constant-time comparing. Recommended replay window of 300s is documented in the module (and will surface in the dashboard's webhook hint in 9.5).
+- [x] **Bytes-controlled posting via new `_http.post_raw(url, content, headers)`**. The byte sequence we sign must equal the byte sequence we post — `httpx.Client.post(json=...)` would let httpx's serializer sneak in subtly different bytes. webhook.py JSON-serializes once with `sort_keys=True, separators=(",", ":")` (deterministic, compact), signs those bytes, posts the same bytes via `post_raw`. `post_json` keeps its current shape; both share the same response-mapping helpers (`_delivery_from_response`, `_timeout`, `_transport_error`, `_post_exception`) so failure shapes are identical across all five channel types.
+- [x] **Registered as `webhook` in REGISTRY** in `notifications/__init__.py`. `dispatch(channel_type="webhook", ...)` routes to the webhook formatter+poster like any other type. The 9.1 API surface already accepts `type: "webhook"` (it was in `NOTIFICATION_CHANNEL_TYPES` from day one); 9.3 is what makes the `/test` endpoint actually do something for those channels instead of returning `unknown_channel_type`.
+- [x] **Updated `test_registry_contains_v1_channel_types`** (renamed from `_native_chat_types`) and `test_dispatch_routes_by_type_and_returns_delivery` to include the webhook type. Both still pass — the registry is now `[discord, mattermost, slack, teams, webhook]`.
+- [x] **9 new webhook tests**: envelope shape per trigger (polaris.plan with full fields, validation.fail with verbatim validations array, run_failed with error string, test with explanatory note); HMAC headers present + verifiable when secret set (test recomputes the signature in-test from captured ts + bytes — proves real receivers can verify); no signature headers when secret is None (dumb receivers like Zapier still work); deterministic byte serialization (verified against a body whose key order would matter — `{"z":1,"a":2,"m":{"y":3,"b":4}}` posts as `{"a":2,"m":{"b":4,"y":3},"z":1}`); 4xx response from receiver lands `failed` with `http_status`; dispatch via the public registry entry point produces a parseable JSON envelope.
+- Verified: `pytest tests/test_notifications_dispatch.py -v` → **37/37** pass (was 28; +9 webhook). Full backend suite → **232/232** (was 223; +9). The five-channel platform-agnostic notification surface is complete; 9.4 wires it into POST /events so registered channels fire automatically.
 
 ### 2026-04-30 — Phase 9.2 Channel-type registry + Slack / Discord / Teams / Mattermost formatters
 - [x] **`backend/notifications/` package** mirrors `backend/validators/`:

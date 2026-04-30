@@ -24,7 +24,7 @@ persists.
 """
 from typing import Any, Callable
 
-from . import discord, mattermost, slack, teams
+from . import discord, mattermost, slack, teams, webhook
 from ._types import Delivery, Signal
 
 
@@ -47,9 +47,10 @@ REGISTRY: dict[str, tuple[FormatFn, PostFn]] = {
     # actual code path. The dashboard still labels rows as "mattermost"
     # because the type field on the channel row is what's stored.
     "mattermost": (slack.format,      mattermost.post),
-    # webhook (generic JSON envelope) lands in Phase 9.3; absent from
-    # the registry until then. dispatch() returns a clean error
-    # delivery for unknown types.
+    # Generic webhook with the Lightsei JSON envelope + optional HMAC
+    # signing — the integration path for anything not natively
+    # supported (n8n, Zapier, custom services). Phase 9.3.
+    "webhook":    (webhook.format,    webhook.post),
 }
 
 
