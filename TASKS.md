@@ -4,7 +4,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 10.3: Push-triggered redeploy**
+> **Phase 10.4: Polaris reads docs from GitHub**
 
 Phases 1-4 shipped 2026-04-25 (spine, cost-cap guardrail, Anthropic + streaming, hosted-readiness). Phase 5 shipped 2026-04-26 (PaaS-for-agents). Phase 6 shipped 2026-04-27 (Polaris orchestrator). Phase 7 shipped 2026-04-28 (output validation, advisory). Phase 8 shipped 2026-04-28 (blocking validators). Phase 9 shipped 2026-04-30 (notifications). Phase 10 closes the workflow loop: connect a GitHub repo to your workspace, push to main, bots auto-redeploy, Polaris reads docs from the repo. The CLI stops being required.
 
@@ -244,7 +244,7 @@ Three trigger types: `polaris.plan`, `validation.fail`, `run_failed`.
 - For each registered agent path: check whether the push touched any file under that path (uses `commits[].added/modified/removed`). If so, queue a redeploy in 10.3.
 - Tests: HMAC verified happy path, unsigned request 401, signed-but-wrong-secret 401, ping events 200 no-op, push event with no touched paths 200 no-op, push with one touched path queues exactly one redeploy.
 
-### 10.3 Push-triggered redeploy
+### 10.3 Push-triggered redeploy ✅ (shipped 2026-04-30)
 
 - New worker pipeline path: when a push hits a registered agent path, fetch the agent's bot directory at the pushed commit via the GitHub Contents API (Tree + Blob). Build a deploy zip in-memory, create a `deployment_blob` row + `deployment` row pointing at it. The Phase 5 worker picks up `desired_state=running` deployments via its existing `claim` loop — no new worker code.
 - New columns on `deployments`: `source` (`cli` | `github_push`, default `cli` for backwards compat), `source_commit_sha` (nullable). Migration `0017_deployments_source`.
@@ -318,6 +318,22 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-04-30 — Phase 10.3: Push-triggered redeploy
+
+Closes the loop. A push to a registered branch that touches files under a registered agent path now becomes a real `Deployment` row with `source=github_push` and the commit SHA. The Phase 5 worker's existing claim loop picks them up — no new worker code, no changes to the runner.
+
+- [x] **Migration `0017_deployments_source`** (`backend/alembic/versions/20260430_0017_deployments_source.py`): two additive columns. `source` ('cli' | 'github_push', NOT NULL, server_default 'cli' so existing rows take CLI semantics on backfill) + `source_commit_sha` (nullable, populated only on github_push rows).
+- [x] **Deployment ORM model** picks up both columns. `_serialize_deployment` includes them in the API response. The CLI upload path (`POST /workspaces/me/deployments`) now explicitly sets `source='cli', source_commit_sha=None`. The redeploy endpoint (`POST .../redeploy`) carries the original provenance forward — clicking "redeploy" on a github_push row produces a new github_push row with the same commit SHA, not a falsely-labeled CLI row.
+- [x] **`github_api.fetch_directory_zip`** (~120 lines): two-step git-data API dance. `GET /repos/{owner}/{name}/git/trees/{commit_sha}?recursive=1` to enumerate the commit's blobs, filter to entries under the agent's path, then `GET /repos/.../git/blobs/{blob_sha}` per file to pull the base64 content. Build a `zipfile.ZipFile` in-memory rooted at the agent dir (the `polaris/` prefix is stripped so the zip looks identical to a CLI bundle of just that directory). Refuses to deploy if GitHub flags `truncated: true` on the tree (>100k entries / >7MB) or if the running blob size exceeds the 10MB cap that matches the multipart upload limit on the CLI path.
+- [x] **`_queue_github_redeploy` real implementation** in `main.py`: decrypt PAT → fetch_directory_zip → store as `DeploymentBlob` → create `Deployment(source='github_push', source_commit_sha=commit_sha, desired_state='running')`. Returns the new deployment id. `GitHubAPIError` from the fetch is swallowed (return None) so a transient GitHub failure doesn't make the webhook retry forever — caller logs intent in `queued_redeploys[].deployment_id` (None when fetch failed). PAT decryption failure also returns None.
+- [x] **8 new tests** in `tests/test_github_webhook.py` (30 total in the file, all passing): end-to-end push creates a real deployment row with `source=github_push` and the commit SHA; CLI upload still tags `source=cli`; multi-agent push creates one row per matched path with shared commit SHA; cross-workspace isolation (Bob's push doesn't create deployments in Alice's workspace); `is_active=False` short-circuits before deployment creation; GitHub 404 on tree-fetch swallowed with `deployment_id=None`; zip is built from filtered subtree (verified by unzipping the stored blob and inspecting namelist — `polaris/` prefix correctly stripped); redeploy endpoint preserves `source` and `source_commit_sha`.
+- [x] **httpx mock plumbing fix**: nested `patch.object(github_api.httpx, "Client")` was capturing the autouse fixture's MagicMock instead of the real `httpx.Client`. Captured `_REAL_HTTPX_CLIENT` at module-import time (before any test patches), and both the autouse fixture and per-test override now use it directly. Subtle bug — surfaced when one test needed a 404-from-GitHub override and got the autouse 200 instead.
+- [x] **Dashboard Deployments rows show provenance**: `dashboard/app/agents/[name]/page.tsx` deployment list now shows an inline `↳ github abc1234` (with a tooltip carrying the full commit SHA) for github_push rows or `cli` for CLI uploads. Deployment detail page (`dashboard/app/deployments/[id]/page.tsx`) gains a "source" row showing "github push @ <short SHA>" or "cli upload". Plain Tailwind, matches existing row aesthetic. TypeScript clean. The `Deployment` type in `dashboard/app/api.ts` now declares `source` + `source_commit_sha`.
+- [x] **Full backend suite**: 305 passed (from 297 in 10.2; +8 new tests, no regressions). Clean `tsc --noEmit` on the dashboard.
+- [x] **End-to-end push-to-deploy verification deferred to Phase 10.6 demo**: rendering the github_push variant of the deployment row requires registering a real GitHub integration, configuring the webhook on github.com, and pushing — which is exactly what 10.6 does. The CLI variant renders as expected against existing local deploys.
+
+The scaffolding for Phase 10.4 (Polaris reads docs from GitHub) lives entirely in `polaris/bot.py` plus the existing `WorkspaceSecret` injection path — no new tables or backend endpoints. A fresh `github_api.fetch_file_content` will land there.
 
 ### 2026-04-30 — Phase 10.2: GitHub webhook receiver
 

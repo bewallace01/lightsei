@@ -1771,19 +1771,86 @@ def _queue_github_redeploy(
     *,
     integration: GitHubIntegration,
     agent_name: str,
+    agent_path: str,
     commit_sha: str,
-) -> None:
-    """Phase 10.2 stub. The real work — fetch the agent's directory at
-    `commit_sha` from the GitHub Contents API, build a deploy zip,
-    create deployment_blob + deployment rows with `source=github_push`
-    — lands in Phase 10.3. For now this is a no-op so the webhook
-    receiver's path-matching logic can be tested end-to-end in
-    isolation. Phase 10.3 swaps the body in place and the webhook
-    receiver doesn't have to change.
+) -> Optional[str]:
+    """Fetch the agent's directory at `commit_sha` via the GitHub
+    Contents API, store the zip as a DeploymentBlob, and create a
+    Deployment row with `source='github_push'` and
+    `desired_state='running'` so the Phase 5 worker picks it up via
+    its existing claim loop. Returns the new deployment id, or None if
+    the fetch failed (logged but does not fail the webhook — GitHub
+    would otherwise retry on transient errors and we'd dispatch the
+    same push twice).
 
-    Tests verify the receiver's intent by inspecting the response
-    body's `queued_redeploys` list rather than mocking this function."""
-    return None
+    Errors fall into two buckets:
+      - GitHubAPIError: PAT lost access, repo deleted mid-flight, the
+        agent path no longer exists, etc. We swallow and return None;
+        the dashboard's Deployments panel will simply show no new row,
+        and the user can re-trigger via `lightsei deploy` or by
+        re-pushing.
+      - Anything else (zip codec, DB IntegrityError): re-raised so it
+        surfaces in the webhook response as a 500 — these are bugs in
+        our code, not user error, and we want them noisy.
+    """
+    try:
+        pat = secrets_crypto.decrypt(integration.encrypted_pat)
+    except Exception:
+        # Decryption failure is a server config issue (rotated key,
+        # corrupted row). Don't try to deploy; log and let the user
+        # re-register.
+        return None
+
+    try:
+        zip_bytes = github_api.fetch_directory_zip(
+            repo_owner=integration.repo_owner,
+            repo_name=integration.repo_name,
+            commit_sha=commit_sha,
+            path=agent_path,
+            pat=pat,
+        )
+    except github_api.GitHubAPIError:
+        # Couldn't fetch the directory. The webhook stays a 200 because
+        # GitHub already gave us all the data they have — they can't
+        # help by retrying. The caller (webhook receiver) records this
+        # as a non-deployment in the response.
+        return None
+
+    if len(zip_bytes) == 0:
+        # Empty agent dir at this commit. Don't create a deploy with
+        # nothing to run.
+        return None
+
+    now = utcnow()
+    sha = hashlib.sha256(zip_bytes).hexdigest()
+
+    blob = DeploymentBlob(
+        id=str(uuid.uuid4()),
+        workspace_id=integration.workspace_id,
+        size_bytes=len(zip_bytes),
+        sha256=sha,
+        data=zip_bytes,
+        created_at=now,
+    )
+    session.add(blob)
+    session.flush()
+
+    ensure_agent(session, integration.workspace_id, agent_name, now)
+    dep = Deployment(
+        id=str(uuid.uuid4()),
+        workspace_id=integration.workspace_id,
+        agent_name=agent_name,
+        status="queued",
+        desired_state="running",
+        source_blob_id=blob.id,
+        source="github_push",
+        source_commit_sha=commit_sha,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(dep)
+    session.flush()
+    return dep.id
 
 
 @app.post("/webhooks/github")
@@ -1898,17 +1965,22 @@ async def github_webhook(
         .all()
     )
 
-    queued: list[dict[str, str]] = []
+    queued: list[dict[str, Any]] = []
     for ap in paths:
         if _push_touched_path(commits or [], ap.path):
-            _queue_github_redeploy(
+            deployment_id = _queue_github_redeploy(
                 session,
                 integration=integration,
                 agent_name=ap.agent_name,
+                agent_path=ap.path,
                 commit_sha=commit_sha,
             )
             queued.append(
-                {"agent_name": ap.agent_name, "commit_sha": commit_sha}
+                {
+                    "agent_name": ap.agent_name,
+                    "commit_sha": commit_sha,
+                    "deployment_id": deployment_id,
+                }
             )
 
     return {
@@ -1935,6 +2007,8 @@ def _serialize_deployment(d: Deployment) -> dict[str, Any]:
         "status": d.status,
         "desired_state": d.desired_state,
         "source_blob_id": d.source_blob_id,
+        "source": d.source,
+        "source_commit_sha": d.source_commit_sha,
         "error": d.error,
         "claimed_by": d.claimed_by,
         "claimed_at": d.claimed_at.isoformat() if d.claimed_at else None,
@@ -1994,6 +2068,8 @@ async def upload_deployment(
         status="queued",
         desired_state="running",
         source_blob_id=blob.id,
+        source="cli",
+        source_commit_sha=None,
         created_at=now,
         updated_at=now,
     )
@@ -2115,6 +2191,12 @@ def redeploy_deployment(
         status="queued",
         desired_state="running",
         source_blob_id=old.source_blob_id,
+        # Carry the original provenance forward — a redeploy reuses the
+        # same source blob, so the same commit/upload origin still
+        # applies. Otherwise a "redeploy" of a github_push deploy would
+        # falsely look like a CLI upload in the dashboard.
+        source=old.source,
+        source_commit_sha=old.source_commit_sha,
         created_at=now,
         updated_at=now,
     )

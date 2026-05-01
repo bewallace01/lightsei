@@ -192,6 +192,25 @@ export default function DeploymentDetailPage({
             {dep.claimed_by ?? "—"}
           </div>
 
+          <div className="text-gray-500">source</div>
+          <div className="font-mono">
+            {dep.source === "github_push" ? (
+              <span className="inline-flex items-center gap-1">
+                <span>github push</span>
+                {dep.source_commit_sha && (
+                  <span
+                    className="text-gray-500"
+                    title={dep.source_commit_sha}
+                  >
+                    @ {dep.source_commit_sha.slice(0, 7)}
+                  </span>
+                )}
+              </span>
+            ) : (
+              <span>cli upload</span>
+            )}
+          </div>
+
           {dep.error && (
             <>
               <div className="text-gray-500">error</div>

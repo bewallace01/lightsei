@@ -279,6 +279,13 @@ class Deployment(Base):
         ForeignKey("deployment_blobs.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # Phase 10.3: provenance — 'cli' (SDK upload) or 'github_push'
+    # (webhook-triggered). 'cli' is the default so existing rows
+    # backfill correctly via migration 0017's server_default.
+    source: Mapped[str] = mapped_column(String, nullable=False, default="cli")
+    source_commit_sha: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True
+    )
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     claimed_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     claimed_at: Mapped[Optional[datetime]] = mapped_column(

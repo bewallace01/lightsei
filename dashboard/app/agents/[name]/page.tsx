@@ -298,6 +298,31 @@ export default function AgentPage({ params }: { params: { name: string } }) {
                   >
                     {d.id.slice(0, 8)}…
                   </Link>
+                  {d.source === "github_push" ? (
+                    <span
+                      className="inline-flex items-center gap-1 text-[11px] text-gray-500 font-mono"
+                      title={
+                        d.source_commit_sha
+                          ? `Pushed via GitHub at ${d.source_commit_sha}`
+                          : "Pushed via GitHub"
+                      }
+                    >
+                      <span aria-hidden="true">↳</span>
+                      <span>github</span>
+                      {d.source_commit_sha && (
+                        <span className="text-gray-400">
+                          {d.source_commit_sha.slice(0, 7)}
+                        </span>
+                      )}
+                    </span>
+                  ) : (
+                    <span
+                      className="text-[11px] text-gray-400 font-mono"
+                      title="Uploaded via lightsei CLI"
+                    >
+                      cli
+                    </span>
+                  )}
                   {d.error && (
                     <span
                       className="text-[11px] text-red-700 truncate max-w-md"

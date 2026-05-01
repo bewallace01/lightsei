@@ -474,6 +474,12 @@ export type Deployment = {
   status: "queued" | "building" | "running" | "stopped" | "failed";
   desired_state: "running" | "stopped";
   source_blob_id: string | null;
+  // Phase 10.3: provenance. "cli" means an SDK upload via
+  // POST /workspaces/me/deployments; "github_push" means a webhook
+  // landed at /webhooks/github and the backend fetched the agent
+  // dir at source_commit_sha. source_commit_sha is null for cli.
+  source: "cli" | "github_push";
+  source_commit_sha: string | null;
   error: string | null;
   claimed_by: string | null;
   claimed_at: string | null;
