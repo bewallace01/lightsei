@@ -1,4 +1,6 @@
 import hashlib
+import hmac
+import json
 import os
 import secrets as _stdlib_secrets
 import uuid
@@ -1677,6 +1679,245 @@ def delete_github_agent_path(
     session.delete(row)
     session.flush()
     return {"status": "ok"}
+
+
+# ---------- POST /webhooks/github (Phase 10.2) ---------- #
+#
+# Public endpoint — no Lightsei API key. GitHub posts here whenever a
+# subscribed event fires on a registered repo. Authenticity is via
+# HMAC-SHA256 of the raw body using the integration's webhook_secret
+# (the one we revealed once in 10.1). We verify before doing anything
+# state-changing.
+#
+# Order of operations:
+#   1. Read raw body bytes (signature is over bytes, not the parsed dict).
+#   2. Parse JSON to extract repo full_name — needed to find which
+#      integration's secret to verify against.
+#   3. Look up integration by (repo_owner, repo_name). 404 if none —
+#      this also makes random scans noisy in logs without exposing
+#      whether a workspace exists.
+#   4. Decrypt the integration's webhook_secret and verify the
+#      X-Hub-Signature-256 header. 401 on mismatch / missing.
+#   5. Past this point, the request is authenticated. Branch into
+#      event-type handlers. Anything we don't recognize 200s with a
+#      `skipped` reason so GitHub stops retrying.
+#
+# We deliberately do NOT verify the signature before looking up the
+# integration: we'd have nothing to verify against. The lookup itself
+# is read-only and constant-time-ish (single PK-style index hit), so
+# leaking "this repo is registered" via a 401-vs-404 differential is
+# acceptable — repos on github.com are public knowledge anyway.
+
+
+def _parse_repo_full_name(payload: dict[str, Any]) -> Optional[tuple[str, str]]:
+    """Extract (owner, name) from a GitHub webhook payload's `repository`
+    block. Returns None if the field is missing or malformed — caller
+    treats that as a malformed body."""
+    repo = payload.get("repository")
+    if not isinstance(repo, dict):
+        return None
+    full_name = repo.get("full_name")
+    if not isinstance(full_name, str) or "/" not in full_name:
+        return None
+    owner, _, name = full_name.partition("/")
+    if not owner or not name:
+        return None
+    return owner, name
+
+
+def _verify_github_signature(
+    *, raw_body: bytes, header_value: Optional[str], secret: str
+) -> bool:
+    """Constant-time-compare X-Hub-Signature-256 against HMAC of body.
+    GitHub sends the value as `sha256=<hex>`. Anything else (missing
+    header, wrong prefix, malformed hex) is a verification failure."""
+    if not header_value or not header_value.startswith("sha256="):
+        return False
+    expected = hmac.new(
+        secret.encode("utf-8"), raw_body, hashlib.sha256
+    ).hexdigest()
+    provided = header_value.removeprefix("sha256=").strip()
+    return hmac.compare_digest(expected, provided)
+
+
+def _push_touched_path(commits: list[dict[str, Any]], agent_path: str) -> bool:
+    """True if any commit in the push touched a file under `agent_path`.
+
+    A path "matches" a commit if any of `added/modified/removed` is
+    either equal to `agent_path` (exact-file mapping) or starts with
+    `agent_path + "/"` (directory mapping). We don't try to be clever
+    about renames — GitHub reports renames as a remove + add pair, so
+    they're already covered."""
+    if not isinstance(commits, list):
+        return False
+    prefix = agent_path.rstrip("/") + "/"
+    for commit in commits:
+        if not isinstance(commit, dict):
+            continue
+        for field in ("added", "modified", "removed"):
+            files = commit.get(field) or []
+            if not isinstance(files, list):
+                continue
+            for f in files:
+                if not isinstance(f, str):
+                    continue
+                if f == agent_path or f.startswith(prefix):
+                    return True
+    return False
+
+
+def _queue_github_redeploy(
+    session: Session,
+    *,
+    integration: GitHubIntegration,
+    agent_name: str,
+    commit_sha: str,
+) -> None:
+    """Phase 10.2 stub. The real work — fetch the agent's directory at
+    `commit_sha` from the GitHub Contents API, build a deploy zip,
+    create deployment_blob + deployment rows with `source=github_push`
+    — lands in Phase 10.3. For now this is a no-op so the webhook
+    receiver's path-matching logic can be tested end-to-end in
+    isolation. Phase 10.3 swaps the body in place and the webhook
+    receiver doesn't have to change.
+
+    Tests verify the receiver's intent by inspecting the response
+    body's `queued_redeploys` list rather than mocking this function."""
+    return None
+
+
+@app.post("/webhooks/github")
+async def github_webhook(
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    raw_body = await request.body()
+    try:
+        payload = json.loads(raw_body)
+    except (ValueError, json.JSONDecodeError):
+        raise HTTPException(status_code=400, detail="body is not valid JSON")
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="body is not a JSON object")
+
+    parsed = _parse_repo_full_name(payload)
+    if parsed is None:
+        raise HTTPException(
+            status_code=400, detail="payload missing repository.full_name"
+        )
+    owner, name = parsed
+
+    integration = session.execute(
+        select(GitHubIntegration).where(
+            GitHubIntegration.repo_owner == owner,
+            GitHubIntegration.repo_name == name,
+        )
+    ).scalar_one_or_none()
+    if integration is None:
+        # No workspace has registered this repo. Tell GitHub explicitly
+        # so the webhook surfaces the misconfiguration in its UI rather
+        # than silently swallowing.
+        raise HTTPException(
+            status_code=404, detail=f"no integration for {owner}/{name}"
+        )
+
+    try:
+        webhook_secret = secrets_crypto.decrypt(integration.encrypted_webhook_secret)
+    except Exception:
+        # Encryption-key rotation gone wrong, or DB row corruption. We
+        # can't verify the signature without the secret, so we can't
+        # trust anything in the body. 500 because this is a server
+        # config issue, not a caller issue.
+        raise HTTPException(
+            status_code=500, detail="integration secret unavailable"
+        )
+
+    sig_header = request.headers.get("x-hub-signature-256")
+    if not _verify_github_signature(
+        raw_body=raw_body, header_value=sig_header, secret=webhook_secret
+    ):
+        raise HTTPException(status_code=401, detail="invalid signature")
+
+    # ----- past this line the request is authenticated ----- #
+
+    if not integration.is_active:
+        # User disabled the integration but the GitHub webhook is
+        # still pointed at us. Quietly accept so GitHub doesn't retry,
+        # but do nothing.
+        return {
+            "status": "ok",
+            "event": request.headers.get("x-github-event"),
+            "skipped": "integration_inactive",
+        }
+
+    event_type = request.headers.get("x-github-event") or "unknown"
+
+    if event_type == "ping":
+        # GitHub fires `ping` immediately after webhook creation. The
+        # zen quote in the body is meaningless to us; just acknowledge.
+        return {"status": "ok", "event": "ping"}
+
+    if event_type != "push":
+        # Tag pushes (`create`), branch deletes (`delete`), PRs, etc.
+        # Phase 10 only handles `push`. 200 with a hint so the user
+        # can debug from the GitHub webhook log if they were expecting
+        # a deploy.
+        return {
+            "status": "ok",
+            "event": event_type,
+            "skipped": "event_type_not_handled",
+        }
+
+    ref = payload.get("ref")
+    expected_ref = f"refs/heads/{integration.branch}"
+    if ref != expected_ref:
+        return {
+            "status": "ok",
+            "event": "push",
+            "skipped": "branch_not_tracked",
+            "ref": ref,
+            "tracked_branch": integration.branch,
+        }
+
+    head_commit = payload.get("head_commit") or {}
+    commit_sha = (
+        payload.get("after")
+        or (head_commit.get("id") if isinstance(head_commit, dict) else None)
+        or ""
+    )
+    if not isinstance(commit_sha, str):
+        commit_sha = ""
+
+    commits = payload.get("commits")
+    paths = (
+        session.execute(
+            select(GitHubAgentPath).where(
+                GitHubAgentPath.workspace_id == integration.workspace_id
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+    queued: list[dict[str, str]] = []
+    for ap in paths:
+        if _push_touched_path(commits or [], ap.path):
+            _queue_github_redeploy(
+                session,
+                integration=integration,
+                agent_name=ap.agent_name,
+                commit_sha=commit_sha,
+            )
+            queued.append(
+                {"agent_name": ap.agent_name, "commit_sha": commit_sha}
+            )
+
+    return {
+        "status": "ok",
+        "event": "push",
+        "ref": ref,
+        "commit_sha": commit_sha,
+        "queued_redeploys": queued,
+    }
 
 
 # ---------- /workspaces/me/deployments (Phase 5.1) ---------- #

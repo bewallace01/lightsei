@@ -4,7 +4,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 10.2: GitHub webhook receiver**
+> **Phase 10.3: Push-triggered redeploy**
 
 Phases 1-4 shipped 2026-04-25 (spine, cost-cap guardrail, Anthropic + streaming, hosted-readiness). Phase 5 shipped 2026-04-26 (PaaS-for-agents). Phase 6 shipped 2026-04-27 (Polaris orchestrator). Phase 7 shipped 2026-04-28 (output validation, advisory). Phase 8 shipped 2026-04-28 (blocking validators). Phase 9 shipped 2026-04-30 (notifications). Phase 10 closes the workflow loop: connect a GitHub repo to your workspace, push to main, bots auto-redeploy, Polaris reads docs from the repo. The CLI stops being required.
 
@@ -236,7 +236,7 @@ Three trigger types: `polaris.plan`, `validation.fail`, `run_failed`.
 - PAT validation server-side: ping `GET https://api.github.com/repos/{owner}/{name}` with the token on `PUT`; reject with 400 if the API returns 401/403/404 (token can't read the repo). Catches the "wrong token" mistake at registration time, not at first webhook.
 - Tests: round-trip `PUT/GET/DELETE`, PAT masked on response, agent-path CRUD, cross-workspace isolation, 400 on unreachable repo (mocked GitHub), webhook secret never echoed back unmasked.
 
-### 10.2 GitHub webhook receiver
+### 10.2 GitHub webhook receiver ✅ (shipped 2026-04-30)
 
 - New endpoint `POST /webhooks/github`. Public (GitHub posts to it; no Lightsei API key). HMAC-SHA256-signed by GitHub against the `webhook_secret` we returned in 10.1, verified via `X-Hub-Signature-256` header. Constant-time compare; reject with 401 on mismatch.
 - Looks up the integration by repo full name (`{owner}/{name}` from the payload). 404 if no workspace has registered this repo. Quietly accepts (200) but no-ops if the integration is `is_active=False`.
@@ -318,6 +318,20 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-04-30 — Phase 10.2: GitHub webhook receiver
+
+`POST /webhooks/github` — public, no Lightsei API key. GitHub posts here whenever a subscribed event fires on a registered repo. The endpoint verifies HMAC-SHA256 against the integration's `webhook_secret` (the one revealed once during 10.1 registration), filters event types, and matches changed files in the push against registered agent paths to determine which agents need a redeploy.
+
+- [x] **HMAC verification**: `_verify_github_signature` extracts the digest from `X-Hub-Signature-256` (format `sha256=<hex>`), recomputes HMAC over the raw bytes (not the parsed JSON — bytes-level is what GitHub signed), constant-time-compares with `hmac.compare_digest`. Missing header, wrong prefix, or any mismatch → 401.
+- [x] **Order of operations**: read raw body → parse JSON → extract `repository.full_name` → look up integration → decrypt `encrypted_webhook_secret` → verify signature. We have to find the integration to find the secret, so the lookup precedes verification. Lookup is read-only; nothing state-changing happens before HMAC succeeds.
+- [x] **Repo lookup**: 404 if no workspace has registered this repo (so a misconfigured webhook URL surfaces in GitHub's webhook log instead of being silently accepted). Repos on github.com are public knowledge anyway, so the 404-vs-401 differential isn't a meaningful leak.
+- [x] **Event filtering**: `ping` (GitHub's "is this thing on?" event) → 200 no-op. Anything that isn't `push` → 200 with `skipped: "event_type_not_handled"`. `push` to a branch other than `integration.branch` → 200 with `skipped: "branch_not_tracked"`. `is_active=False` integration → 200 with `skipped: "integration_inactive"` (GitHub stops retrying without us doing anything).
+- [x] **Path matching**: `_push_touched_path` walks `commits[].added/modified/removed` and treats a registered path as a directory boundary, not a substring prefix. So `polaris/` matches `polaris/bot.py` but NOT `polarisXYZ/foo.py`. Renames are already covered because GitHub reports them as remove + add pairs.
+- [x] **`_queue_github_redeploy` stub**: 10.2 only identifies which agents would be redeployed. The real deployment-row creation lands in 10.3, swapped into this function in place. The webhook receiver doesn't have to change. Tests verify the receiver's intent by asserting on the response body's `queued_redeploys` list rather than mocking a function.
+- [x] **22 tests in `tests/test_github_webhook.py`** (all passing): signed/unsigned/wrong-secret/tampered-sig/tampered-body, unknown repo 404, malformed body 400, missing repository field 400, ping accepted, unhandled event type accepted, untracked branch accepted, inactive integration accepted, no-paths/touching-paths/outside-paths, directory-vs-substring boundary, multi-path-only-matching-one, multi-path-touching-multiple, added/removed file detection, multi-commit pushes, cross-workspace isolation (Bob's push doesn't trigger Alice's paths), cross-secret rejection (Alice's secret can't sign Bob's webhook).
+
+10.3 will replace `_queue_github_redeploy`'s body with the real work: fetch the agent's directory at the pushed commit via the GitHub Contents API, build a deploy zip, create `deployment_blob` + `deployment` rows with `source=github_push` so the existing Phase 5 worker picks them up via its claim loop. No new worker code.
 
 ### 2026-04-30 — Phase 10.1: GitHub auth + repo registration
 
