@@ -141,3 +141,5 @@ When stuck on architecture, look at these:
 ## Phase 10.6 demo marker (2026-05-01)
 
 This line was appended via a git push to verify that Polaris's next tick reads MEMORY.md from GitHub instead of from the bundled disk copy. The bot was redeployed earlier today with `POLARIS_GITHUB_REPO=bewallace01/lightsei` set; if the next plan reflects this marker, the GitHub-fetch path is wired correctly. Cleanup: leave the line in place until Phase 10.6 is in the Done Log, then either remove it or fold it into the demo write-up.
+
+Second push (after reconnecting the GitHub webhook with a fresh secret): if this line lands and github.com Recent Deliveries shows a 200, the webhook signature path is healthy end-to-end. The push touched only MEMORY.md so no redeploy should be queued; the /github panel's "Recent push-triggered deploys" stays empty, which is correct.
