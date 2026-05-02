@@ -4,9 +4,9 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 11+: TBD**
+> **Phase 11.1: SDK ergonomics for `send_command()` + `claim_command()`**
 
-Phases 1-4 shipped 2026-04-25 (spine, cost-cap guardrail, Anthropic + streaming, hosted-readiness). Phase 5 shipped 2026-04-26 (PaaS-for-agents). Phase 6 shipped 2026-04-27 (Polaris orchestrator). Phase 7 shipped 2026-04-28 (output validation, advisory). Phase 8 shipped 2026-04-28 (blocking validators). Phase 9 shipped 2026-04-30 (notifications). Phase 10 shipped 2026-05-01 (GitHub integration: push-to-deploy + Polaris reads docs from the repo). The CLI stopped being required.
+Phases 1-4 shipped 2026-04-25 (spine, cost-cap guardrail, Anthropic + streaming, hosted-readiness). Phase 5 shipped 2026-04-26 (PaaS-for-agents). Phase 6 shipped 2026-04-27 (Polaris orchestrator). Phase 7 shipped 2026-04-28 (output validation, advisory). Phase 8 shipped 2026-04-28 (blocking validators). Phase 9 shipped 2026-04-30 (notifications). Phase 10 shipped 2026-05-01 (GitHub integration: push-to-deploy + Polaris reads docs from the repo). Phase 11 starts the dispatch story: Polaris commands a team of executor agents instead of just emitting plans you read. Phase 11B turns the home page into a real command center while we're at it. Phase 12 is multi-provider so the team can pick the right model per task.
 
 Phases 1-4 shipped 2026-04-25. Production-readiness items (DB backups, tests + CI, rate limits + body cap, bot instance identity, secrets store) shipped 2026-04-26. See Done Log.
 
@@ -265,15 +265,142 @@ Three trigger types: `polaris.plan`, `validation.fail`, `run_failed`.
 
 ---
 
-## Phase 11+: TBD
+## Phase 11: The constellation, first dispatch chain
 
-Open candidates for after GitHub integration ships:
+**Demo at end of phase**: Push a one-line change to `backend/main.py` on `bewallace01/lightsei`. Within 2 minutes: `polaris → atlas → hermes` chain renders on the dashboard with timestamps; a Slack message lands in the configured channel saying `"✅ atlas: 322 passed at commit ede6e01"`; the events table has `polaris.dispatched`, `atlas.tests_run`, and `hermes.posted` rows tied to the same `dispatch_chain_id`. Push a deliberately-failing change: same flow, the message becomes `"❌ atlas: 318 passed, 4 failed (file: test_foo.py::test_bar)"` and arrives in Slack inside the same 2-minute envelope.
 
+Phase 11 is read-write Polaris. Two new agents in the constellation (Atlas, Hermes) and the dispatch primitive that lets Polaris command them. The Phase 6 plumbing for `/agents/{name}/commands` already exists and was used during the manifest work; Phase 11 is what makes it ergonomic + observable + safe enough to wire into a real loop. Cross-provider model selection is intentionally NOT in scope here — it lands in Phase 12 once the dispatch chain is proven against Claude-only.
+
+**Why these two agents, not five.** Atlas (test runner) and Hermes (notifier) are the smallest pair that proves the pipes work end-to-end: Polaris dispatches → Atlas does real work → Atlas dispatches → Hermes does real work → human sees the result. Adding Argus / Vega / Sirius / Cassiopeia in the same phase would dilute the dispatch story without making it more convincing. They land in Phase 13 once eval (Phase 12) can grade them.
+
+**The default-on approval gate is the human-in-the-loop.** No agent acts on a command until it's `approved`, either by a click in the dashboard or by an auto-approval rule the user opts into per-command-type. Phase 11 ships approval-required as the default for `atlas.run_tests` (so the demo shows both flows: explicit click + auto-approve), and `hermes.post` auto-approves once you flip the toggle (otherwise every Slack message would need a click, which kills the point). Phase 14 replaces the gate with proper layer-4 behavioral rules.
+
+### 11.1 SDK: `send_command` + `claim_command` ergonomics
+
+- The HTTP endpoints already exist (`POST/GET/POST .../claim` under `/agents/{name}/commands` from Phase 6's manifest work). Phase 11 wraps them in the SDK as first-class methods so an agent's `bot.py` can dispatch + claim without manual `httpx` calls.
+- `lightsei.send_command(target_agent: str, command_type: str, payload: dict, *, requires_approval: bool | None = None, dispatch_chain_id: str | None = None) -> Command`. Returns the created command. When called from inside another agent's tick, auto-propagates `dispatch_chain_id` from the running command's context (a thread-local set by `claim_command`); when called outside an agent context (e.g. from a webhook handler), generates a fresh one.
+- `lightsei.claim_command(types: list[str] | None = None, timeout_s: float = 5) -> Command | None`. Long-poll-friendly (server returns 200 with null when nothing to claim, no 404 spam). Sets the thread-local context on entry so any `send_command` calls during the handler inherit the chain id.
+- `lightsei.complete_command(command_id, *, status: str, result: dict | None = None) -> None`. Status is one of `done`, `failed`. Captures `duration_ms` from claim → complete automatically.
+- Tests: round-trip dispatch → claim → complete; chain-id propagation; depth cap; rejecting unknown command types; concurrent claims race cleanly via `FOR UPDATE SKIP LOCKED` (Phase 5 already uses this pattern for deployments).
+
+### 11.2 Backend: dispatch chain id + depth cap + approval state
+
+- New columns on `agent_commands` (the table Phase 6 already created): `dispatch_chain_id` (UUID, indexed), `dispatch_depth` (int, default 0), `approval_state` (`pending` | `approved` | `rejected` | `auto_approved` | `expired`), `approved_by_user_id` (nullable FK), `approved_at` (nullable). Migration `0019_dispatch_metadata`.
+- Server-side: every `send_command` populates chain id + depth (parent depth + 1). Reject with 422 if depth ≥ 5. Reject with 422 if the source agent has dispatched > 100 commands in the last 24h (per-agent runaway cap). Both limits are config knobs on `agents` (`max_dispatch_depth`, `max_dispatch_per_day`) with the defaults above.
+- New `command_auto_approval_rules` table: `(workspace_id, source_agent, target_agent, command_type, mode)` where `mode ∈ {auto_approve, require_human}`. Lookup is `(source, target, type)` exact match → fall back to `(*, target, type)` → fall back to `require_human`. So `(polaris, hermes, hermes.post) → auto_approve` flips Hermes posts to skip the gate.
+- Tests: depth cap fires at exactly 5; daily cap rejects the 101st with the right error code; rule precedence (specific over wildcard); chain id stays consistent across N hops; commands stuck in `pending` for > 24h flip to `expired` via a periodic sweep (worker-side, or a small scheduled task).
+
+### 11.3 Atlas: test-runner bot
+
+- Lives at `agents/atlas/bot.py` + `agents/atlas/requirements.txt` + `agents/atlas/README.md` (matches the `polaris/` layout from Phase 6).
+- Loop: `claim_command(types=["atlas.run_tests"])` → if claimed, run `pytest <args>` in a subprocess (working dir is the agent bundle root by default; configurable via env `ATLAS_TEST_DIR`), capture stdout + return code, parse the summary line with a regex, emit `atlas.tests_run` event with `{passed: N, failed: N, duration_s: F, summary: str, returncode: int, log_tail: <last 4kb>}`, then `send_command("hermes", "hermes.post", {channel: "<configured>", text: ..., severity: "info"|"error"})`, then `complete_command(status="done")`. On crash, emit `atlas.crash` and complete with `failed`.
+- Env: `ATLAS_PYTEST_ARGS` (default `backend/tests/`), `ATLAS_TIMEOUT_S` (default `300`), `ATLAS_LOG_TAIL_BYTES` (default `4096`). Workspace-secret-injected like every other bot.
+- Atlas does NOT call Slack. Channel routing is Hermes's job. Atlas just produces a structured "outcome + summary" and lets Hermes decide what to do with it.
+- Tests in `backend/tests/test_atlas.py`: command-claim → pytest-stub → emit shape; failing-test path emits the right `severity`; timeout path emits `crash`; the dispatch to Hermes carries the right `dispatch_chain_id`. Use a fake pytest invocation (`echo "1 passed in 0.01s"`) to avoid recursive test runs.
+
+### 11.4 Hermes: notifier bot
+
+- `agents/hermes/bot.py` + `requirements.txt` + `README.md`.
+- Loop: `claim_command(types=["hermes.post", "hermes.dm"])` → look up the workspace's notification channel by `channel_name` from the payload (Phase 9's `notification_channels` table) → render a Block Kit message via the existing Phase 9 formatter (or a thin Hermes-specific formatter that takes Atlas's payload shape and produces a tidy "✅/❌ <summary> (<commit_short>)" line) → call `lightsei.notify(channel_name, message)` (already exists from Phase 9.5 or thereabouts) → emit `hermes.posted` with `{channel_id, http_status, latency_ms}` → complete.
+- Env: `HERMES_DEFAULT_CHANNEL` (so old code that doesn't pass a channel still works), `HERMES_RATE_LIMIT_PER_MINUTE` (default `30` to keep Slack happy).
+- On Phase 9 channel send-failure (4xx/5xx from Slack), retry once after 5s; on second failure complete `failed` and emit `hermes.send_failed` with the http status + body (truncated). Don't retry forever — a permanent 401 means the user has to fix the integration.
+- Tests in `backend/tests/test_hermes.py`: maps `severity=error → ❌` prefix and `severity=info → ✅`; falls back to `HERMES_DEFAULT_CHANNEL` when payload omits `channel`; non-2xx from the channel API surfaces as `hermes.send_failed`; rate-limiter shed-loads when bursting > 30/min (commands re-queued, not dropped).
+
+### 11.5 Polaris: react to push events instead of just ticking
+
+- New event type the webhook receiver enqueues: `polaris.evaluate_push` (a command, not an emit). Body is the parsed push event — commit sha, branch, touched paths, author. Posted via `send_command("polaris", "polaris.evaluate_push", ...)` from the webhook handler so it inherits the chain machinery (and so the user can mute it via the auto-approval rules).
+- New code path in `polaris/bot.py`: on `polaris.evaluate_push`, do NOT call Claude. Read a small heuristic table (`POLARIS_PUSH_RULES` env, defaults to `backend/**:atlas.run_tests, polaris/**:atlas.run_tests`) and dispatch matching commands. Cost-conscious: a push that touches only docs shouldn't burn a 75k-token Claude call to decide it doesn't need to do anything. The Claude-driven planning loop stays on its hourly schedule unchanged.
+- The existing scheduled tick is preserved untouched. `polaris.evaluate_push` is additive — it gives Polaris a low-cost event-driven dispatch path alongside the LLM-driven hourly planning path.
+- Tests: push touching `polaris/bot.py` dispatches one `atlas.run_tests`; push touching only `*.md` dispatches nothing; push touching paths outside any rule dispatches nothing; the dispatched commands carry `dispatch_chain_id` matching the source push event id (so the chain renders cleanly in 11.6).
+
+### 11.6 Dashboard: the dispatch-chain view
+
+- New top-level route `/dispatch` (next to `/polaris`, `/notifications`, `/github`). One row per `dispatch_chain_id`, newest first. Each row expandable to a vertical timeline of commands + events tied to that chain id, indented by `dispatch_depth`. Status badges (`pending`, `approved`, `running`, `done`, `failed`, `expired`) match the existing deployment-row palette.
+- Clicking a row reveals the command payload, the resulting event, and any approval action ("approved by bailey@... 04:21 UTC" or "auto-approved by rule (polaris, hermes, hermes.post)"). The existing event-detail flyout from `/polaris` is reusable here.
+- `pending` commands get an inline `approve` / `reject` button gated to admins; auto-approved chains skip the button entirely. Reject takes the chain off the floor (terminal `rejected` state, no children dispatched).
+- The view also exposes the auto-approval rule editor as a side panel — `(source_agent, target_agent, command_type) → mode`. Adding a rule there is the only Phase 11 way to enable auto-approve without flipping the global default.
+- Match the plain-Tailwind aesthetic of `/notifications`, `/account`, `/github`. Active route highlighting from the post-10.5 header redesign carries over for free.
+
+### 11.7 Phase 11 demo
+
+- Provision Atlas + Hermes in the workspace (`lightsei deploy ./agents/atlas`, `lightsei deploy ./agents/hermes` — or once Phase 10's push-to-deploy stays warm, just `git push` after `agents/atlas/` lands on `main`).
+- Configure auto-approval rule: `(polaris, hermes, hermes.post) → auto_approve`. Leave `(polaris, atlas, atlas.run_tests)` requiring human approval for the demo to show the click.
+- Push a one-line comment change to `backend/main.py`. Walk through the chain in the dashboard: webhook fires → `polaris.evaluate_push` command appears `pending` → click approve → Polaris dispatches `atlas.run_tests` (also `pending`) → click approve → Atlas runs pytest, emits `atlas.tests_run` → Atlas dispatches `hermes.post` (auto-approved by the rule) → Hermes posts to Slack. Time the whole thing.
+- Push a deliberately-failing change to a single test file. Same flow, observe `❌ atlas: ...` in Slack.
+- Set `(polaris, atlas, atlas.run_tests) → auto_approve` and push again. Now the chain runs end-to-end without any clicks. Time it again — should be tighter than the human-in-the-loop run by however long it took to click the button.
+- Done Log: timeline of the three demo runs (with-clicks, without-clicks, failing-tests), screenshots of the `/dispatch` page in each state, honest assessment of "would I trust Atlas to run unattended overnight without Phase 12's eval?". The expected answer is no, and that's the segue into Phase 12.
+
+---
+
+## Phase 11B: Command center (observatory)
+
+**Demo at end of phase**: Open `https://app.lightsei.com/` cold (signed-out → signed in to a workspace running Polaris + Atlas + Hermes). The home page reads top-to-bottom: dark constellation hero with the workspace's project state in serif copy ("Everything calm." or "Three things want your attention."), a literal constellation map of the agents (stars connected by dispatch lines), and a cost panel that adds up the workspace's MTD spend with an EOM projection. Trigger any agent activity (push to GitHub, redeploy Polaris, click "approve" on a dispatch) and the relevant star twinkles + the affected dispatch line briefly pulses, all within ~5 seconds. The page tells the operator everything they need to know about the team in a single screen, on theme.
+
+**Why now, not later.** Phase 11 multiplies the run count by introducing Atlas + Hermes (one push fires three agents). Without cost visibility AND a unified status view in place, you'd be staring at a sparse `/` page wondering what's happening while spend climbs. Phase 11B ships the command center the day after Phase 11 lands so dispatch goes live with the right rear-view mirror in place. It also feeds Phase 12 — multi-provider only matters if you can SEE the per-provider cost difference, and that only matters if there's a place that shows costs in the first place.
+
+**Style and palette.** "Observatory" — extends the existing `/polaris` treatment (`bg-gradient-to-br from-slate-950 via-indigo-950 to-slate-900` with star dots, serif headlines) into the home page. Dark hero on top → light card body underneath, exactly like `/polaris`. The constellation map widget keeps the dark canvas aesthetic so the agent stars read as stars; the cost panel sits in a white card with `border-indigo-900/40` accents so it stays in the family without screaming. References: NASA "Eyes on the Solar System" (dark canvas + info clusters), Stripe's monthly summary email (numbers without graph noise), Vercel project cards (whitespace + restraint).
+
+**Phase 11B ships three widgets.** Hero, constellation map, cost panel. The remaining home-page widgets (recent activity timeline, schedule strip, approvals inbox, repo state, notifications health) are tracked as **Phase 11C** in the parking lot below — they'll fold in as the data they need stabilizes (approvals inbox needs Phase 11's dispatch tables to be in steady state, etc.).
+
+### 11B.1 Cost telemetry backend
+
+- New `model_pricing` table seeded in code: `(provider, model, input_per_million_usd, output_per_million_usd, effective_from, deprecated_at)`. Source of truth lives in `backend/pricing.py` as a literal dict, written to the table by an Alembic migration and re-asserted on every `upgrade_to_head()` so a release can update prices without a manual UPDATE. Seed values: `claude-opus-4-7 ($15/$75)`, `claude-sonnet-4-6 ($3/$15)`, `claude-haiku-4-5 ($1/$5)`, plus matching rows for OpenAI's current line-up (already supported by the SDK auto-patch) so existing OpenAI-using runs get costed too. Per-workspace override row in a `workspace_pricing_overrides` table — empty in v1, future enterprise-rate hook.
+- New column `runs.cost_usd numeric(12,6)`. Backfill migration computes it from each run's `llm_call_completed` events × the pricing table at the run's timestamp. `cost_usd` becomes the field everything aggregates against — far cheaper than re-summing tokens × pricing on every dashboard render.
+- New aggregation endpoint `GET /workspaces/me/cost`: returns `{mtd_usd, projected_eom_usd, by_agent: [{agent_name, mtd_usd, run_count, last_run_at}], by_model: [{model, mtd_usd, runs}], budget_usd_monthly | null, budget_used_pct | null}`. EOM projection is `mtd / day_of_month * days_in_month` — naive but correct for a steady-state cadence and good enough until Phase 13's eval gives us a smarter signal.
+- New column `workspaces.budget_usd_monthly numeric(10,2) NULL`. When set and exceeded, behaves the same way Phase 2's daily cap does — denial response with a clear message — but at the workspace tier instead of the per-agent-per-day tier. Migration `0019_workspace_monthly_budget`.
+- Tests: pricing rows survive a round-trip migration; `runs.cost_usd` matches the manual sum-of-products on a synthetic dataset; the projection endpoint stays within 5% of actual after a 7-day backfilled trace; budget cap denies at 100% and warns (not denies) at 80%.
+
+### 11B.2 Status hero
+
+- Full-width banner at the top of `/`. Same gradient + star-dot pattern as `/polaris` so the visual language is one repo-wide style, not a one-off.
+- Headline in serif, sourced from a backend `GET /workspaces/me/pulse` endpoint that returns one of: `"Everything calm."` (zero pending issues), `"<N> things want your attention."` (N > 0, where N counts pending approvals + failed validations + budget warnings + stale agents). The endpoint also returns a structured breakdown so the headline can link to the underlying issues — clicking "Three things want your attention" expands to a list with `→` jumps.
+- Subtitle line under the headline: `<workspace-name> · <agent-count> agents · Polaris last tick <relative time>`. Subtitle is a single muted serif line so it doesn't compete with the headline.
+- Pulsing constellation icon top-right that gently brightens when ANY event lands in the workspace in the last 5s (driven by the same poll the constellation map uses — no separate websocket needed for v1). Respects `prefers-reduced-motion`.
+- Empty state when the workspace has no agents: hero says `"Sky empty. Deploy your first agent →"` with a CTA pointing to the docs.
+
+### 11B.3 Constellation map (agent grid)
+
+- The marquee widget. Single SVG, dark canvas (`bg-slate-950/60`, slightly lighter than the hero so the two are distinguishable), 320px tall on mobile, 480px on desktop, full content-width.
+- Each agent is a labeled star. **Position** is deterministic (so the layout doesn't shift between page loads) — see "Constellation positioning algorithm" sketch I've drafted alongside this spec for the exact formula. Polaris is fixed at the visual top center because it's the orchestrator; executors arrange in a mid-radius ring; notifiers arrange in an outer-radius ring. Agent tier comes from a new column `agents.role` (`orchestrator | executor | notifier | specialist`); existing rows default to `executor` until labelled.
+- **Dispatch lines** (edges) are drawn for any `(source_agent, target_agent)` pair that has at least one dispatched command in the last 24h. Stroke opacity scales with count (more dispatches = brighter line). Line color matches the inactive-star palette (`stroke-indigo-300/30`) when idle, brightens to `stroke-indigo-100/90` for ~800ms on each new dispatch via the standard polling tick.
+- **Star size** = `sqrt(runs_in_24h) * base_size`, capped between a min (so an inactive agent is still visible) and a max (so one runaway agent doesn't eat the canvas).
+- **Star color**: white = active (last heartbeat < 60s), `bg-indigo-300/60` = stale (no heartbeat in 60s+), red-rimmed (`stroke-red-400`) = last run failed.
+- **Twinkle animation**: when a new event for an agent arrives in the last poll cycle, the corresponding star runs a 600ms scale 1 → 1.15 → 1 + opacity 1 → 0.85 → 1 keyframe. Coordinated through a single CSS animation class added/removed by the React component so reduced-motion users get a static snapshot.
+- **Hover**: tooltip with name, model, status, last-run timestamp (relative + absolute on hover), last-run cost (sourced from `runs.cost_usd`), counts of dispatches in/out last 24h. **Click**: navigate to `/agents/{name}`.
+- **Empty state** (zero agents): `"Sky empty. Deploy your first agent →"` centered with a faint constellation outline drawn in the background as visual filler.
+- **Backend endpoint** `GET /workspaces/me/constellation`: returns `{agents: [{name, role, model, status, runs_24h, cost_24h_usd, last_event_at}], edges: [{from, to, count_24h, last_at}]}`. Polled every 5s by the frontend. Same endpoint serves the hero's pulse animation trigger via the most recent `last_event_at` across all agents.
+
+### 11B.4 Cost panel
+
+- Light card under the constellation, bordered in `border-indigo-900/40` so it ties to the hero/map without feeling out of place.
+- Top row: workspace MTD spend (big tabular-numerals, `font-mono` for the digits to keep widths stable as numbers tick up), projected EOM in muted gray immediately right of it (`$X.XX projected`), workspace monthly budget bar underneath (only rendered when `workspaces.budget_usd_monthly` is set; click-through to `/account` to set/edit if not).
+- Per-agent breakdown table: agent name (with the small star icon from the constellation map next to it for visual continuity), model, MTD cost, run count, projected EOM cost, click-through to that agent. Sortable by MTD cost desc by default.
+- Per-model summary row at the bottom: how the workspace's spend splits by model (e.g., `claude-opus-4-7: $24.10 (76%) · claude-haiku-4-5: $7.50 (24%)`). Sets up the Phase 12 demo where this row gets more interesting.
+- All numbers come from the cost telemetry endpoint from 11B.1 — no extra backend work for this widget. Refreshes every 30s (slower than the hero/map; cost moves slowly enough that 5s polling is wasted).
+- Empty state: when MTD = 0, the panel shows `"No spend yet. Polaris's first tick will land here."`
+
+### 11B.5 Phase 11B demo
+
+- Sign in to the prod workspace. The home page should now show: a status hero ("Everything calm" or N things), a constellation map with Polaris + Atlas + Hermes drawn as three connected stars, and a cost panel showing whatever's accumulated since the page was deployed.
+- Trigger Polaris's next tick by `git push` of a small docs change (re-using the Phase 10 push-to-deploy plumbing). Watch the constellation map: Polaris's star should twinkle, the dispatch line to Atlas should brighten if Polaris dispatches, Atlas's star twinkles when it claims, the line from Atlas to Hermes brightens, Hermes's star twinkles. End-to-end visual coverage of the dispatch chain that was abstract in Phase 11's `/dispatch` page.
+- Watch the cost panel update over the next ~10 minutes as runs accumulate. EOM projection should start shaky and tighten as more samples land.
+- Set a deliberately-low `budget_usd_monthly = $0.50` on the workspace to force the cap. Push enough activity to hit it. Verify: the budget bar fills + turns red at 100%, the headline flips to "Three things want your attention" with the budget warning showing as one of them, denial events fire on subsequent agent runs (Phase 2's denial UX handles the actual blocking).
+- Verify on mobile (your phone, browser DevTools, or both) that the layout reflows cleanly. Constellation map should stay readable at 320px tall.
+- Done Log: screenshots of the home page in (a) calm state, (b) attention state with budget warning, (c) post-trigger with the constellation animating, plus a note on whether the constellation map "earns its keep" vs. a plain agent grid (this is the visual that justifies the entire phase, so be honest).
+
+---
+
+## Phase 12+: TBD
+
+Open candidates for after the constellation's first dispatch chain ships:
+
+- **Phase 11C: command center, remaining widgets**. Phase 11B shipped hero + constellation map + cost panel. The other widgets discussed in the design — recent activity timeline (unified events / dispatches / deploys, last 20), schedule strip (next-24h tick previews + scheduled routines + recent webhook deliveries), approvals inbox (Phase 11 dispatch commands stuck in `pending` with one-click approve/reject), repo state card (last push + last deploy + webhook health), notifications health card (per-channel last-delivery status) — fold into the home page in this phase once their data sources stabilize. Approvals inbox is the most useful of the five and has the strongest dependency on Phase 11 dispatch tables being well-exercised.
+- **Phase 12: multi-provider model selector**. Per-agent `provider` + `model` config in the DB and the SDK. Adapters for Gemini, Groq (Llama / Mixtral), xAI (Grok), Cohere, plus the existing OpenAI + Anthropic. The point is that swapping Vega from Opus to GPT-5 (or Atlas from Haiku to Llama-3-70B-on-Groq) becomes one DB write, no code change. Phase 11B's cost panel already has the per-model summary row that becomes the centerpiece of this demo.
+- **Phase 13: more agents**. Argus (security + secret scanner), Vega (PR reviewer), Sirius (alert triager + on-call), Cassiopeia (incident scribe). Each drops in alongside Atlas and Hermes via Phase 11's dispatch primitives.
+- **Phase 14: continuous eval (layer 5)**. Judge-LLM scores past dispatched commands against actual outcomes — did Atlas's "tests pass" claim hold up on the next run? Did the human approve / reject Polaris's plans? This is the predicate for trusting any agent unattended.
+- **Phase 15: behavioral rules (layer 4)**. Loop detection across a run, runaway-token guards, escalating-permission patterns. Replaces Phase 11's heuristic depth + per-day caps with proper streaming detection.
 - **Phase 10B**: GitHub OAuth (replace PAT paste), multi-repo per workspace, per-environment branch tracking (a single repo's `main` and `staging` branches deploy to different agents).
 - **Personal-channel notifications (WhatsApp + SMS + Telegram)**: pull the three "outbound to a phone number / chat ID" channels into one phase. Twilio covers WhatsApp + SMS with one integration (auth tokens, sender-number provisioning, recipient phone numbers per send, Meta's 24-template-approval cycle for non-reply WhatsApp messages). Telegram is a separate bot API but lighter weight (bot token + chat IDs, no template approval). Each user's recipient identifier becomes its own first-class object on the workspace, since these channels are 1:1 not 1:room.
-- **Polaris dispatch (act, don't just plan)**: Polaris dispatches commands via `lightsei.send_command()` to user-deployed executor agents. The validation gate (Phase 8) catches bad outputs before they reach the dispatch path; what's missing is layer 5 (continuous eval) so we know whether the dispatched commands actually work.
-- **Polaris continuous eval (layer 5)**: judge-LLM scores past plans against actual outcomes (which next-actions actually got done? which were ignored? which led to drift?). Closes the loop on whether the orchestrator is any good.
-- **Layer 4: behavioral rules**: loop detection, runaway-token guards, escalating-permission patterns. Streaming detection across a run.
 - **Phase 5B**: cut single-host worker over to Fly Machines / Modal sandboxes (gates external users).
 - **Phase 8B**: SDK `emit_sync` + Polaris `polaris.plan_rejected` advisory events. Strengthens the rejection feedback loop so the dashboard can render rejected plans explicitly rather than relying on absence.
 - **Email notifications** (still deferred from Phase 9): needs SMTP infra (Resend / Postmark / SES).
