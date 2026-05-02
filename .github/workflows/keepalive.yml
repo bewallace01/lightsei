@@ -25,7 +25,9 @@ jobs:
     timeout-minutes: 2
     steps:
       - name: Ping backend /health
-        run: curl --fail --silent --show-error --max-time 30 https://api.lightsei.com/health
+        run: |
+          curl --fail --silent --show-error --max-time 30 https://api.lightsei.com/health
 
       - name: Ping dashboard /
-        run: curl --fail --silent --show-error --max-time 30 -o /dev/null -w "dashboard: %{http_code}\n" https://app.lightsei.com/
+        run: |
+          curl --fail --silent --show-error --max-time 30 -o /dev/null -w "dashboard: %{http_code}\n" https://app.lightsei.com/
