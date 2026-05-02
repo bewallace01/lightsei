@@ -1,0 +1,31 @@
+name: keepalive
+
+# Pings the prod backend + dashboard every 5 minutes so Railway doesn't put
+# the containers to sleep. Cold boot was clocked at ~9.6s during the Phase
+# 10.6 demo, which exceeded GitHub's 10s webhook delivery timeout — the
+# webhook was retryable but only via a manual click on the github.com side,
+# which is exactly the failure mode this is meant to prevent.
+#
+# Caveat: GitHub Actions cron has 5-15 min real-world jitter (it's a soft
+# schedule), so this isn't a hard guarantee. The Railway-side "min instances
+# = 1" toggle is the proper fix when the plan tier supports it; this
+# workflow is the always-free belt-and-suspenders.
+#
+# Each step uses curl --fail so a non-2xx surfaces as a failed run in the
+# Actions tab, which doubles as a basic uptime monitor.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Ping backend /health
+        run: curl --fail --silent --show-error --max-time 30 https://api.lightsei.com/health
+
+      - name: Ping dashboard /
+        run: curl --fail --silent --show-error --max-time 30 -o /dev/null -w "dashboard: %{http_code}\n" https://app.lightsei.com/
