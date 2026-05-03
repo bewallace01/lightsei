@@ -6,6 +6,11 @@ const config: Config = {
     extend: {
       fontFamily: {
         sans: ["var(--font-sans)", "ui-sans-serif", "system-ui", "sans-serif"],
+        // Phase 11 typography: Fraunces is the editorial serif used for
+        // hero copy + empty-state headlines. System fallback chain
+        // keeps anything rendering before the font loads from looking
+        // like Times New Roman in the wrong way.
+        serif: ["var(--font-serif)", "ui-serif", "Georgia", "serif"],
         mono: ["var(--font-mono)", "ui-monospace", "SFMono-Regular", "monospace"],
       },
       colors: {
