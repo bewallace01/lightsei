@@ -276,11 +276,17 @@ async function authedJson(
   if (r.status === 401) throw new UnauthorizedError();
   if (!r.ok) {
     const body = await r.json().catch(() => ({}));
-    throw new Error(
-      typeof body === "object" && body && "detail" in body
-        ? String((body as { detail: string }).detail)
-        : `${path} returned ${r.status}`,
-    );
+    const raw = (body as { detail?: unknown })?.detail;
+    // FastAPI returns `detail` as a string for HTTPException, but as an
+    // array of objects for Pydantic validation failures (422). Render
+    // both readably so the user never sees [object Object].
+    const detailMsg =
+      typeof raw === "string"
+        ? raw
+        : raw !== undefined
+          ? JSON.stringify(raw)
+          : null;
+    throw new Error(detailMsg ?? `${path} returned ${r.status}`);
   }
   return r.json();
 }
@@ -1114,14 +1120,20 @@ export async function fetchDispatchChain(
 }
 
 export async function approveCommand(commandId: string): Promise<DispatchCommand> {
+  // Backend's CommandApprovalIn body is required (with optional `reason`),
+  // so we have to send a JSON object even when there's no reason.
   return (await authedJson(`/commands/${encodeURIComponent(commandId)}/approve`, {
     method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
   })) as DispatchCommand;
 }
 
 export async function rejectCommand(commandId: string): Promise<DispatchCommand> {
   return (await authedJson(`/commands/${encodeURIComponent(commandId)}/reject`, {
     method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
   })) as DispatchCommand;
 }
 
