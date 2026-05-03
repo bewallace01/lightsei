@@ -42,12 +42,13 @@ const VB_W = 1000;
 const VB_H = 480;
 const CENTER = { x: VB_W / 2, y: VB_H / 2 };
 
-// Orbital radius by role tier.
+// Orbital radius by role tier. Spread the agents across the available
+// canvas — clustering near center would waste the room they have.
 const RADIUS_BY_ROLE: Record<ConstellationAgent["role"], number> = {
   orchestrator: 0, // dead center
   executor: 150,
   specialist: 200,
-  notifier: 250,
+  notifier: 220,
 };
 
 // Per-role angle offset so executors and notifiers don't pile up at
@@ -400,7 +401,7 @@ export default function Constellation() {
 
       <svg
         viewBox={`0 0 ${VB_W} ${VB_H}`}
-        className="w-full rounded-lg border border-indigo-900/50 shadow-lg shadow-indigo-950/30"
+        className="w-full"
         style={{ aspectRatio: `${VB_W} / ${VB_H}` }}
         role="img"
         aria-label="Constellation map of agents"
@@ -459,48 +460,15 @@ export default function Constellation() {
           </filter>
         </defs>
 
-        {/* Painted sky background — gradient first, then a soft amber
-            warmth in the center so Polaris looks like it's actually
-            radiating heat into the canvas. */}
-        <rect width={VB_W} height={VB_H} fill="url(#sky-grad)" />
-        <rect width={VB_W} height={VB_H} fill="url(#sky-warmth)" />
+        {/* No painted sky background here — the parent section
+            paints the gradient + warmth so the hero and the
+            constellation share one continuous canvas. The
+            sun-glow + halo behind Polaris still gives the
+            orchestrator its own warm aura on top of the wrapper's. */}
 
-        {/* Faint background star dots for atmosphere. Static positions
-            with a mix of sizes + opacities so the field reads as depth
-            rather than a regular grid. */}
-        <g aria-hidden="true">
-          {[
-            { x: 80, y: 60, r: 1.2, o: 0.7 },
-            { x: 220, y: 110, r: 0.8, o: 0.5 },
-            { x: 380, y: 80, r: 1.4, o: 0.8 },
-            { x: 540, y: 50, r: 0.8, o: 0.5 },
-            { x: 700, y: 130, r: 1.2, o: 0.7 },
-            { x: 880, y: 70, r: 1, o: 0.6 },
-            { x: 940, y: 220, r: 1.4, o: 0.5 },
-            { x: 60, y: 320, r: 0.8, o: 0.5 },
-            { x: 200, y: 400, r: 1.2, o: 0.5 },
-            { x: 360, y: 440, r: 1, o: 0.6 },
-            { x: 520, y: 410, r: 0.8, o: 0.5 },
-            { x: 720, y: 380, r: 1.2, o: 0.7 },
-            { x: 860, y: 420, r: 0.8, o: 0.5 },
-            { x: 920, y: 350, r: 1, o: 0.6 },
-            { x: 130, y: 200, r: 0.8, o: 0.5 },
-            { x: 870, y: 280, r: 1.4, o: 0.8 },
-            { x: 290, y: 240, r: 0.7, o: 0.45 },
-            { x: 660, y: 260, r: 0.7, o: 0.45 },
-            { x: 480, y: 90, r: 0.9, o: 0.55 },
-            { x: 460, y: 410, r: 0.9, o: 0.55 },
-          ].map((d, i) => (
-            <circle
-              key={i}
-              cx={d.x}
-              cy={d.y}
-              r={d.r}
-              fill="white"
-              opacity={d.o}
-            />
-          ))}
-        </g>
+        {/* Field stars are painted by the parent section's wrapper
+            so they're continuous across the hero + constellation
+            frame. No duplicate field here. */}
 
         {/* Edges first so stars sit on top. */}
         <g aria-hidden="true">
