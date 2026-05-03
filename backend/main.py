@@ -1046,24 +1046,45 @@ def get_workspace_pulse(
         if used_pct >= 80.0:
             budget_warnings = 1
 
+    # Stale = recently-relevant agent that stopped heartbeating. The
+    # earlier definition ("any agent that ever had a heartbeat but
+    # hasn't beat in 5 min") flagged abandoned test bots from weeks
+    # ago and quietly inflated the attention counter forever. Tighten:
+    # require some signal of recent relevance (heartbeat or event in
+    # the last 24h). An agent that was running last week and isn't now
+    # is just stopped, not stale — drop it from the count.
+    cutoff_24h_stale = now - timedelta(hours=24)
     stale_agents = session.execute(
         text(
             """
             SELECT COUNT(*) AS n
             FROM (
-                SELECT a.name,
-                       (SELECT MAX(ai.last_heartbeat_at)
-                        FROM agent_instances ai
-                        WHERE ai.workspace_id = :wsid
-                          AND ai.agent_name = a.name) AS last_hb
+                SELECT
+                    a.name,
+                    (SELECT MAX(ai.last_heartbeat_at)
+                     FROM agent_instances ai
+                     WHERE ai.workspace_id = :wsid
+                       AND ai.agent_name = a.name) AS last_hb,
+                    (SELECT MAX(e.timestamp)
+                     FROM events e
+                     WHERE e.workspace_id = :wsid
+                       AND e.agent_name = a.name) AS last_event
                 FROM agents a
                 WHERE a.workspace_id = :wsid
             ) sub
             WHERE sub.last_hb IS NOT NULL
               AND sub.last_hb < :cutoff_5m
+              AND (
+                  sub.last_hb >= :cutoff_24h
+                  OR (sub.last_event IS NOT NULL AND sub.last_event >= :cutoff_24h)
+              )
             """
         ),
-        {"wsid": workspace_id, "cutoff_5m": cutoff_5m},
+        {
+            "wsid": workspace_id,
+            "cutoff_5m": cutoff_5m,
+            "cutoff_24h": cutoff_24h_stale,
+        },
     ).scalar_one()
 
     issues_count = (
