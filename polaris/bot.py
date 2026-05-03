@@ -55,6 +55,7 @@ Workspace secrets (injected by the worker):
 """
 
 import base64
+import fnmatch
 import hashlib
 import json
 import os
@@ -62,7 +63,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import lightsei
 
@@ -475,6 +476,160 @@ def tick() -> None:
 
     lightsei.emit("polaris.plan", payload)
     _last_hashes = docs["hashes"]
+
+
+# ---------- Phase 11.5: react to push events ---------- #
+#
+# When the GitHub webhook fires, the backend enqueues a
+# `polaris.evaluate_push` command for this bot. The handler reads
+# POLARIS_PUSH_RULES (a comma-separated list of `<glob>:<command_kind>`
+# entries) and dispatches one command of `command_kind` per rule that
+# matches at least one touched path. Default rules cover the obvious
+# cases for this repo (backend or polaris source touched → run tests);
+# every other rule must be added explicitly so the cost stays bounded.
+#
+# This path deliberately does NOT call Claude. Hourly tick still does
+# the LLM-driven planning; evaluate_push is the cheap event-driven
+# complement that lights up dispatch chains for free.
+
+DEFAULT_PUSH_RULES = "backend/**:atlas.run_tests,polaris/**:atlas.run_tests"
+
+
+def _parse_push_rules(raw: Optional[str]) -> list[tuple[str, str]]:
+    """Parse `<glob>:<kind>,<glob>:<kind>` into a list of pairs.
+
+    Whitespace around entries / fields is tolerated. Entries missing the
+    `:kind` half or with empty halves are dropped silently — a malformed
+    rule shouldn't crash the bot's tick path. An empty / unset env var
+    falls back to DEFAULT_PUSH_RULES.
+    """
+    if raw is None or not raw.strip():
+        raw = DEFAULT_PUSH_RULES
+    rules: list[tuple[str, str]] = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry or ":" not in entry:
+            continue
+        pattern, _, kind = entry.partition(":")
+        pattern = pattern.strip()
+        kind = kind.strip()
+        if pattern and kind:
+            rules.append((pattern, kind))
+    return rules
+
+
+def _glob_matches_any(pattern: str, paths: list[str]) -> bool:
+    """fnmatch with `**` semantics (path-component-aware).
+
+    fnmatch alone treats `*` as matching any chars including `/`, which
+    is what we want for `polaris/**` to match `polaris/bot.py`. We add
+    the explicit `**` → `*` collapse so users can write `backend/**`
+    naturally and it does what they expect.
+    """
+    norm = pattern.replace("**", "*")
+    return any(fnmatch.fnmatch(p, norm) for p in paths)
+
+
+def evaluate_push(
+    payload: dict[str, Any],
+    *,
+    rules_env: Optional[str] = None,
+    send_command: Any = None,
+) -> dict[str, Any]:
+    """Pure handler core. Returns a summary of what was dispatched.
+
+    Factored out of the @on_command wrapper so unit tests can drive it
+    with a mock send_command. The wrapper just hands the SDK function
+    in. Returns:
+      {
+        "matched_rules": [{"pattern", "kind", "matched_paths": [...]}],
+        "dispatched": [{"target_agent": "atlas", "kind", "command_id"}],
+        "touched_paths": [...],
+        "skipped_reason": str | None,
+      }
+    """
+    if send_command is None:
+        send_command = lightsei.send_command
+
+    touched_paths = payload.get("touched_paths") or []
+    if not isinstance(touched_paths, list):
+        touched_paths = []
+    paths: list[str] = [p for p in touched_paths if isinstance(p, str)]
+
+    raw = rules_env if rules_env is not None else os.environ.get(
+        "POLARIS_PUSH_RULES"
+    )
+    rules = _parse_push_rules(raw)
+
+    matched: list[dict[str, Any]] = []
+    dispatched: list[dict[str, Any]] = []
+    commit_sha = payload.get("commit_sha") or ""
+    branch = payload.get("branch") or ""
+
+    for pattern, kind in rules:
+        matching = [p for p in paths if _glob_matches_any(pattern, [p])]
+        if not matching:
+            continue
+        # Phase 11.5 ships only one downstream target (atlas) so the
+        # rule's `kind` directly identifies the agent: `<agent>.<verb>`.
+        # Future rule kinds with different targets can introduce a
+        # third field; keep the parsing forward-compat by splitting on
+        # the first dot.
+        target_agent = kind.split(".", 1)[0]
+        cmd_payload = {
+            "commit_sha": commit_sha,
+            "branch": branch,
+            "trigger": "polaris.evaluate_push",
+            "matched_pattern": pattern,
+            "matched_paths": matching,
+        }
+        cmd = send_command(
+            target_agent, kind, cmd_payload, source_agent="polaris"
+        )
+        matched.append(
+            {"pattern": pattern, "kind": kind, "matched_paths": matching}
+        )
+        dispatched.append(
+            {
+                "target_agent": target_agent,
+                "kind": kind,
+                "command_id": (cmd or {}).get("id"),
+            }
+        )
+
+    skipped_reason: Optional[str] = None
+    if not paths:
+        skipped_reason = "no touched paths in push payload"
+    elif not rules:
+        skipped_reason = "POLARIS_PUSH_RULES is empty"
+    elif not matched:
+        skipped_reason = "no rule matched any touched path"
+
+    return {
+        "matched_rules": matched,
+        "dispatched": dispatched,
+        "touched_paths": paths,
+        "skipped_reason": skipped_reason,
+    }
+
+
+@lightsei.on_command(
+    "polaris.evaluate_push",
+    description=(
+        "Heuristic dispatch on a GitHub push. Reads POLARIS_PUSH_RULES "
+        "and fires one downstream command per matching rule. No LLM call."
+    ),
+)
+def _handle_evaluate_push(payload: dict[str, Any]) -> dict[str, Any]:
+    summary = evaluate_push(payload)
+    print(
+        f"evaluate_push: touched={len(summary['touched_paths'])} "
+        f"matched={len(summary['matched_rules'])} "
+        f"dispatched={len(summary['dispatched'])} "
+        f"skipped_reason={summary['skipped_reason']!r}",
+        flush=True,
+    )
+    return summary
 
 
 def main() -> None:

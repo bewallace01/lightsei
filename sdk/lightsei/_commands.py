@@ -243,6 +243,7 @@ def send_command(
     payload: Optional[dict[str, Any]] = None,
     *,
     dispatch_chain_id: Optional[str] = None,
+    source_agent: Optional[str] = None,
 ) -> dict[str, Any]:
     """Enqueue a command for `target_agent`. Returns the created command.
 
@@ -251,6 +252,11 @@ def send_command(
     generated UUID. Always sent on the wire so the server can persist it
     once Phase 11.2 lands; today the field is silently dropped by
     Pydantic since the column doesn't exist yet.
+
+    `source_agent` identifies the dispatcher and gets persisted on the
+    server so 11.2's depth + per-day caps and 11.6's constellation edges
+    can attribute the dispatch correctly. When omitted, the server
+    treats it as a user / off-platform enqueue (no caps, auto-approve).
 
     Raises LightseiError on transport failure or non-2xx response.
     """
@@ -277,6 +283,8 @@ def send_command(
         # Forward-compat: server in 11.1 ignores; persisted in 11.2+.
         "dispatch_chain_id": chain_id,
     }
+    if source_agent:
+        body["source_agent"] = source_agent
     try:
         r = client._http.post(
             f"/agents/{target_agent}/commands",

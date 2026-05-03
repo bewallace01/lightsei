@@ -860,3 +860,105 @@ def test_redeploy_endpoint_carries_source_forward(client, alice):
     assert new_dep["source"] == "github_push"
     assert new_dep["source_commit_sha"] == "origin42"
     assert new_dep["source_blob_id"] == original["source_blob_id"]
+
+
+# ---------- Phase 11.5: webhook enqueues polaris.evaluate_push ---------- #
+
+
+def _post_webhook_with_delivery(
+    client, payload, *, secret, delivery_id: str | None = None
+):
+    """Wrapper around _post_webhook that lets a test set the
+    X-GitHub-Delivery header so we can verify the chain id propagates."""
+    body = json.dumps(payload).encode("utf-8")
+    headers = {"Content-Type": "application/json", "X-GitHub-Event": "push"}
+    if secret:
+        headers["X-Hub-Signature-256"] = _sign(secret, body)
+    if delivery_id is not None:
+        headers["X-GitHub-Delivery"] = delivery_id
+    return client.post("/webhooks/github", content=body, headers=headers)
+
+
+def _list_polaris_commands(client, api_key: str):
+    h = auth_headers(api_key)
+    r = client.get("/agents/polaris/commands", headers=h)
+    assert r.status_code == 200, r.text
+    return r.json().get("commands", [])
+
+
+def test_push_enqueues_polaris_evaluate_push_command(client, alice):
+    """Every signed push the receiver accepts should leave a
+    `polaris.evaluate_push` command pending for the polaris agent. The
+    command's payload carries the push metadata Polaris's handler
+    needs (touched_paths, commit_sha, branch, repo)."""
+    api_key = alice["api_key"]["plaintext"]
+    secret = _register_integration(client, api_key)
+
+    payload = _push_payload(
+        after="cafe1234",
+        commits=[
+            {
+                "id": "cafe1234",
+                "added": ["polaris/new_helper.py"],
+                "modified": ["backend/main.py"],
+                "removed": [],
+            }
+        ],
+    )
+    r = _post_webhook(client, payload, secret=secret)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["polaris_command_id"]
+    assert body["dispatch_chain_id"]
+
+    cmds = _list_polaris_commands(client, api_key)
+    assert len(cmds) == 1
+    cmd = cmds[0]
+    assert cmd["kind"] == "polaris.evaluate_push"
+    p = cmd["payload"]
+    assert p["commit_sha"] == "cafe1234"
+    assert p["branch"] == "main"
+    assert p["repo"] == "acme/widgets"
+    assert sorted(p["touched_paths"]) == sorted(
+        ["polaris/new_helper.py", "backend/main.py"]
+    )
+
+
+def test_push_command_chain_id_uses_github_delivery_header(client, alice):
+    """Spec: the dispatched commands carry `dispatch_chain_id` matching
+    the source push event id. We use the GitHub delivery uuid as that
+    chain id so the entire dispatch tree (evaluate_push → atlas.run_tests
+    → hermes.post) groups under one id in the 11.6 /dispatch view."""
+    api_key = alice["api_key"]["plaintext"]
+    secret = _register_integration(client, api_key)
+
+    delivery = "11111111-2222-3333-4444-555555555555"
+    payload = _push_payload(
+        commits=[{"id": "x", "added": [], "modified": ["backend/main.py"], "removed": []}]
+    )
+    r = _post_webhook_with_delivery(
+        client, payload, secret=secret, delivery_id=delivery
+    )
+    assert r.status_code == 200
+    assert r.json()["dispatch_chain_id"] == delivery
+
+    cmds = _list_polaris_commands(client, api_key)
+    assert cmds[0]["dispatch_chain_id"] == delivery
+
+
+def test_push_with_no_paths_still_enqueues_polaris_command(client, alice):
+    """Polaris's handler — not the webhook — decides whether a push is
+    actionable. A push touching only docs should still produce the
+    evaluate_push command (with empty / no-rule-match touched_paths);
+    Polaris sees it, runs the rules, dispatches nothing."""
+    api_key = alice["api_key"]["plaintext"]
+    secret = _register_integration(client, api_key)
+
+    payload = _push_payload(
+        commits=[{"id": "x", "added": [], "modified": ["README.md"], "removed": []}]
+    )
+    r = _post_webhook(client, payload, secret=secret)
+    assert r.status_code == 200
+    cmds = _list_polaris_commands(client, api_key)
+    assert len(cmds) == 1
+    assert cmds[0]["payload"]["touched_paths"] == ["README.md"]

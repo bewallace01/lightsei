@@ -4,7 +4,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 11.1: SDK ergonomics for `send_command()` + `claim_command()`**
+> **Phase 11.6: Dashboard `/dispatch` view (per-chain timeline)**
 
 Phases 1-4 shipped 2026-04-25 (spine, cost-cap guardrail, Anthropic + streaming, hosted-readiness). Phase 5 shipped 2026-04-26 (PaaS-for-agents). Phase 6 shipped 2026-04-27 (Polaris orchestrator). Phase 7 shipped 2026-04-28 (output validation, advisory). Phase 8 shipped 2026-04-28 (blocking validators). Phase 9 shipped 2026-04-30 (notifications). Phase 10 shipped 2026-05-01 (GitHub integration: push-to-deploy + Polaris reads docs from the repo). Phase 11 starts the dispatch story: Polaris commands a team of executor agents instead of just emitting plans you read. Phase 11B turns the home page into a real command center while we're at it. Phase 12 is multi-provider so the team can pick the right model per task.
 
@@ -439,6 +439,21 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-03 — Phase 11.5: Polaris reacts to push events
+
+- [x] Webhook receiver enqueues a `polaris.evaluate_push` command on every accepted push, with `dispatch_chain_id` set to the GitHub `X-GitHub-Delivery` header so the entire downstream chain (evaluate_push → atlas.run_tests → hermes.post) groups under one id for the 11.6 view. Payload carries commit_sha, branch, repo, touched_paths, author. (`backend/main.py`)
+- [x] New `polaris/bot.py:evaluate_push` handler (registered via `@lightsei.on_command("polaris.evaluate_push")`) reads `POLARIS_PUSH_RULES` (default `backend/**:atlas.run_tests,polaris/**:atlas.run_tests`), fnmatches each touched path against each rule, and dispatches one downstream command per matching rule. No Claude call — the LLM-driven hourly tick stays untouched.
+- [x] Side-quest fix: `lightsei.send_command()` now accepts and forwards `source_agent`. The kwarg was already used by Atlas's bot but the SDK silently dropped it; Atlas's tests covered the call site with a MagicMock so the latent `TypeError` only would have surfaced in prod. Now correct.
+- [x] Tests (411 passing): push touching `polaris/bot.py` dispatches one `atlas.run_tests`; push touching only `*.md` dispatches nothing; push touching paths outside any rule dispatches nothing; chain_id matches the GitHub delivery id; rule parser tolerates whitespace + drops malformed entries; `**` is directory-aware (`backend/**` does not match `backendXYZ/`).
+
+### 2026-05-03 — Connection-leak watch infra
+
+Pre-Phase-11 pool was 5+10 = 15 connections; post-Phase-11 we saw 15 idle-in-transaction sessions saturating it during peak dashboard polling. Bumped to 20+40 = 60 in `4a7e37b` as a band-aid — but the root cause is still unidentified. Three pieces of passive instrumentation now in place to either confirm the bump fixed it or pinpoint the leaking endpoint:
+
+- [x] `/health` returns SQLAlchemy pool counters + `pg_stat_activity` state breakdown (`idle_in_txn`, `active`, `idle`, `total`). One short query against the system view, cheap enough to run on every keepalive ping.
+- [x] `.github/workflows/keepalive.yml` pipes the response body into the GitHub Actions log and pulls `idle_in_txn=N` onto its own line for grep — 288 samples/day for free.
+- [x] Daily routine `Daily idle_in_txn watch` (`trig_019shTxF315odkgcK7LnhErb`, fires `0 13 * * *` UTC) scans the last 24h of keepalive runs, computes max + avg, opens a GitHub issue if any sample exceeds 5.
 
 ### 2026-05-01 — Phase 10.6: Phase 10 demo
 

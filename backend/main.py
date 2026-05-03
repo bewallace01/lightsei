@@ -2271,6 +2271,32 @@ def _push_touched_path(commits: list[dict[str, Any]], agent_path: str) -> bool:
     return False
 
 
+def _collect_touched_paths(commits: list[dict[str, Any]]) -> list[str]:
+    """Flatten added/modified/removed across all commits in a push.
+
+    Polaris's evaluate_push handler matches these against POLARIS_PUSH_RULES
+    glob patterns to decide which downstream agents to dispatch. Order is
+    preserved, duplicates removed (a single file changed across multiple
+    commits in one push only counts once for rule matching).
+    """
+    if not isinstance(commits, list):
+        return []
+    seen: set[str] = set()
+    out: list[str] = []
+    for commit in commits:
+        if not isinstance(commit, dict):
+            continue
+        for field in ("added", "modified", "removed"):
+            files = commit.get(field) or []
+            if not isinstance(files, list):
+                continue
+            for f in files:
+                if isinstance(f, str) and f and f not in seen:
+                    seen.add(f)
+                    out.append(f)
+    return out
+
+
 def _queue_github_redeploy(
     session: Session,
     *,
@@ -2488,12 +2514,65 @@ async def github_webhook(
                 }
             )
 
+    # Phase 11.5: enqueue a `polaris.evaluate_push` command so Polaris
+    # gets an event-driven dispatch path on every push (in addition to
+    # its hourly tick). Polaris's handler reads POLARIS_PUSH_RULES to
+    # decide whether to dispatch downstream commands (e.g. atlas.run_tests
+    # when backend code changed) without burning a Claude call.
+    #
+    # Chain id is the GitHub delivery id so every command in the chain
+    # — this evaluate_push command, the atlas.run_tests Polaris dispatches,
+    # the hermes.post Atlas dispatches — share one chain that the 11.6
+    # /dispatch view can render as a single tree.
+    delivery_id = (request.headers.get("x-github-delivery") or "").strip()
+    chain_id = delivery_id or str(uuid.uuid4())
+    touched_paths = _collect_touched_paths(commits or [])
+    head_author = (
+        head_commit.get("author") if isinstance(head_commit, dict) else None
+    )
+    push_payload = {
+        "commit_sha": commit_sha,
+        "branch": integration.branch,
+        "repo": f"{owner}/{name}",
+        "touched_paths": touched_paths,
+        "author": head_author if isinstance(head_author, dict) else None,
+        "delivery_id": delivery_id or None,
+    }
+    ensure_agent(session, integration.workspace_id, "polaris", utcnow())
+    approval_state = _resolve_auto_approval(
+        session,
+        workspace_id=integration.workspace_id,
+        source_agent=None,
+        target_agent="polaris",
+        command_kind="polaris.evaluate_push",
+    )
+    now = utcnow()
+    polaris_cmd = Command(
+        id=str(uuid.uuid4()),
+        workspace_id=integration.workspace_id,
+        agent_name="polaris",
+        kind="polaris.evaluate_push",
+        payload=push_payload,
+        status="pending",
+        source_agent=None,
+        dispatch_chain_id=chain_id,
+        dispatch_depth=0,
+        approval_state=approval_state,
+        approved_at=now if approval_state == "auto_approved" else None,
+        created_at=now,
+        expires_at=now + COMMAND_TTL,
+    )
+    session.add(polaris_cmd)
+    session.flush()
+
     return {
         "status": "ok",
         "event": "push",
         "ref": ref,
         "commit_sha": commit_sha,
         "queued_redeploys": queued,
+        "polaris_command_id": polaris_cmd.id,
+        "dispatch_chain_id": chain_id,
     }
 
 

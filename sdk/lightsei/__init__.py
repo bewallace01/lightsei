@@ -169,6 +169,7 @@ def send_command(
     payload: Optional[dict[str, Any]] = None,
     *,
     dispatch_chain_id: Optional[str] = None,
+    source_agent: Optional[str] = None,
 ) -> dict[str, Any]:
     """Enqueue a command for another agent. Returns the created command.
 
@@ -197,6 +198,7 @@ def send_command(
         kind,
         payload,
         dispatch_chain_id=dispatch_chain_id,
+        source_agent=source_agent,
     )
 
 
