@@ -4,7 +4,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 11.6: Dashboard `/dispatch` view (per-chain timeline)**
+> **Phase 11.7: Phase 11 demo (provision Atlas + Hermes, walk the chain end-to-end on prod)**
 
 Phases 1-4 shipped 2026-04-25 (spine, cost-cap guardrail, Anthropic + streaming, hosted-readiness). Phase 5 shipped 2026-04-26 (PaaS-for-agents). Phase 6 shipped 2026-04-27 (Polaris orchestrator). Phase 7 shipped 2026-04-28 (output validation, advisory). Phase 8 shipped 2026-04-28 (blocking validators). Phase 9 shipped 2026-04-30 (notifications). Phase 10 shipped 2026-05-01 (GitHub integration: push-to-deploy + Polaris reads docs from the repo). Phase 11 starts the dispatch story: Polaris commands a team of executor agents instead of just emitting plans you read. Phase 11B turns the home page into a real command center while we're at it. Phase 12 is multi-provider so the team can pick the right model per task.
 
@@ -439,6 +439,14 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-03 — Phase 11.6: Dashboard `/dispatch` view
+
+- [x] `GET /workspaces/me/dispatch` lists chains newest-first; one row per `dispatch_chain_id` with aggregate status (`pending_approval` > `running` > `failed` > `expired` > `done`), command count, max depth, last activity timestamp, and pending-approval count for the click-to-approve lozenge.
+- [x] `GET /workspaces/me/dispatch/{chain_id}` returns the full timeline: every command ordered by depth then created_at, plus any events whose `payload.command_id` ties them to a chain command. Workspace-isolated (404 if the chain belongs to another tenant).
+- [x] Frontend route `/dispatch` (linked from the header next to `polaris`). Each chain row expandable into an indented timeline; depth controls left-padding so a `polaris → atlas → hermes` chain visually nests. Pending commands get inline `approve` / `reject` buttons; auto-approved + completed commands skip the buttons. Per-command details flyout shows payload + linked event payloads.
+- [x] Auto-approval rule editor lives as a toggleable side panel on the same page. Add / update / delete rules without leaving the view; wildcards (`*`) supported in the source-agent and command-kind fields per the existing 11.2 resolver precedence.
+- [x] Backend tests (419 passing): list endpoint returns aggregates + ordering + workspace isolation; chain detail returns commands + linked events ordered by depth, 404s on unknown chain, 404s cross-workspace.
 
 ### 2026-05-03 — Phase 11.5: Polaris reacts to push events
 
