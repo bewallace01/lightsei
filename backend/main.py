@@ -174,6 +174,16 @@ class AutoApprovalRuleIn(BaseModel):
     mode: str = Field(pattern="^(auto_approve|require_human)$")
 
 
+class NotificationDispatchIn(BaseModel):
+    """Phase 11.4: Hermes uses this endpoint to fan out arbitrary
+    text from other agents into the workspace's configured channels."""
+    channel_name: str = Field(min_length=1, max_length=128)
+    text: str = Field(min_length=1, max_length=4000)
+    severity: str = Field(
+        default="info", pattern="^(info|error|warning)$"
+    )
+
+
 class CommandCompleteIn(BaseModel):
     result: Optional[dict[str, Any]] = None
     error: Optional[str] = None
@@ -1795,6 +1805,64 @@ def delete_notification_channel(
     session.delete(row)
     session.flush()
     return {"status": "ok"}
+
+
+@app.post("/workspaces/me/notifications/dispatch")
+def dispatch_to_channel(
+    body: NotificationDispatchIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 11.4: dispatch arbitrary text to a notification channel
+    by name. Hermes (the workspace's notifier bot) calls this as the
+    last hop in chains like polaris → atlas → hermes — Atlas hands
+    Hermes a tidy summary line, Hermes hands it to Slack/Discord/etc.
+
+    Returns 200 with the delivery row regardless of dispatch outcome.
+    The HTTP status of the underlying webhook lives in
+    `delivery.response_summary.http_status` so the bot can decide
+    whether to retry or surface failure as a `hermes.send_failed`
+    event.
+    """
+    channel = session.execute(
+        select(NotificationChannel).where(
+            NotificationChannel.workspace_id == workspace_id,
+            NotificationChannel.name == body.channel_name,
+        )
+    ).scalar_one_or_none()
+    if channel is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"channel {body.channel_name!r} not found",
+        )
+
+    signal = notifications.Signal(
+        trigger="hermes.post",
+        agent_name="hermes",
+        dashboard_url=f"{DASHBOARD_BASE_URL}/notifications",
+        timestamp=utcnow(),
+        payload={"text": body.text, "severity": body.severity},
+        workspace_id=workspace_id,
+    )
+    result = notifications.dispatch(
+        channel_type=channel.type,
+        target_url=channel.target_url,
+        signal=signal,
+        secret_token=channel.secret_token,
+    )
+
+    delivery = NotificationDelivery(
+        channel_id=channel.id,
+        event_id=None,
+        trigger="hermes.post",
+        status=result.status,
+        response_summary=result.response_summary,
+        attempt_count=result.attempt_count,
+        sent_at=utcnow(),
+    )
+    session.add(delivery)
+    session.flush()
+    return {"delivery": _serialize_notification_delivery(delivery)}
 
 
 @app.post("/workspaces/me/notifications/{channel_id}/test")

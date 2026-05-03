@@ -33,6 +33,8 @@ def format(signal: Signal) -> dict[str, Any]:
         return _format_run_failed(signal)
     if signal.trigger == "test":
         return _format_test(signal)
+    if signal.trigger == "hermes.post":
+        return _format_hermes_post(signal)
     # Future-proof: an unrecognized trigger lands a generic message
     # rather than raising. Keeps a Phase 10+ trigger from breaking
     # already-deployed Slack channels until the formatter is updated.
@@ -141,6 +143,33 @@ def _format_test(signal: Signal) -> dict[str, Any]:
             {"type": "context", "elements": [
                 {"type": "mrkdwn", "text": f"<{signal.dashboard_url}|Manage channels ↗>"},
             ]},
+        ],
+    }
+
+
+def _format_hermes_post(signal: Signal) -> dict[str, Any]:
+    """Phase 11.4: Hermes is the workspace's notifier bot. Upstream
+    agents (Atlas's tests_run summary, future agents' alerts) hand
+    Hermes a fully-formed `text` line — Hermes does no per-channel
+    formatting beyond wrapping it in a Slack section block. Keeps
+    the agent ↔ channel coupling thin: the upstream agent decides
+    what to say, the formatter only decides how to render it on
+    each platform.
+
+    payload shape:
+        text:     str — the message body, already including any
+                  emoji prefix the upstream agent wants.
+        severity: 'info' | 'error' (optional, default 'info'). Drives
+                  the header color; the body text is unchanged.
+    """
+    text = str(signal.payload.get("text") or "(empty hermes.post)")
+    return {
+        "text": text,
+        "blocks": [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": text},
+            },
         ],
     }
 
