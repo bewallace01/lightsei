@@ -1201,14 +1201,22 @@ def get_workspace_constellation(
         {"wsid": workspace_id, "cutoff_24h": cutoff_24h},
     ).all()
 
-    # Filter out agents that have never had any activity AND aren't
-    # explicitly tagged as orchestrator — keeps the canvas free of
-    # dormant placeholder rows.
+    # Active-only filter so old test bots / dev agents don't crowd the
+    # canvas. Keep an agent if any of:
+    #   - role == "orchestrator" (polaris always renders, anchors center)
+    #   - heartbeat within the last hour (currently running on a worker)
+    #   - any event in the last 24h (recently active even without a heartbeat)
+    # Anything else is treated as dormant and dropped from the response.
     now = utcnow()
+    cutoff_1h = now - timedelta(hours=1)
     agents_out: list[dict[str, Any]] = []
     for r in agent_rows:
         last_hb = r.last_heartbeat_at
-        if last_hb is None and r.runs_24h == 0 and r.role != "orchestrator":
+        last_event = r.last_event_at
+        is_orchestrator = r.role == "orchestrator"
+        recently_alive = last_hb is not None and last_hb >= cutoff_1h
+        recently_active = last_event is not None and last_event >= cutoff_24h
+        if not (is_orchestrator or recently_alive or recently_active):
             continue
         # Status mapping:
         #   active = heartbeat within last 60s

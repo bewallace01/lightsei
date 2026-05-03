@@ -35,7 +35,7 @@ import {
   fetchConstellation,
   UnauthorizedError,
 } from "./api";
-import { hash32, sparklePath, tintForAgent } from "./stars";
+import { sparklePath, tintForAgent } from "./stars";
 
 // ---- Layout constants. ---- //
 
@@ -80,30 +80,24 @@ function positionFor(
     return { x: CENTER.x, y: CENTER.y };
   }
   const radius = RADIUS_BY_ROLE[agent.role] ?? RADIUS_BY_ROLE.executor;
+  // Even-angle placement within each role ring. Sort peers (including
+  // self) alphabetically so a given agent's slot is stable across
+  // renders, then place it at angle = (slot / count) * 2π + role offset.
+  // No overlaps possible within a ring, no matter how many bots — the
+  // earlier hash-then-bump approach put atlas + hermes on top of each
+  // other once their FNV-1a hashes collided into similar angles.
+  const peers = others
+    .filter((o) => o.role === agent.role)
+    .map((o) => o.name)
+    .sort();
+  const slots = Math.max(1, peers.length);
+  const idx = Math.max(0, peers.indexOf(agent.name));
   const angle =
-    (hash32(agent.name) / 0xffffffff) * Math.PI * 2 +
-    ANGLE_OFFSET_BY_ROLE[agent.role];
-  let x = CENTER.x + Math.cos(angle) * radius;
-  let y = CENTER.y + Math.sin(angle) * radius;
-  // Post-hoc collision bump: if any prior non-orchestrator agent
-  // landed within 80px, fan this one out by +30 on its radius.
-  // Cheap O(n²) but n is tiny.
-  for (const other of others) {
-    if (other.name === agent.name || other.role === "orchestrator") continue;
-    const oRadius = RADIUS_BY_ROLE[other.role] ?? RADIUS_BY_ROLE.executor;
-    const oAngle =
-      (hash32(other.name) / 0xffffffff) * Math.PI * 2 +
-      ANGLE_OFFSET_BY_ROLE[other.role];
-    const ox = CENTER.x + Math.cos(oAngle) * oRadius;
-    const oy = CENTER.y + Math.sin(oAngle) * oRadius;
-    const d = Math.hypot(x - ox, y - oy);
-    if (d < 80) {
-      x = CENTER.x + Math.cos(angle) * (radius + 30);
-      y = CENTER.y + Math.sin(angle) * (radius + 30);
-      break;
-    }
-  }
-  return { x, y };
+    (idx / slots) * Math.PI * 2 + ANGLE_OFFSET_BY_ROLE[agent.role];
+  return {
+    x: CENTER.x + Math.cos(angle) * radius,
+    y: CENTER.y + Math.sin(angle) * radius,
+  };
 }
 
 // Star size: small at idle, grows with activity, capped so a runaway
