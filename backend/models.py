@@ -1,5 +1,6 @@
 """SQLAlchemy declarative models for Lightsei's Postgres schema."""
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Optional
 
 from sqlalchemy import (
@@ -11,6 +12,7 @@ from sqlalchemy import (
     Index,
     Integer,
     LargeBinary,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -32,6 +34,12 @@ class Workspace(Base):
     name: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
+    )
+    # Phase 11B.1: workspace-level monthly spend cap. NULL = no cap.
+    # When set and reached, runs in this workspace get denied with the same
+    # UX path as Phase 2's per-agent daily cap.
+    budget_usd_monthly: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(10, 2), nullable=True
     )
 
 
@@ -73,6 +81,15 @@ class Run(Base):
     )
     ended_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+    # Phase 11B.1: incrementally summed from `llm_call_completed` events
+    # as they arrive at /events. Cached on the row so dashboard rollups
+    # can aggregate cost in a single index scan instead of joining
+    # events × pricing on every render. server_default '0' so existing
+    # rows take a sane starting value before the migration's backfill
+    # pass runs.
+    cost_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 6), nullable=False, server_default="0"
     )
 
     __table_args__ = (
@@ -620,6 +637,69 @@ class GitHubAgentPath(Base):
     )
     agent_name: Mapped[str] = mapped_column(String(64), primary_key=True)
     path: Mapped[str] = mapped_column(String(512), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
+class ModelPricing(Base):
+    """Per-model token pricing. The `pricing.PRICING` literal is the source
+    of truth; this table is a mirror that gets re-asserted on every
+    `upgrade_to_head()` call (see `pricing.seed_model_pricing`). It exists
+    so the dashboard can render a "current rates" table without re-shipping
+    the SDK, and to set up the per-workspace override path in
+    `WorkspacePricingOverride`.
+
+    Cost computation in `cost.py` reads from `pricing.PRICING` directly —
+    not from this table — to avoid a DB round-trip on every event ingest.
+    """
+
+    __tablename__ = "model_pricing"
+
+    provider: Mapped[str] = mapped_column(String(64), primary_key=True)
+    model: Mapped[str] = mapped_column(String(128), primary_key=True)
+    input_per_million_usd: Mapped[Decimal] = mapped_column(
+        Numeric(10, 4), nullable=False
+    )
+    output_per_million_usd: Mapped[Decimal] = mapped_column(
+        Numeric(10, 4), nullable=False
+    )
+    effective_from: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    deprecated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
+class WorkspacePricingOverride(Base):
+    """Per-workspace pricing overrides for negotiated enterprise rates.
+
+    Empty in v1 — the cost computation path does NOT consult this table
+    yet. Reserved so future Phase 12+ work has a place to put per-workspace
+    rates without another schema migration.
+    """
+
+    __tablename__ = "workspace_pricing_overrides"
+
+    workspace_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    model: Mapped[str] = mapped_column(String(128), primary_key=True)
+    input_per_million_usd: Mapped[Decimal] = mapped_column(
+        Numeric(10, 4), nullable=False
+    )
+    output_per_million_usd: Mapped[Decimal] = mapped_column(
+        Numeric(10, 4), nullable=False
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
