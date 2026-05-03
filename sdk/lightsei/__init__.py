@@ -14,7 +14,13 @@ from typing import Any, Optional
 
 from ._chat import on_chat
 from ._client import _client
-from ._commands import on_command
+from ._commands import (
+    claim_command as _impl_claim_command,
+    complete_command as _impl_complete_command,
+    current_dispatch_chain_id,
+    on_command,
+    send_command as _impl_send_command,
+)
 from ._context import get_run_id
 from ._secrets import get_secret as _impl_get_secret
 from ._track import track
@@ -51,6 +57,10 @@ __all__ = [
     "get_secret",
     "on_command",
     "on_chat",
+    "send_command",
+    "claim_command",
+    "complete_command",
+    "current_dispatch_chain_id",
     "LightseiError",
     "LightseiPolicyError",
 ]
@@ -151,3 +161,69 @@ def get_secret(name: str, *, ttl_s: Optional[float] = None) -> str:
     unset — secrets are usually keys, so failing closed is the right default.
     """
     return _impl_get_secret(_client, name, ttl_s=ttl_s)
+
+
+def send_command(
+    target_agent: str,
+    kind: str,
+    payload: Optional[dict[str, Any]] = None,
+    *,
+    dispatch_chain_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Enqueue a command for another agent. Returns the created command.
+
+    Typical use, from inside an `@on_command` handler or a `claim_command`
+    block:
+
+        @lightsei.on_command("polaris.evaluate_push")
+        def on_push(payload):
+            cmd = lightsei.send_command(
+                "atlas",
+                "atlas.run_tests",
+                {"commit": payload["commit"]},
+            )
+            return {"dispatched": cmd["id"]}
+
+    The dispatch chain id is inherited from the active claim's thread-local
+    context if present, otherwise generated fresh. Pass `dispatch_chain_id`
+    explicitly to override (rare; only useful for tests or for joining a
+    chain id from outside the SDK's normal flow).
+
+    Raises LightseiError on transport or non-2xx.
+    """
+    return _impl_send_command(
+        _client,
+        target_agent,
+        kind,
+        payload,
+        dispatch_chain_id=dispatch_chain_id,
+    )
+
+
+def claim_command(
+    *, agent_name: Optional[str] = None
+) -> Optional[dict[str, Any]]:
+    """Atomically claim the oldest pending command for this agent.
+
+    Returns the command dict, or None when the queue is empty. Use this for
+    explicit polling control; the `@on_command` decorator + auto-poller
+    works for the common case where one handler per kind is enough.
+
+    Sets the per-thread dispatch context so subsequent `send_command` calls
+    inherit the chain id automatically. The context clears on
+    `complete_command`.
+    """
+    return _impl_claim_command(_client, agent_name=agent_name)
+
+
+def complete_command(
+    command_id: str,
+    *,
+    result: Optional[dict[str, Any]] = None,
+    error: Optional[str] = None,
+) -> dict[str, Any]:
+    """Mark a claimed command done (success) or failed (error). Clears this
+    thread's dispatch context. Pass exactly one of `result` or `error`."""
+    return _impl_complete_command(
+        _client, command_id, result=result, error=error
+    )
