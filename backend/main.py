@@ -447,7 +447,7 @@ def on_startup() -> None:
             )
 
 
-# Phase 11.7 demo trigger: this comment fires the polaris → atlas → hermes chain.
+# Phase 11.7 demo trigger v2: fires polaris → atlas → hermes after the SDK 0.1.1 + auto-poller fix.
 @app.get("/health")
 def health() -> dict[str, Any]:
     """Liveness + lightweight pool/connection telemetry.
