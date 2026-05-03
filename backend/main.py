@@ -899,6 +899,133 @@ def get_workspace_cost(
     return workspace_cost_mtd(session, workspace_id)
 
 
+@app.get("/workspaces/me/constellation")
+def get_workspace_constellation(
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 11B.3: nodes + edges that drive the home-page constellation map.
+
+    Returns:
+      agents: one row per agent with role + status + 24h-window activity
+              counters (runs, cost, dispatches in/out) + model + last-event
+              timestamp. The home-page hero pulls its "last activity"
+              animation trigger from the max(last_event_at) across this list.
+      edges:  one row per (source, target) agent pair with at least one
+              dispatched command in the last 24h. count_24h drives stroke
+              opacity; last_at drives the brief edge-pulse animation when
+              a fresh dispatch lands within the polling window.
+
+    Polled by the dashboard every 5s (and paused when the tab is hidden).
+    Filters out agents with no activity AND no agent_instances row — keeps
+    "dead" agents that were never deployed off the canvas.
+    """
+    cutoff_24h = utcnow() - timedelta(hours=24)
+
+    # Per-agent rollup. Single LEFT JOIN against agent_instances for
+    # last-heartbeat-derived status, and aggregates against runs +
+    # commands for the 24h activity counters.
+    agent_rows = session.execute(
+        text(
+            """
+            SELECT
+                a.name,
+                a.role,
+                a.system_prompt,
+                COALESCE(
+                    (
+                        SELECT MAX(ai.last_heartbeat_at)
+                        FROM agent_instances ai
+                        WHERE ai.workspace_id = :wsid
+                          AND ai.agent_name = a.name
+                    ),
+                    NULL
+                ) AS last_heartbeat_at,
+                COALESCE(
+                    (
+                        SELECT COUNT(*) FROM runs r
+                        WHERE r.workspace_id = :wsid
+                          AND r.agent_name = a.name
+                          AND r.started_at >= :cutoff_24h
+                    ),
+                    0
+                ) AS runs_24h,
+                COALESCE(
+                    (
+                        SELECT SUM(r.cost_usd) FROM runs r
+                        WHERE r.workspace_id = :wsid
+                          AND r.agent_name = a.name
+                          AND r.started_at >= :cutoff_24h
+                    ),
+                    0
+                ) AS cost_24h_usd,
+                (
+                    SELECT MAX(e.timestamp) FROM events e
+                    WHERE e.workspace_id = :wsid
+                      AND e.agent_name = a.name
+                ) AS last_event_at,
+                (
+                    SELECT MAX(e.payload->>'model') FROM events e
+                    WHERE e.workspace_id = :wsid
+                      AND e.agent_name = a.name
+                      AND e.kind = 'llm_call_completed'
+                      AND e.timestamp >= :cutoff_24h
+                ) AS recent_model
+            FROM agents a
+            WHERE a.workspace_id = :wsid
+            ORDER BY a.name
+            """
+        ),
+        {"wsid": workspace_id, "cutoff_24h": cutoff_24h},
+    ).all()
+
+    # Filter out agents that have never had any activity AND aren't
+    # explicitly tagged as orchestrator — keeps the canvas free of
+    # dormant placeholder rows.
+    now = utcnow()
+    agents_out: list[dict[str, Any]] = []
+    for r in agent_rows:
+        last_hb = r.last_heartbeat_at
+        if last_hb is None and r.runs_24h == 0 and r.role != "orchestrator":
+            continue
+        # Status mapping:
+        #   active = heartbeat within last 60s
+        #   stale  = heartbeat seen but > 60s ago
+        #   stopped = no heartbeat ever (but had runs_24h, so they ran
+        #            via a worker that didn't register an instance row)
+        if last_hb is None:
+            status = "stopped"
+        elif (now - last_hb).total_seconds() <= 60:
+            status = "active"
+        else:
+            status = "stale"
+        agents_out.append({
+            "name": r.name,
+            "role": r.role,
+            "model": r.recent_model,
+            "status": status,
+            "runs_24h": int(r.runs_24h or 0),
+            "cost_24h_usd": float(round(r.cost_24h_usd or 0, 6)),
+            "last_event_at": (
+                r.last_event_at.isoformat() if r.last_event_at else None
+            ),
+            "last_heartbeat_at": (
+                last_hb.isoformat() if last_hb else None
+            ),
+        })
+
+    # Dispatch edges: derive from agent_commands.
+    # We don't yet have a `source_agent` column on commands (lands in
+    # Phase 11.2's dispatch_chain machinery). For now, return an empty
+    # edges list when commands lack source attribution — the
+    # constellation map renders fine with just nodes, and edges fill
+    # in once 11.2 ships. Forward-compat: a Phase 11.2 commit replaces
+    # the SELECT below with the real grouped query.
+    edges_out: list[dict[str, Any]] = []
+
+    return {"agents": agents_out, "edges": edges_out}
+
+
 @app.patch("/workspaces/me")
 def patch_me(
     body: WorkspacePatchIn,

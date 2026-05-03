@@ -179,6 +179,15 @@ class Agent(Base):
     last_seen_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Phase 11B.3: drives the constellation map's tier rendering.
+    # 'orchestrator' (Polaris) sits at the canvas center; 'executor'
+    # in an inner ring at r=150; 'notifier' in an outer ring at r=250;
+    # 'specialist' (future Argus / Vega) at r=200. Server_default
+    # 'executor' so existing rows take a sensible value before any
+    # explicit relabel.
+    role: Mapped[str] = mapped_column(
+        String(32), nullable=False, server_default="executor"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )

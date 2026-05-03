@@ -942,3 +942,73 @@ export async function fetchAgents(): Promise<Agent[]> {
   const body = (await authedJson("/agents")) as { agents: Agent[] };
   return body.agents;
 }
+
+// ---------- Constellation map (Phase 11B.3) ---------- //
+//
+// Drives the home-page constellation widget. agents are nodes; edges are
+// dispatch relationships. Polled every 5s by the home page (paused when
+// the tab is hidden). Edges stay empty until Phase 11.2's dispatch_chain
+// machinery lands; the contract is stable now so the widget doesn't
+// need to change when edges fill in.
+
+export type ConstellationAgent = {
+  name: string;
+  role: "orchestrator" | "executor" | "notifier" | "specialist";
+  model: string | null;
+  status: "active" | "stale" | "stopped";
+  runs_24h: number;
+  cost_24h_usd: number;
+  last_event_at: string | null;
+  last_heartbeat_at: string | null;
+};
+
+export type ConstellationEdge = {
+  from: string;
+  to: string;
+  count_24h: number;
+  last_at: string | null;
+};
+
+export type ConstellationData = {
+  agents: ConstellationAgent[];
+  edges: ConstellationEdge[];
+};
+
+export async function fetchConstellation(): Promise<ConstellationData> {
+  return (await authedJson(
+    "/workspaces/me/constellation",
+  )) as ConstellationData;
+}
+
+// ---------- Workspace cost telemetry (Phase 11B.1) ---------- //
+
+export type WorkspaceCostByAgent = {
+  agent_name: string;
+  mtd_usd: number;
+  run_count: number;
+  last_run_at: string | null;
+};
+
+export type WorkspaceCostByModel = {
+  model: string;
+  calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  mtd_usd: number;
+};
+
+export type WorkspaceCost = {
+  mtd_usd: number;
+  projected_eom_usd: number;
+  run_count: number;
+  by_agent: WorkspaceCostByAgent[];
+  by_model: WorkspaceCostByModel[];
+  budget_usd_monthly: number | null;
+  budget_used_pct: number | null;
+  month_start: string;
+  as_of: string;
+};
+
+export async function fetchWorkspaceCost(): Promise<WorkspaceCost> {
+  return (await authedJson("/workspaces/me/cost")) as WorkspaceCost;
+}

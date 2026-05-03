@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { fetchRunSummaries, RunSummary, UnauthorizedError } from "./api";
+import Constellation from "./Constellation";
 
 function fmtTime(iso: string): string {
   try {
@@ -48,6 +49,20 @@ export default function Home() {
 
   return (
     <main className="px-8 py-10 max-w-6xl mx-auto">
+
+      {/* Phase 11B.3: constellation map. The hero (11B.2) and cost panel
+          (11B.4) will rearrange this section in later sub-tasks; for now
+          the map sits above the existing Runs table so the visual moment
+          of truth is shippable. */}
+      <section className="mb-10">
+        <div className="flex items-baseline gap-3 mb-3">
+          <span className="text-[11px] uppercase tracking-wider text-indigo-500 font-medium">
+            Constellation
+          </span>
+          <span className="text-xs text-gray-400">your team, at a glance</span>
+        </div>
+        <Constellation />
+      </section>
 
       <div className="flex items-baseline justify-between mb-8">
         <div>
