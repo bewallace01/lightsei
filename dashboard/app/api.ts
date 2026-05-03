@@ -1012,3 +1012,27 @@ export type WorkspaceCost = {
 export async function fetchWorkspaceCost(): Promise<WorkspaceCost> {
   return (await authedJson("/workspaces/me/cost")) as WorkspaceCost;
 }
+
+// ---------- Status pulse (Phase 11B.2) ---------- //
+
+export type PulseIssues = {
+  pending_approvals: number;
+  failed_validations: number;
+  budget_warnings: number;
+  stale_agents: number;
+};
+
+export type WorkspacePulse = {
+  status: "calm" | "attention";
+  issues_count: number;
+  issues: PulseIssues;
+  workspace_name: string;
+  agent_count: number;
+  last_polaris_tick_at: string | null;
+  last_event_at: string | null;
+  as_of: string;
+};
+
+export async function fetchWorkspacePulse(): Promise<WorkspacePulse> {
+  return (await authedJson("/workspaces/me/pulse")) as WorkspacePulse;
+}

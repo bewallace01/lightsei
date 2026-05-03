@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { fetchRunSummaries, RunSummary, UnauthorizedError } from "./api";
 import Constellation from "./Constellation";
+import Hero from "./Hero";
 
 function fmtTime(iso: string): string {
   try {
@@ -50,10 +51,16 @@ export default function Home() {
   return (
     <main className="px-8 py-10 max-w-6xl mx-auto">
 
-      {/* Phase 11B.3: constellation map. The hero (11B.2) and cost panel
-          (11B.4) will rearrange this section in later sub-tasks; for now
-          the map sits above the existing Runs table so the visual moment
-          of truth is shippable. */}
+      {/* Phase 11B.2: status hero. Sits at the top, full width within
+          the content container, so "everything calm" or "N things
+          want your attention" is the first thing you read. */}
+      <section className="mb-8">
+        <Hero />
+      </section>
+
+      {/* Phase 11B.3: constellation map. The cost panel (11B.4) will
+          slot in below; for now the map sits between the hero and
+          the existing Runs table. */}
       <section className="mb-10">
         <div className="flex items-baseline gap-3 mb-3">
           <span className="text-[11px] uppercase tracking-wider text-indigo-500 font-medium">
