@@ -42,6 +42,7 @@ from models import (
     AgentInstance,
     ApiKey,
     Command,
+    CommandAutoApprovalRule,
     Deployment,
     DeploymentBlob,
     DeploymentLog,
@@ -147,6 +148,30 @@ class LoginIn(BaseModel):
 class CommandEnqueueIn(BaseModel):
     kind: str = Field(min_length=1)
     payload: dict[str, Any] = Field(default_factory=dict)
+    # Phase 11.2: dispatch chain wiring. The SDK in 11.1 already
+    # sends dispatch_chain_id on every send_command call (Pydantic
+    # silently dropped it before this phase); now the server reads
+    # it. source_agent identifies the dispatcher when present —
+    # NULL means "enqueued by a user / off-platform integration"
+    # which is fine and bypasses the depth + per-day caps because
+    # the runaway risk only exists for agent-driven chains.
+    dispatch_chain_id: Optional[str] = None
+    source_agent: Optional[str] = None
+
+
+class CommandApprovalIn(BaseModel):
+    """Phase 11.2: shape for POST /commands/{id}/approve and /reject.
+    `reason` is optional free-text recorded on the audit trail. The
+    handler differentiates approve vs reject by the path, not the
+    payload — keeps the action explicit at the URL."""
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+
+class AutoApprovalRuleIn(BaseModel):
+    source_agent: str = Field(min_length=1, max_length=64)
+    target_agent: str = Field(min_length=1, max_length=64)
+    command_kind: str = Field(min_length=1, max_length=128)
+    mode: str = Field(pattern="^(auto_approve|require_human)$")
 
 
 class CommandCompleteIn(BaseModel):
@@ -1014,14 +1039,43 @@ def get_workspace_constellation(
             ),
         })
 
-    # Dispatch edges: derive from agent_commands.
-    # We don't yet have a `source_agent` column on commands (lands in
-    # Phase 11.2's dispatch_chain machinery). For now, return an empty
-    # edges list when commands lack source attribution — the
-    # constellation map renders fine with just nodes, and edges fill
-    # in once 11.2 ships. Forward-compat: a Phase 11.2 commit replaces
-    # the SELECT below with the real grouped query.
-    edges_out: list[dict[str, Any]] = []
+    # Dispatch edges: pairs of (source, target) with at least one
+    # dispatched command in the last 24h. Phase 11.2 lit this up by
+    # adding the source_agent column on commands; the constellation
+    # map's bezier edges read straight from this query.
+    edge_rows = session.execute(
+        text(
+            """
+            SELECT
+                source_agent AS src,
+                agent_name   AS tgt,
+                COUNT(*)     AS count_24h,
+                MAX(created_at) AS last_at
+            FROM commands
+            WHERE workspace_id = :wsid
+              AND source_agent IS NOT NULL
+              AND created_at >= :cutoff_24h
+            GROUP BY source_agent, agent_name
+            ORDER BY count_24h DESC
+            """
+        ),
+        {"wsid": workspace_id, "cutoff_24h": cutoff_24h},
+    ).all()
+
+    # Filter edges to only those whose endpoints are both in the
+    # rendered agent list — keeps the canvas free of dangling edges
+    # to filtered-out dormant agents.
+    rendered_names = {a["name"] for a in agents_out}
+    edges_out = [
+        {
+            "from": e.src,
+            "to": e.tgt,
+            "count_24h": int(e.count_24h or 0),
+            "last_at": e.last_at.isoformat() if e.last_at else None,
+        }
+        for e in edge_rows
+        if e.src in rendered_names and e.tgt in rendered_names
+    ]
 
     return {"agents": agents_out, "edges": edges_out}
 
@@ -2839,7 +2893,60 @@ def _serialize_command(c: Command) -> dict[str, Any]:
         "claimed_at": c.claimed_at.isoformat() if c.claimed_at else None,
         "completed_at": c.completed_at.isoformat() if c.completed_at else None,
         "expires_at": c.expires_at.isoformat(),
+        # Phase 11.2 dispatch chain fields.
+        "source_agent": c.source_agent,
+        "dispatch_chain_id": c.dispatch_chain_id,
+        "dispatch_depth": c.dispatch_depth,
+        "approval_state": c.approval_state,
+        "approved_by_user_id": c.approved_by_user_id,
+        "approved_at": c.approved_at.isoformat() if c.approved_at else None,
     }
+
+
+def _resolve_auto_approval(
+    session: Session,
+    workspace_id: str,
+    source_agent: Optional[str],
+    target_agent: str,
+    command_kind: str,
+) -> str:
+    """Lookup the approval mode for a (source, target, kind) tuple.
+
+    Precedence:
+        1. Exact match on all three.
+        2. Wildcard source ('*' source + exact target + exact kind).
+        3. Wildcard kind (exact source + exact target + '*' kind).
+        4. No match — return 'pending', the default human-in-the-loop.
+
+    `mode='auto_approve'` returns 'auto_approved'; 'require_human'
+    returns 'pending' (explicit deny path so a wildcard can be
+    overridden by a more specific require_human entry).
+
+    When source_agent is None (user-initiated enqueue from the
+    dashboard, or off-platform integration like /webhooks/github),
+    skip rule matching entirely — the command goes straight to
+    'auto_approved' since the user is already trusted.
+    """
+    if source_agent is None:
+        return "auto_approved"
+    candidates = [
+        (source_agent, target_agent, command_kind),
+        ("*", target_agent, command_kind),
+        (source_agent, target_agent, "*"),
+    ]
+    for src, tgt, kind in candidates:
+        rule = session.execute(
+            select(CommandAutoApprovalRule).where(
+                CommandAutoApprovalRule.workspace_id == workspace_id,
+                CommandAutoApprovalRule.source_agent == src,
+                CommandAutoApprovalRule.target_agent == tgt,
+                CommandAutoApprovalRule.command_kind == kind,
+            )
+        ).scalar_one_or_none()
+        if rule is None:
+            continue
+        return "auto_approved" if rule.mode == "auto_approve" else "pending"
+    return "pending"
 
 
 @app.post("/agents/{agent_name}/commands")
@@ -2849,8 +2956,97 @@ def enqueue_command(
     session: Session = Depends(get_session),
     workspace_id: str = Depends(get_workspace_id),
 ) -> dict[str, Any]:
+    """Enqueue a command for `agent_name`.
+
+    Phase 11.2 changes the shape: `dispatch_chain_id` and
+    `source_agent` on the body are honored; depth + per-day caps are
+    enforced when source_agent is set; auto_approval rules pre-flip
+    the approval gate where applicable.
+    """
     now = utcnow()
     ensure_agent(session, workspace_id, agent_name, now)
+
+    parent_depth = -1  # depth = parent_depth + 1, so root commands get 0
+    chain_id = body.dispatch_chain_id
+
+    # When source_agent is set, this is an agent-driven dispatch and
+    # we enforce the depth + per-day caps on the source agent.
+    if body.source_agent:
+        # Auto-register the source agent on first dispatch — same
+        # pattern as ensure_agent above for the target. Means a new
+        # agent can dispatch its first command without a separate
+        # "register me" round-trip.
+        ensure_agent(session, workspace_id, body.source_agent, now)
+        source = session.get(Agent, (workspace_id, body.source_agent))
+        if source is None:
+            # ensure_agent should have created it; this is paranoia.
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown source_agent {body.source_agent!r}",
+            )
+        # Look up the parent command in this chain (most recent for
+        # this chain id) so we can compute depth = parent.depth + 1.
+        if chain_id:
+            parent = session.execute(
+                select(Command)
+                .where(
+                    Command.workspace_id == workspace_id,
+                    Command.dispatch_chain_id == chain_id,
+                )
+                .order_by(desc(Command.dispatch_depth))
+                .limit(1)
+            ).scalar_one_or_none()
+            if parent is not None:
+                parent_depth = parent.dispatch_depth
+        depth = parent_depth + 1
+        if depth >= source.max_dispatch_depth:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"dispatch chain depth {depth} would exceed "
+                    f"{body.source_agent}'s max_dispatch_depth = "
+                    f"{source.max_dispatch_depth}"
+                ),
+            )
+        # Per-day rate cap: count commands the source has dispatched
+        # in the last 24h. Filtered by source_agent so an agent's own
+        # incoming commands don't count against its outgoing budget.
+        cutoff = now - timedelta(hours=24)
+        recent = session.execute(
+            text(
+                """
+                SELECT COUNT(*) AS n FROM commands
+                WHERE workspace_id = :wsid
+                  AND source_agent = :src
+                  AND created_at >= :cutoff
+                """
+            ),
+            {"wsid": workspace_id, "src": body.source_agent, "cutoff": cutoff},
+        ).first()
+        if recent and (recent.n or 0) >= source.max_dispatch_per_day:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"{body.source_agent} has dispatched {recent.n} "
+                    f"commands in the last 24h, exceeding its "
+                    f"max_dispatch_per_day = {source.max_dispatch_per_day}"
+                ),
+            )
+    else:
+        depth = 0  # user / off-platform enqueue is a chain root
+
+    # Generate a fresh chain id when none was provided.
+    if not chain_id:
+        chain_id = str(uuid.uuid4())
+
+    approval_state = _resolve_auto_approval(
+        session,
+        workspace_id=workspace_id,
+        source_agent=body.source_agent,
+        target_agent=agent_name,
+        command_kind=body.kind,
+    )
+
     cmd = Command(
         id=str(uuid.uuid4()),
         workspace_id=workspace_id,
@@ -2858,6 +3054,11 @@ def enqueue_command(
         kind=body.kind,
         payload=body.payload,
         status="pending",
+        source_agent=body.source_agent,
+        dispatch_chain_id=chain_id,
+        dispatch_depth=depth,
+        approval_state=approval_state,
+        approved_at=now if approval_state == "auto_approved" else None,
         created_at=now,
         expires_at=now + COMMAND_TTL,
     )
@@ -2894,8 +3095,13 @@ def claim_command(
 ) -> dict[str, Any]:
     """Atomically claim the oldest pending command for this agent.
 
-    Uses Postgres `SELECT ... FOR UPDATE SKIP LOCKED` so two agents polling
-    concurrently never claim the same command.
+    Phase 11.2: only commands with approval_state in
+    {'approved', 'auto_approved'} are claimable. 'pending' commands
+    sit safely until a human acts on them; 'rejected' / 'expired'
+    are terminal.
+
+    Uses Postgres `SELECT ... FOR UPDATE SKIP LOCKED` so two agents
+    polling concurrently never claim the same command.
     """
     now = utcnow()
     row = session.execute(
@@ -2905,6 +3111,7 @@ def claim_command(
             WHERE workspace_id = :wsid
               AND agent_name = :agent
               AND status = 'pending'
+              AND approval_state IN ('approved', 'auto_approved')
               AND expires_at > :now
             ORDER BY created_at ASC
             LIMIT 1
@@ -2922,6 +3129,149 @@ def claim_command(
     cmd.claimed_at = now
     session.flush()
     return {"command": _serialize_command(cmd)}
+
+
+# ---------- Phase 11.2: approval endpoints + auto-approval CRUD ---------- #
+
+
+@app.post("/commands/{command_id}/approve")
+def approve_command(
+    command_id: str,
+    body: CommandApprovalIn,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Flip a pending command to 'approved' so the next claim picks
+    it up. Only works on commands in the caller's workspace and only
+    when approval_state is currently 'pending' (idempotent flips
+    would be confusing — a re-approve isn't meaningfully different
+    from the first one)."""
+    workspace_id = auth.workspace_id
+    cmd = session.get(Command, command_id)
+    if cmd is None or cmd.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="command not found")
+    if cmd.approval_state != "pending":
+        raise HTTPException(
+            status_code=400,
+            detail=f"command already {cmd.approval_state!r}",
+        )
+    cmd.approval_state = "approved"
+    cmd.approved_by_user_id = auth.user.id if auth.user else None
+    cmd.approved_at = utcnow()
+    session.flush()
+    return _serialize_command(cmd)
+
+
+@app.post("/commands/{command_id}/reject")
+def reject_command(
+    command_id: str,
+    body: CommandApprovalIn,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Flip a pending command to 'rejected' (terminal). Records the
+    user who rejected on approved_by_user_id so the audit trail is
+    consistent — the column reflects "who acted on the gate," not
+    specifically who said yes."""
+    workspace_id = auth.workspace_id
+    cmd = session.get(Command, command_id)
+    if cmd is None or cmd.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="command not found")
+    if cmd.approval_state != "pending":
+        raise HTTPException(
+            status_code=400,
+            detail=f"command already {cmd.approval_state!r}",
+        )
+    cmd.approval_state = "rejected"
+    cmd.status = "cancelled"
+    cmd.approved_by_user_id = auth.user.id if auth.user else None
+    cmd.approved_at = utcnow()
+    cmd.completed_at = utcnow()
+    if body.reason:
+        cmd.error = f"rejected: {body.reason}"
+    session.flush()
+    return _serialize_command(cmd)
+
+
+def _serialize_auto_approval_rule(r: CommandAutoApprovalRule) -> dict[str, Any]:
+    return {
+        "source_agent": r.source_agent,
+        "target_agent": r.target_agent,
+        "command_kind": r.command_kind,
+        "mode": r.mode,
+        "created_at": r.created_at.isoformat(),
+        "updated_at": r.updated_at.isoformat(),
+    }
+
+
+@app.get("/workspaces/me/auto-approval-rules")
+def list_auto_approval_rules(
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    rows = session.execute(
+        select(CommandAutoApprovalRule)
+        .where(CommandAutoApprovalRule.workspace_id == workspace_id)
+        .order_by(
+            CommandAutoApprovalRule.source_agent,
+            CommandAutoApprovalRule.target_agent,
+            CommandAutoApprovalRule.command_kind,
+        )
+    ).scalars().all()
+    return {"rules": [_serialize_auto_approval_rule(r) for r in rows]}
+
+
+@app.put("/workspaces/me/auto-approval-rules")
+def upsert_auto_approval_rule(
+    body: AutoApprovalRuleIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Upsert by composite PK so the same call creates a new rule or
+    updates an existing one. PK is (workspace, source, target, kind),
+    which means flipping a rule from 'auto_approve' to 'require_human'
+    on the same triple lands as a single update."""
+    now = utcnow()
+    existing = session.get(
+        CommandAutoApprovalRule,
+        (workspace_id, body.source_agent, body.target_agent, body.command_kind),
+    )
+    if existing is None:
+        rule = CommandAutoApprovalRule(
+            workspace_id=workspace_id,
+            source_agent=body.source_agent,
+            target_agent=body.target_agent,
+            command_kind=body.command_kind,
+            mode=body.mode,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(rule)
+    else:
+        existing.mode = body.mode
+        existing.updated_at = now
+        rule = existing
+    session.flush()
+    return _serialize_auto_approval_rule(rule)
+
+
+@app.delete("/workspaces/me/auto-approval-rules")
+def delete_auto_approval_rule(
+    source_agent: str,
+    target_agent: str,
+    command_kind: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, str]:
+    rule = session.get(
+        CommandAutoApprovalRule,
+        (workspace_id, source_agent, target_agent, command_kind),
+    )
+    if rule is None:
+        raise HTTPException(status_code=404, detail="rule not found")
+    session.delete(rule)
+    session.flush()
+    return {"status": "ok"}
 
 
 @app.post("/commands/{command_id}/complete")

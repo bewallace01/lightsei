@@ -188,6 +188,16 @@ class Agent(Base):
     role: Mapped[str] = mapped_column(
         String(32), nullable=False, server_default="executor"
     )
+    # Phase 11.2: per-agent dispatch caps. Defaults are conservative
+    # for the demo — bump via PATCH /agents/{name} once an agent has
+    # earned trust. Phase 14's behavioral rules (layer 4) replace
+    # these heuristics with proper streaming detection.
+    max_dispatch_depth: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="5"
+    )
+    max_dispatch_per_day: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="100"
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
@@ -389,6 +399,44 @@ class Command(Base):
     status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
     result: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
     error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Phase 11.2: dispatch chain machinery so a chain like
+    # polaris -> atlas -> hermes groups under a single id, has a
+    # depth cap to prevent runaway loops, and supports a per-command
+    # human-in-the-loop approval gate.
+    #
+    # source_agent: who dispatched this command. NULL when the
+    # command was enqueued by a user (dashboard click) or by an
+    # off-platform integration like the GitHub webhook receiver.
+    # The constellation map's edges read from this column.
+    source_agent: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # dispatch_chain_id: groups every command in a single
+    # cause-and-effect chain. Auto-generated when source_agent is
+    # NULL; inherited from the active claim's chain when source_agent
+    # is set (the SDK's threading.local from Phase 11.1).
+    dispatch_chain_id: Mapped[str] = mapped_column(
+        String, nullable=False, server_default="00000000-0000-0000-0000-000000000000"
+    )
+    # dispatch_depth: number of hops from the chain's root command.
+    # Hard-capped per agent via Agent.max_dispatch_depth so a
+    # buggy bot can't fork-bomb. Default 0 = chain root.
+    dispatch_depth: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    # approval_state: human-in-the-loop gate. Commands stay 'pending'
+    # until either (a) a user approves them via the dashboard, or
+    # (b) a matching auto_approval_rule fires at enqueue time and
+    # flips them to 'auto_approved'. claim_command only returns rows
+    # in {'approved', 'auto_approved'}, so 'pending' commands sit
+    # safely until acted on.
+    approval_state: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="pending"
+    )
+    approved_by_user_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    approved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
@@ -404,6 +452,51 @@ class Command(Base):
 
     __table_args__ = (
         Index("idx_commands_ws_agent_status", "workspace_id", "agent_name", "status"),
+        Index("idx_commands_chain", "dispatch_chain_id"),
+        Index(
+            "idx_commands_ws_source_recent",
+            "workspace_id", "source_agent", "created_at",
+        ),
+    )
+
+
+class CommandAutoApprovalRule(Base):
+    """Phase 11.2: per-workspace rules that flip a command from
+    `approval_state='pending'` to `'auto_approved'` at enqueue time.
+
+    Lookup precedence on `(source_agent, target_agent, command_kind)`:
+        1. Exact match on all three.
+        2. Wildcard source ('*' source_agent + exact target + exact kind).
+        3. Wildcard kind (exact source + exact target + '*' kind).
+        4. No match -> command stays 'pending', waits on a human click.
+
+    `mode='auto_approve'` flips to auto_approved; `mode='require_human'`
+    is the explicit-deny path so a wildcard rule can be overridden by
+    a more specific require_human entry.
+    """
+
+    __tablename__ = "command_auto_approval_rules"
+
+    workspace_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    source_agent: Mapped[str] = mapped_column(
+        String(64), primary_key=True
+    )
+    target_agent: Mapped[str] = mapped_column(
+        String(64), primary_key=True
+    )
+    command_kind: Mapped[str] = mapped_column(
+        String(128), primary_key=True
+    )
+    mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
     )
 
 
