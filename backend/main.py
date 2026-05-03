@@ -5,6 +5,7 @@ import os
 import secrets as _stdlib_secrets
 import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Optional
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -17,8 +18,13 @@ import limits
 import policies
 import secrets_crypto
 from auth import AuthResult, get_authenticated, get_workspace_id
-from cost import agent_cost_since, utc_day_start
-from db import ensure_agent, get_session
+from cost import (
+    add_run_cost_from_event,
+    agent_cost_since,
+    utc_day_start,
+    workspace_cost_mtd,
+)
+from db import ensure_agent, get_session, session_scope
 from limits import (
     BodySizeLimitMiddleware,
     limit_login_attempt,
@@ -114,7 +120,13 @@ class WorkspaceCreateIn(BaseModel):
 
 
 class WorkspacePatchIn(BaseModel):
-    name: str = Field(min_length=1)
+    # name and budget are independently optional — clients can patch one
+    # without touching the other. Pydantic v2's `model_fields_set`
+    # distinguishes "client didn't send this" from "client sent null."
+    name: Optional[str] = Field(default=None, min_length=1)
+    # NULL means "clear the cap" when the client explicitly passes null;
+    # the patch handler reads `model_fields_set` to disambiguate.
+    budget_usd_monthly: Optional[float] = None
 
 
 class ApiKeyCreateIn(BaseModel):
@@ -359,6 +371,12 @@ def _serialize_workspace(w: Workspace) -> dict[str, Any]:
         "id": w.id,
         "name": w.name,
         "created_at": w.created_at.isoformat(),
+        # Phase 11B.1: workspace-level monthly spend cap. NULL = no cap.
+        "budget_usd_monthly": (
+            float(w.budget_usd_monthly)
+            if w.budget_usd_monthly is not None
+            else None
+        ),
     }
 
 
@@ -376,6 +394,22 @@ app.add_middleware(BodySizeLimitMiddleware)
 @app.on_event("startup")
 def on_startup() -> None:
     upgrade_to_head()
+    # Phase 11B.1: re-assert the model_pricing table from the
+    # pricing.PRICING source-of-truth dict so a release can update
+    # prices without a manual UPDATE. Idempotent.
+    from pricing import seed_model_pricing
+    with session_scope() as s:
+        try:
+            seed_model_pricing(s)
+        except Exception as e:
+            # Don't crash startup on a pricing-sync failure — the
+            # cost computation in cost.py reads from the dict directly,
+            # so worst case the dashboard's pricing-table view shows
+            # stale rows for one cycle.
+            import logging
+            logging.getLogger("lightsei.startup").warning(
+                "model_pricing seed failed: %s", e
+            )
 
 
 @app.get("/health")
@@ -446,6 +480,13 @@ def post_event(
 
     if event.kind in ("run_ended", "run_completed", "run_failed"):
         run.ended_at = ts
+
+    # Phase 11B.1: incrementally roll up per-run cost. We need a flushed
+    # run row before add_run_cost_from_event can session.get(Run, ...),
+    # so flush here for the freshly-added case.
+    if event.kind == "llm_call_completed":
+        session.flush()
+        add_run_cost_from_event(session, event.run_id, event.payload or {})
 
     row = Event(
         workspace_id=workspace_id,
@@ -844,6 +885,20 @@ def get_me(
     return _serialize_workspace(ws)
 
 
+@app.get("/workspaces/me/cost")
+def get_workspace_cost(
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 11B.1: month-to-date workspace spend + projected EOM +
+    per-agent and per-model breakdown + budget bar state.
+
+    Reads `runs.cost_usd` directly for the rollup so the dashboard can
+    poll this every 30s without re-summing events × pricing per call.
+    """
+    return workspace_cost_mtd(session, workspace_id)
+
+
 @app.patch("/workspaces/me")
 def patch_me(
     body: WorkspacePatchIn,
@@ -853,7 +908,22 @@ def patch_me(
     ws = session.get(Workspace, workspace_id)
     if ws is None:
         raise HTTPException(status_code=404, detail="workspace not found")
-    ws.name = body.name
+    fields = body.model_fields_set
+    if "name" in fields and body.name is not None:
+        ws.name = body.name
+    if "budget_usd_monthly" in fields:
+        # Phase 11B.1: explicit null clears the cap. A patch that omits the
+        # field entirely leaves it untouched (model_fields_set captures the
+        # difference).
+        if body.budget_usd_monthly is None:
+            ws.budget_usd_monthly = None
+        else:
+            if body.budget_usd_monthly < 0:
+                raise HTTPException(
+                    status_code=400,
+                    detail="budget_usd_monthly must be >= 0",
+                )
+            ws.budget_usd_monthly = Decimal(format(body.budget_usd_monthly, ".2f"))
     session.flush()
     return _serialize_workspace(ws)
 

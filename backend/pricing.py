@@ -3,8 +3,38 @@
 Prices are USD per 1,000,000 tokens (in / out). Update as vendors adjust.
 Unknown models cost zero, which is intentional: we don't want to silently
 guess and then enforce a wrong cap.
+
+The `PRICING` literal is the source of truth. Phase 11B.1 added a
+`model_pricing` DB table that mirrors this dict so the dashboard can
+render current rates without reaching back into the SDK source. The
+table is re-asserted on every `upgrade_to_head()` (called from FastAPI's
+startup hook) — see `seed_model_pricing` below. Cost computation in
+`cost.py` reads from this dict directly to avoid a DB round-trip on
+every event ingest.
 """
+from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Optional
+
+from sqlalchemy.orm import Session
+
+# Provider for each model — used to fill the `provider` column in the
+# `model_pricing` table. Models not listed here fall back to "unknown",
+# which is fine for the table mirror but doesn't affect cost computation.
+PROVIDER_BY_PREFIX: list[tuple[str, str]] = [
+    ("gpt-", "openai"),
+    ("o1", "openai"),
+    ("o3", "openai"),
+    ("claude-", "anthropic"),
+]
+
+
+def _provider_for(model: str) -> str:
+    for prefix, provider in PROVIDER_BY_PREFIX:
+        if model.startswith(prefix):
+            return provider
+    return "unknown"
+
 
 # (input_per_million, output_per_million) in USD
 PRICING: dict[str, tuple[float, float]] = {
@@ -45,3 +75,49 @@ def compute_cost_usd(
     in_tok = input_tokens or 0
     out_tok = output_tokens or 0
     return (in_tok * in_per_m + out_tok * out_per_m) / 1_000_000.0
+
+
+def seed_model_pricing(session: Session) -> None:
+    """Re-assert the `model_pricing` table from the `PRICING` literal.
+
+    Called from FastAPI's startup hook after migrations apply. Idempotent:
+    upserts each row, so re-running on every boot is safe and ensures the
+    table tracks code changes without a manual UPDATE.
+
+    Rows for models that have been removed from `PRICING` (vendor
+    deprecation) are NOT deleted — they're left in place so historical
+    runs that reference them keep their pricing context. Add a manual
+    `DELETE FROM model_pricing WHERE model = 'xxx'` if you really want
+    to drop one.
+    """
+    # Imported here (not at module level) so the SDK + tests that import
+    # `pricing` for `compute_cost_usd` only don't pull in SQLAlchemy
+    # models / the DB layer. Cheap, runs once at startup.
+    from sqlalchemy import text as _sql_text
+
+    now = datetime.now(timezone.utc)
+    for model, (input_per_m, output_per_m) in PRICING.items():
+        provider = _provider_for(model)
+        session.execute(
+            _sql_text(
+                """
+                INSERT INTO model_pricing
+                  (provider, model, input_per_million_usd,
+                   output_per_million_usd, effective_from, updated_at)
+                VALUES
+                  (:provider, :model, :in_per_m, :out_per_m, :now, :now)
+                ON CONFLICT (provider, model) DO UPDATE SET
+                  input_per_million_usd  = EXCLUDED.input_per_million_usd,
+                  output_per_million_usd = EXCLUDED.output_per_million_usd,
+                  updated_at = EXCLUDED.updated_at
+                """
+            ),
+            {
+                "provider": provider,
+                "model": model,
+                "in_per_m": Decimal(str(input_per_m)),
+                "out_per_m": Decimal(str(output_per_m)),
+                "now": now,
+            },
+        )
+    session.commit()
