@@ -169,6 +169,7 @@ def send_command(
     payload: Optional[dict[str, Any]] = None,
     *,
     dispatch_chain_id: Optional[str] = None,
+    source_agent: Optional[str] = None,
 ) -> dict[str, Any]:
     """Enqueue a command for another agent. Returns the created command.
 
@@ -185,9 +186,10 @@ def send_command(
             return {"dispatched": cmd["id"]}
 
     The dispatch chain id is inherited from the active claim's thread-local
-    context if present, otherwise generated fresh. Pass `dispatch_chain_id`
-    explicitly to override (rare; only useful for tests or for joining a
-    chain id from outside the SDK's normal flow).
+    context if present, otherwise generated fresh. `source_agent` defaults
+    to the active claim's agent or the agent passed to `init()`. Pass
+    either field explicitly only for tests or for joining a chain from
+    outside the SDK's normal flow.
 
     Raises LightseiError on transport or non-2xx.
     """
@@ -197,6 +199,7 @@ def send_command(
         kind,
         payload,
         dispatch_chain_id=dispatch_chain_id,
+        source_agent=source_agent,
     )
 
 

@@ -166,6 +166,19 @@ def test_send_command_round_trips():
     # Server received the chain id on the wire even though it doesn't
     # persist it yet — forward-compat for 11.2.
     assert state["enqueued"][0]["dispatch_chain_id"] == cmd["dispatch_chain_id"]
+    assert state["enqueued"][0]["source_agent"] == "polaris"
+
+
+def test_send_command_explicit_source_agent_overrides_init_agent():
+    with fake_command_backend() as (url, state):
+        lightsei.init(api_key="k", agent_name="operator", base_url=url)
+        lightsei.send_command(
+            "hermes",
+            "hermes.post",
+            {"text": "ok"},
+            source_agent="atlas",
+        )
+    assert state["enqueued"][0]["source_agent"] == "atlas"
 
 
 def test_send_command_explicit_chain_id_overrides_inheritance():
@@ -204,6 +217,7 @@ def test_claim_then_send_inherits_chain_id():
         lightsei.complete_command(claimed["id"], result={"ok": True})
     # Context cleared after complete.
     assert current_dispatch_chain_id() is None
+    assert state["enqueued"][0]["source_agent"] == "atlas"
     assert state["completed"][0][1] == {"result": {"ok": True}}
 
 

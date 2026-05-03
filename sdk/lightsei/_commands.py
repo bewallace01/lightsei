@@ -152,7 +152,11 @@ class _Poller:
         # otherwise we generate a fresh chain id so client-only chains still
         # group correctly in user-facing tooling that reads our SDK output.
         chain_id = cmd.get("dispatch_chain_id") or str(uuid.uuid4())
-        _set_dispatch_context(chain_id=chain_id, command_id=cmd_id)
+        _set_dispatch_context(
+            chain_id=chain_id,
+            command_id=cmd_id,
+            source_agent=self._client.agent_name,
+        )
         try:
             try:
                 result = handler(cmd.get("payload") or {})
@@ -202,7 +206,12 @@ def has_handlers() -> bool:
 # ---------- Dispatch context ---------- #
 
 
-def _set_dispatch_context(*, chain_id: str, command_id: Optional[str]) -> None:
+def _set_dispatch_context(
+    *,
+    chain_id: str,
+    command_id: Optional[str],
+    source_agent: Optional[str],
+) -> None:
     """Stash the active dispatch chain on the calling thread.
 
     Called by the auto-poller's `_dispatch` and by the public
@@ -211,13 +220,14 @@ def _set_dispatch_context(*, chain_id: str, command_id: Optional[str]) -> None:
     """
     _command_context.dispatch_chain_id = chain_id
     _command_context.command_id = command_id
+    _command_context.source_agent = source_agent
 
 
 def _clear_dispatch_context() -> None:
     """Drop the active dispatch chain. Called when a handler / claimed
     command finishes (success or failure) so the next claim doesn't
     accidentally inherit a stale chain id."""
-    for attr in ("dispatch_chain_id", "command_id"):
+    for attr in ("dispatch_chain_id", "command_id", "source_agent"):
         try:
             delattr(_command_context, attr)
         except AttributeError:
@@ -233,6 +243,11 @@ def current_dispatch_chain_id() -> Optional[str]:
     return getattr(_command_context, "dispatch_chain_id", None)
 
 
+def _current_source_agent() -> Optional[str]:
+    """Return the agent currently handling a command on this thread."""
+    return getattr(_command_context, "source_agent", None)
+
+
 # ---------- Public dispatch surface ---------- #
 
 
@@ -243,14 +258,14 @@ def send_command(
     payload: Optional[dict[str, Any]] = None,
     *,
     dispatch_chain_id: Optional[str] = None,
+    source_agent: Optional[str] = None,
 ) -> dict[str, Any]:
     """Enqueue a command for `target_agent`. Returns the created command.
 
     Chain id resolution, in order: explicit `dispatch_chain_id` arg →
     inherited from the active claim's thread-local context → freshly
-    generated UUID. Always sent on the wire so the server can persist it
-    once Phase 11.2 lands; today the field is silently dropped by
-    Pydantic since the column doesn't exist yet.
+    generated UUID. Source agent attribution defaults to the active claim's
+    agent, then to the agent name passed to init().
 
     Raises LightseiError on transport failure or non-2xx response.
     """
@@ -271,12 +286,19 @@ def send_command(
         or current_dispatch_chain_id()
         or str(uuid.uuid4())
     )
+    resolved_source_agent = (
+        source_agent
+        or _current_source_agent()
+        or client.agent_name
+    )
     body: dict[str, Any] = {
         "kind": kind,
         "payload": payload or {},
         # Forward-compat: server in 11.1 ignores; persisted in 11.2+.
         "dispatch_chain_id": chain_id,
     }
+    if resolved_source_agent:
+        body["source_agent"] = resolved_source_agent
     try:
         r = client._http.post(
             f"/agents/{target_agent}/commands",
@@ -342,7 +364,11 @@ def claim_command(
         return None
     chain_id = cmd.get("dispatch_chain_id") or str(uuid.uuid4())
     cmd.setdefault("dispatch_chain_id", chain_id)
-    _set_dispatch_context(chain_id=chain_id, command_id=cmd.get("id"))
+    _set_dispatch_context(
+        chain_id=chain_id,
+        command_id=cmd.get("id"),
+        source_agent=name,
+    )
     return cmd
 
 

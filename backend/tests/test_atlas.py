@@ -232,6 +232,42 @@ def test_tick_runs_pytest_and_dispatches_hermes(fake_lightsei):
     assert "result" in fake.complete_command.call_args.kwargs
 
 
+def test_tick_dispatches_hermes_with_real_sdk_signature(fake_lightsei):
+    """Atlas must call the public SDK shape, not only the loose mock's shape."""
+    fake, bot = fake_lightsei
+    cmd = _make_command()
+    fake.claim_command.return_value = cmd
+
+    def real_signature_send_command(
+        target_agent,
+        kind,
+        payload=None,
+        *,
+        dispatch_chain_id=None,
+        source_agent=None,
+    ):
+        assert target_agent == "hermes"
+        assert kind == "hermes.post"
+        assert payload["severity"] == "info"
+        assert dispatch_chain_id is None
+        assert source_agent == "atlas"
+        return {"id": "cmd-out"}
+
+    fake.send_command.side_effect = real_signature_send_command
+    runner = MagicMock(return_value={
+        "stdout": "============================== 2 passed in 0.10s ==============================",
+        "stderr": "",
+        "returncode": 0,
+        "duration_s": 0.12,
+        "timed_out": False,
+    })
+
+    bot.tick(fake, runner)
+
+    fake.send_command.assert_called_once()
+    assert "result" in fake.complete_command.call_args.kwargs
+
+
 def test_tick_payload_pytest_args_overrides_default(fake_lightsei):
     fake, bot = fake_lightsei
     fake.claim_command.return_value = _make_command(
