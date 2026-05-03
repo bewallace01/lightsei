@@ -84,7 +84,7 @@ def _send_with_source(
 # ---------- Configuration ---------- #
 
 POLL_S = float(os.environ.get("ATLAS_POLL_S", "5"))
-PYTEST_ARGS = os.environ.get("ATLAS_PYTEST_ARGS", "backend/tests/")
+PYTEST_ARGS = os.environ.get("ATLAS_PYTEST_ARGS", "tests/")
 TEST_DIR = Path(os.environ.get("ATLAS_TEST_DIR", ".")).resolve()
 TIMEOUT_S = float(os.environ.get("ATLAS_TIMEOUT_S", "300"))
 LOG_TAIL_BYTES = int(os.environ.get("ATLAS_LOG_TAIL_BYTES", "4096"))
@@ -348,6 +348,15 @@ def main() -> None:
     if not api_key:
         print("atlas: LIGHTSEI_API_KEY missing — refusing to start", flush=True)
         sys.exit(2)
+
+    # Atlas uses the explicit claim_command / tick() pattern, not @on_command.
+    # The SDK auto-registers a default `ping` handler at module import time
+    # which would otherwise make has_handlers() True and start the auto-poller
+    # — that poller would race our tick() for commands and complete kinds it
+    # doesn't recognize as failed. Clearing the handler dict before init()
+    # keeps the auto-poller from ever starting.
+    from lightsei._commands import _handlers as _ls_handlers
+    _ls_handlers.clear()
 
     lightsei.init(api_key=api_key, agent_name=agent_name, base_url=base_url)
 

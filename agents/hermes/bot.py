@@ -248,6 +248,12 @@ def main() -> None:
         print("hermes: LIGHTSEI_API_KEY missing — refusing to start", flush=True)
         sys.exit(2)
 
+    # Hermes uses claim_command / tick() (same pattern as atlas), not
+    # @on_command. Clear the SDK's auto-registered default handlers so
+    # the SDK auto-poller doesn't start and race our tick() for commands.
+    from lightsei._commands import _handlers as _ls_handlers
+    _ls_handlers.clear()
+
     lightsei.init(api_key=api_key, agent_name=agent_name, base_url=base_url)
 
     print(
