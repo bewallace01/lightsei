@@ -3632,7 +3632,8 @@ def _aggregate_chain_status(commands: list[Command]) -> str:
         return "expired"
     if "rejected" in approval_states:
         return "rejected"
-    if all(c.status == "done" for c in commands):
+    # Command.status uses "completed" (set by complete_command).
+    if all(c.status == "completed" for c in commands):
         return "done"
     return "pending"
 
