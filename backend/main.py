@@ -447,7 +447,7 @@ def on_startup() -> None:
             )
 
 
-# Phase 11.7 demo trigger v3: fires the chain now that the Slack channel is wired up.
+# Phase 11.7 demo trigger v4: failure-path run — atlas should report ❌ in Slack.
 @app.get("/health")
 def health() -> dict[str, Any]:
     """Liveness + lightweight pool/connection telemetry.
