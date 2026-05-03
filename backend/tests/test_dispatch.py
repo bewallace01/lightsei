@@ -569,3 +569,195 @@ def test_constellation_edges_workspace_isolated(client, alice, bob):
     )
     r = client.get("/workspaces/me/constellation", headers=h_bob)
     assert r.json()["edges"] == []
+
+
+# ---------- Phase 11.6: dispatch-chain views ---------- #
+
+
+def test_list_dispatch_chains_empty_workspace(client, alice):
+    h = auth_headers(alice["api_key"]["plaintext"])
+    r = client.get("/workspaces/me/dispatch", headers=h)
+    assert r.status_code == 200
+    assert r.json() == {"chains": []}
+
+
+def test_list_dispatch_chains_returns_one_row_per_chain(client, alice):
+    """Multiple commands in one chain id collapse to one row in the
+    list view; the row carries aggregate metadata (count, max_depth,
+    last_activity_at, status)."""
+    h = auth_headers(alice["api_key"]["plaintext"])
+    chain = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    # Root: user-initiated polaris.evaluate_push (auto-approved).
+    r = client.post(
+        "/agents/polaris/commands",
+        json={
+            "kind": "polaris.evaluate_push",
+            "payload": {"commit_sha": "abc"},
+            "dispatch_chain_id": chain,
+        },
+        headers=h,
+    )
+    assert r.status_code == 200
+    # Hop 1: polaris -> atlas (no rule, lands pending).
+    r = client.post(
+        "/agents/atlas/commands",
+        json={
+            "kind": "atlas.run_tests",
+            "payload": {},
+            "source_agent": "polaris",
+            "dispatch_chain_id": chain,
+        },
+        headers=h,
+    )
+    assert r.status_code == 200
+
+    r = client.get("/workspaces/me/dispatch", headers=h)
+    assert r.status_code == 200
+    chains = r.json()["chains"]
+    assert len(chains) == 1
+    row = chains[0]
+    assert row["chain_id"] == chain
+    assert row["command_count"] == 2
+    assert row["root_agent"] == "polaris"
+    assert row["root_kind"] == "polaris.evaluate_push"
+    assert row["max_depth"] == 1
+    # Atlas command is `pending` approval → chain status surfaces it.
+    assert row["status"] == "pending_approval"
+    assert row["pending_approval_count"] == 1
+
+
+def test_list_dispatch_chains_orders_newest_first(client, alice):
+    h = auth_headers(alice["api_key"]["plaintext"])
+    older_chain = "11111111-2222-3333-4444-555555555555"
+    newer_chain = "99999999-8888-7777-6666-555555555555"
+    client.post(
+        "/agents/polaris/commands",
+        json={
+            "kind": "polaris.evaluate_push",
+            "payload": {},
+            "dispatch_chain_id": older_chain,
+        },
+        headers=h,
+    )
+    client.post(
+        "/agents/polaris/commands",
+        json={
+            "kind": "polaris.evaluate_push",
+            "payload": {},
+            "dispatch_chain_id": newer_chain,
+        },
+        headers=h,
+    )
+    chains = client.get("/workspaces/me/dispatch", headers=h).json()["chains"]
+    assert [c["chain_id"] for c in chains] == [newer_chain, older_chain]
+
+
+def test_list_dispatch_chains_workspace_isolated(client, alice, bob):
+    h_a = auth_headers(alice["api_key"]["plaintext"])
+    h_b = auth_headers(bob["api_key"]["plaintext"])
+    client.post(
+        "/agents/polaris/commands",
+        json={"kind": "polaris.evaluate_push", "payload": {}},
+        headers=h_a,
+    )
+    assert client.get("/workspaces/me/dispatch", headers=h_b).json()["chains"] == []
+
+
+def test_get_dispatch_chain_returns_full_command_list(client, alice):
+    h = auth_headers(alice["api_key"]["plaintext"])
+    chain = "abcdef00-0000-0000-0000-000000000001"
+    client.post(
+        "/agents/polaris/commands",
+        json={
+            "kind": "polaris.evaluate_push",
+            "payload": {"commit_sha": "abc"},
+            "dispatch_chain_id": chain,
+        },
+        headers=h,
+    )
+    client.post(
+        "/agents/atlas/commands",
+        json={
+            "kind": "atlas.run_tests",
+            "payload": {},
+            "source_agent": "polaris",
+            "dispatch_chain_id": chain,
+        },
+        headers=h,
+    )
+    r = client.get(f"/workspaces/me/dispatch/{chain}", headers=h)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["chain_id"] == chain
+    assert len(body["commands"]) == 2
+    # Ordered by depth (root first), then created_at.
+    assert body["commands"][0]["dispatch_depth"] == 0
+    assert body["commands"][0]["agent_name"] == "polaris"
+    assert body["commands"][1]["dispatch_depth"] == 1
+    assert body["commands"][1]["agent_name"] == "atlas"
+    assert body["events"] == []  # no agents have emitted yet
+
+
+def test_get_dispatch_chain_unknown_id_404s(client, alice):
+    h = auth_headers(alice["api_key"]["plaintext"])
+    r = client.get(
+        "/workspaces/me/dispatch/00000000-0000-0000-0000-000000000abc",
+        headers=h,
+    )
+    assert r.status_code == 404
+
+
+def test_get_dispatch_chain_workspace_isolated(client, alice, bob):
+    """Bob can't peek at alice's chains by guessing the id."""
+    h_a = auth_headers(alice["api_key"]["plaintext"])
+    h_b = auth_headers(bob["api_key"]["plaintext"])
+    chain = "deadbeef-0000-0000-0000-000000000000"
+    client.post(
+        "/agents/polaris/commands",
+        json={
+            "kind": "polaris.evaluate_push",
+            "payload": {},
+            "dispatch_chain_id": chain,
+        },
+        headers=h_a,
+    )
+    r = client.get(f"/workspaces/me/dispatch/{chain}", headers=h_b)
+    assert r.status_code == 404
+
+
+def test_get_dispatch_chain_includes_linked_events(client, alice):
+    """Events whose payload.command_id matches a chain command appear
+    in the timeline. Used by the dashboard to show 'atlas.tests_run'
+    inline under the atlas.run_tests command that produced it."""
+    h = auth_headers(alice["api_key"]["plaintext"])
+    chain = "00000000-1234-5678-9abc-def000000000"
+    cmd = client.post(
+        "/agents/atlas/commands",
+        json={
+            "kind": "atlas.run_tests",
+            "payload": {},
+            "dispatch_chain_id": chain,
+        },
+        headers=h,
+    ).json()
+    cmd_id = cmd["id"]
+    # Atlas would emit atlas.tests_run with command_id in payload.
+    client.post(
+        "/events",
+        json={
+            "agent_name": "atlas",
+            "kind": "atlas.tests_run",
+            "run_id": "run-1",
+            "payload": {
+                "command_id": cmd_id,
+                "passed": 10,
+                "failed": 0,
+            },
+        },
+        headers=h,
+    )
+    r = client.get(f"/workspaces/me/dispatch/{chain}", headers=h)
+    body = r.json()
+    assert len(body["events"]) == 1
+    assert body["events"][0]["kind"] == "atlas.tests_run"
+    assert body["events"][0]["command_id"] == cmd_id

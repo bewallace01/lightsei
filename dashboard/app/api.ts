@@ -1036,3 +1036,135 @@ export type WorkspacePulse = {
 export async function fetchWorkspacePulse(): Promise<WorkspacePulse> {
   return (await authedJson("/workspaces/me/pulse")) as WorkspacePulse;
 }
+
+// ---------- Phase 11.6: dispatch chain views ---------- //
+
+export type DispatchChainStatus =
+  | "pending"
+  | "pending_approval"
+  | "running"
+  | "done"
+  | "failed"
+  | "expired"
+  | "rejected";
+
+export type DispatchChainSummary = {
+  chain_id: string;
+  started_at: string;
+  last_activity_at: string;
+  command_count: number;
+  max_depth: number;
+  root_agent: string;
+  root_kind: string;
+  root_source_agent: string | null;
+  status: DispatchChainStatus;
+  pending_approval_count: number;
+};
+
+export type DispatchCommand = {
+  id: string;
+  agent_name: string;
+  kind: string;
+  payload: Record<string, unknown>;
+  status: string;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  created_at: string;
+  claimed_at: string | null;
+  completed_at: string | null;
+  expires_at: string;
+  source_agent: string | null;
+  dispatch_chain_id: string;
+  dispatch_depth: number;
+  approval_state: string;
+  approved_by_user_id: string | null;
+  approved_at: string | null;
+};
+
+export type DispatchEvent = {
+  id: string;
+  run_id: string;
+  agent_name: string;
+  kind: string;
+  payload: Record<string, unknown>;
+  timestamp: string;
+  command_id: string | null;
+};
+
+export type DispatchChainDetail = {
+  chain_id: string;
+  commands: DispatchCommand[];
+  events: DispatchEvent[];
+  status: DispatchChainStatus;
+};
+
+export async function fetchDispatchChains(): Promise<DispatchChainSummary[]> {
+  const body = (await authedJson("/workspaces/me/dispatch")) as {
+    chains: DispatchChainSummary[];
+  };
+  return body.chains;
+}
+
+export async function fetchDispatchChain(
+  chainId: string,
+): Promise<DispatchChainDetail> {
+  return (await authedJson(
+    `/workspaces/me/dispatch/${encodeURIComponent(chainId)}`,
+  )) as DispatchChainDetail;
+}
+
+export async function approveCommand(commandId: string): Promise<DispatchCommand> {
+  return (await authedJson(`/commands/${encodeURIComponent(commandId)}/approve`, {
+    method: "POST",
+  })) as DispatchCommand;
+}
+
+export async function rejectCommand(commandId: string): Promise<DispatchCommand> {
+  return (await authedJson(`/commands/${encodeURIComponent(commandId)}/reject`, {
+    method: "POST",
+  })) as DispatchCommand;
+}
+
+// ---------- Phase 11.2 / 11.6: auto-approval rule editor ---------- //
+
+export type AutoApprovalRule = {
+  source_agent: string;
+  target_agent: string;
+  command_kind: string;
+  mode: "auto_approve" | "require_human";
+  created_at: string;
+  updated_at: string;
+};
+
+export async function fetchAutoApprovalRules(): Promise<AutoApprovalRule[]> {
+  const body = (await authedJson("/workspaces/me/auto-approval-rules")) as {
+    rules: AutoApprovalRule[];
+  };
+  return body.rules;
+}
+
+export async function upsertAutoApprovalRule(
+  rule: Omit<AutoApprovalRule, "created_at" | "updated_at">,
+): Promise<AutoApprovalRule> {
+  return (await authedJson("/workspaces/me/auto-approval-rules", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(rule),
+  })) as AutoApprovalRule;
+}
+
+export async function deleteAutoApprovalRule(rule: {
+  source_agent: string;
+  target_agent: string;
+  command_kind: string;
+}): Promise<void> {
+  // The backend DELETE takes query params, not a body — match its shape.
+  const qs = new URLSearchParams({
+    source_agent: rule.source_agent,
+    target_agent: rule.target_agent,
+    command_kind: rule.command_kind,
+  });
+  await authedJson(`/workspaces/me/auto-approval-rules?${qs.toString()}`, {
+    method: "DELETE",
+  });
+}

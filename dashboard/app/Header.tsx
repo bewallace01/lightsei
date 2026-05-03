@@ -15,6 +15,7 @@ import Logo from "./Logo";
 
 const NAV: { href: string; label: string }[] = [
   { href: "/polaris", label: "polaris" },
+  { href: "/dispatch", label: "dispatch" },
   { href: "/notifications", label: "notifications" },
   { href: "/github", label: "github" },
 ];

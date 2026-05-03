@@ -3607,6 +3607,173 @@ def delete_auto_approval_rule(
     return {"status": "ok"}
 
 
+# ---------- Phase 11.6: dispatch-chain views ---------- #
+
+
+def _aggregate_chain_status(commands: list[Command]) -> str:
+    """Roll up a chain's overall status from its commands.
+
+    Priority (most "interesting" wins so the user sees actionable state
+    first): pending_approval > running > failed > expired > done.
+    `pending_approval` is split out from generic `pending` because the
+    UI surfaces a click-to-approve button on those rows; the user's
+    glance-and-skip pattern wants that signal at the top of the heap.
+    """
+    states = {c.status for c in commands}
+    approval_states = {c.approval_state for c in commands}
+    if "pending" in approval_states:
+        return "pending_approval"
+    if "running" in states or "claimed" in states:
+        return "running"
+    if "failed" in states:
+        return "failed"
+    if "expired" in states:
+        return "expired"
+    if "rejected" in approval_states:
+        return "rejected"
+    if all(c.status == "done" for c in commands):
+        return "done"
+    return "pending"
+
+
+@app.get("/workspaces/me/dispatch")
+def list_dispatch_chains(
+    limit: int = 50,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """List dispatch chains, newest first.
+
+    A "chain" is the set of commands sharing one `dispatch_chain_id` —
+    the cause-and-effect tree that starts with a user click, scheduled
+    tick, or webhook push, and fans out through agent-to-agent
+    dispatches. The 11.6 dashboard view renders one row per chain,
+    expandable into a timeline that this endpoint's siblings populate.
+    """
+    limit = max(1, min(limit, 200))
+    # Find the most recently active chain ids for this workspace.
+    chain_rows = session.execute(
+        text(
+            """
+            SELECT dispatch_chain_id AS chain_id,
+                   MIN(created_at)   AS started_at,
+                   MAX(COALESCE(completed_at, claimed_at, created_at))
+                                     AS last_activity_at
+            FROM commands
+            WHERE workspace_id = :wsid
+            GROUP BY dispatch_chain_id
+            ORDER BY last_activity_at DESC
+            LIMIT :lim
+            """
+        ),
+        {"wsid": workspace_id, "lim": limit},
+    ).all()
+
+    if not chain_rows:
+        return {"chains": []}
+
+    chain_ids = [r.chain_id for r in chain_rows]
+    cmds = session.execute(
+        select(Command)
+        .where(
+            Command.workspace_id == workspace_id,
+            Command.dispatch_chain_id.in_(chain_ids),
+        )
+        .order_by(Command.dispatch_depth, Command.created_at)
+    ).scalars().all()
+
+    by_chain: dict[str, list[Command]] = {}
+    for c in cmds:
+        by_chain.setdefault(c.dispatch_chain_id, []).append(c)
+
+    chains: list[dict[str, Any]] = []
+    for r in chain_rows:
+        chain_cmds = by_chain.get(r.chain_id, [])
+        if not chain_cmds:
+            continue
+        root = chain_cmds[0]  # ordered by depth ASC, so depth=0 first
+        pending_approvals = sum(
+            1 for c in chain_cmds if c.approval_state == "pending"
+        )
+        chains.append(
+            {
+                "chain_id": r.chain_id,
+                "started_at": r.started_at.isoformat(),
+                "last_activity_at": r.last_activity_at.isoformat(),
+                "command_count": len(chain_cmds),
+                "max_depth": max(c.dispatch_depth for c in chain_cmds),
+                "root_agent": root.agent_name,
+                "root_kind": root.kind,
+                "root_source_agent": root.source_agent,
+                "status": _aggregate_chain_status(chain_cmds),
+                "pending_approval_count": pending_approvals,
+            }
+        )
+    return {"chains": chains}
+
+
+@app.get("/workspaces/me/dispatch/{chain_id}")
+def get_dispatch_chain(
+    chain_id: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Full timeline for one dispatch chain.
+
+    Returns every command in the chain (with the same shape as
+    `/agents/{name}/commands`) plus any events whose payload carries a
+    `command_id` matching one of the chain's commands. The frontend
+    renders these together as a single vertical timeline indented by
+    `dispatch_depth`.
+    """
+    cmds = session.execute(
+        select(Command)
+        .where(
+            Command.workspace_id == workspace_id,
+            Command.dispatch_chain_id == chain_id,
+        )
+        .order_by(Command.dispatch_depth, Command.created_at)
+    ).scalars().all()
+    if not cmds:
+        raise HTTPException(status_code=404, detail="chain not found")
+
+    cmd_ids = [c.id for c in cmds]
+    # Events linked to these commands via payload.command_id. Atlas /
+    # Hermes / Polaris all stamp this; events from agents that don't
+    # are excluded — for 11.6 that's the right call (the chain view
+    # shouldn't pull in arbitrary agent telemetry).
+    events = session.execute(
+        text(
+            """
+            SELECT id, workspace_id, run_id, agent_name, kind, payload, timestamp
+            FROM events
+            WHERE workspace_id = :wsid
+              AND payload->>'command_id' = ANY(:cmd_ids)
+            ORDER BY timestamp ASC
+            """
+        ),
+        {"wsid": workspace_id, "cmd_ids": cmd_ids},
+    ).all()
+
+    return {
+        "chain_id": chain_id,
+        "commands": [_serialize_command(c) for c in cmds],
+        "events": [
+            {
+                "id": e.id,
+                "run_id": e.run_id,
+                "agent_name": e.agent_name,
+                "kind": e.kind,
+                "payload": e.payload or {},
+                "timestamp": e.timestamp.isoformat(),
+                "command_id": (e.payload or {}).get("command_id"),
+            }
+            for e in events
+        ],
+        "status": _aggregate_chain_status(cmds),
+    }
+
+
 @app.post("/commands/{command_id}/complete")
 def complete_command(
     command_id: str,
