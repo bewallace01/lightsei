@@ -583,9 +583,19 @@ def evaluate_push(
             "matched_pattern": pattern,
             "matched_paths": matching,
         }
-        cmd = send_command(
-            target_agent, kind, cmd_payload, source_agent="polaris"
-        )
+        # `source_agent=` is a Phase-11.5+ SDK kwarg. On PyPI 0.1.0 it
+        # raises TypeError; in that case dispatch without the flag —
+        # the chain_id still propagates via the SDK's thread-local
+        # context that the auto-poller set when it claimed this command.
+        # Source-agent attribution gets dropped, which means the 11.6
+        # constellation edges won't carry "from polaris" data on this
+        # path, but the chain itself works end-to-end.
+        try:
+            cmd = send_command(
+                target_agent, kind, cmd_payload, source_agent="polaris"
+            )
+        except TypeError:
+            cmd = send_command(target_agent, kind, cmd_payload)
         matched.append(
             {"pattern": pattern, "kind": kind, "matched_paths": matching}
         )

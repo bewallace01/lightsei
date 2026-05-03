@@ -57,6 +57,30 @@ from typing import Any, Callable, Optional
 import lightsei
 
 
+def _send_with_source(
+    target_agent: str,
+    kind: str,
+    payload: dict[str, Any],
+    *,
+    source_agent: str,
+) -> dict[str, Any]:
+    """`lightsei.send_command(..., source_agent=...)` against any SDK.
+
+    The `source_agent` kwarg landed in Phase 11.5; on the published
+    PyPI 0.1.0 SDK it raises TypeError. The chain_id still propagates
+    via the SDK's thread-local context, so dropping the flag yields a
+    working chain — just without source-edge attribution in the 11.6
+    constellation view. Atlas is robust to either SDK so deploys don't
+    have to chase a release.
+    """
+    try:
+        return lightsei.send_command(
+            target_agent, kind, payload, source_agent=source_agent
+        )
+    except TypeError:
+        return lightsei.send_command(target_agent, kind, payload)
+
+
 # ---------- Configuration ---------- #
 
 POLL_S = float(os.environ.get("ATLAS_POLL_S", "5"))
@@ -240,7 +264,7 @@ def tick(
             },
         )
         try:
-            lightsei.send_command(
+            _send_with_source(
                 "hermes",
                 "hermes.post",
                 {
@@ -267,7 +291,7 @@ def tick(
             },
         )
         try:
-            lightsei.send_command(
+            _send_with_source(
                 "hermes",
                 "hermes.post",
                 {
@@ -298,7 +322,7 @@ def tick(
     # inherits the dispatch_chain_id from the active claim's
     # threading.local context (Phase 11.1).
     try:
-        lightsei.send_command(
+        _send_with_source(
             "hermes",
             "hermes.post",
             {
