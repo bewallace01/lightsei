@@ -11,7 +11,7 @@ from typing import Any, Optional
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import desc, select, text
+from sqlalchemy import desc, func, select, text
 from sqlalchemy.orm import Session
 
 import limits
@@ -922,6 +922,148 @@ def get_workspace_cost(
     poll this every 30s without re-summing events × pricing per call.
     """
     return workspace_cost_mtd(session, workspace_id)
+
+
+@app.get("/workspaces/me/pulse")
+def get_workspace_pulse(
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 11B.2: drives the home-page status hero. Returns a small
+    counts-and-times payload the hero can render in one read; polled
+    every 5s so the hero copy stays current without a websocket.
+
+    `status` is 'calm' when issues_count is 0, 'attention' otherwise.
+    `issues` breaks down what wants the operator's eyes:
+      pending_approvals  — Phase 11.2 commands stuck waiting on a click
+      failed_validations — Phase 8 blocking-validator denials in the
+                           last 24h that haven't been re-emitted clean
+      budget_warnings    — workspace MTD ≥ 80% of budget_usd_monthly
+                           (1 if true, 0 if cap unset or under threshold)
+      stale_agents       — agents with heartbeats older than 5 min
+                           (bots that died without an explicit stop)
+    `last_event_at` powers the hero's pulsing constellation icon —
+    when this value moves, the icon brightens for one polling cycle.
+    """
+    now = utcnow()
+    cutoff_24h = now - timedelta(hours=24)
+    cutoff_5m = now - timedelta(minutes=5)
+
+    workspace = session.get(Workspace, workspace_id)
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+
+    pending_approvals = session.execute(
+        text(
+            """
+            SELECT COUNT(*) AS n FROM commands
+            WHERE workspace_id = :wsid
+              AND approval_state = 'pending'
+              AND expires_at > :now
+            """
+        ),
+        {"wsid": workspace_id, "now": now},
+    ).scalar_one()
+
+    failed_validations = session.execute(
+        text(
+            """
+            SELECT COUNT(*) AS n
+            FROM event_validations ev
+            JOIN events e ON e.id = ev.event_id
+            WHERE e.workspace_id = :wsid
+              AND ev.status = 'fail'
+              AND ev.created_at >= :cutoff_24h
+            """
+        ),
+        {"wsid": workspace_id, "cutoff_24h": cutoff_24h},
+    ).scalar_one()
+
+    # Budget warning: only meaningful when a cap is set. 80% threshold
+    # matches the "warns at 80%, denies at 100%" copy in the Phase
+    # 11B.1 cost panel.
+    budget_warnings = 0
+    if workspace.budget_usd_monthly is not None and float(
+        workspace.budget_usd_monthly
+    ) > 0:
+        cost = workspace_cost_mtd(session, workspace_id)
+        used_pct = cost.get("budget_used_pct") or 0.0
+        if used_pct >= 80.0:
+            budget_warnings = 1
+
+    stale_agents = session.execute(
+        text(
+            """
+            SELECT COUNT(*) AS n
+            FROM (
+                SELECT a.name,
+                       (SELECT MAX(ai.last_heartbeat_at)
+                        FROM agent_instances ai
+                        WHERE ai.workspace_id = :wsid
+                          AND ai.agent_name = a.name) AS last_hb
+                FROM agents a
+                WHERE a.workspace_id = :wsid
+            ) sub
+            WHERE sub.last_hb IS NOT NULL
+              AND sub.last_hb < :cutoff_5m
+            """
+        ),
+        {"wsid": workspace_id, "cutoff_5m": cutoff_5m},
+    ).scalar_one()
+
+    issues_count = (
+        int(pending_approvals or 0)
+        + int(failed_validations or 0)
+        + int(budget_warnings or 0)
+        + int(stale_agents or 0)
+    )
+
+    agent_count = session.execute(
+        select(func.count()).select_from(Agent).where(
+            Agent.workspace_id == workspace_id
+        )
+    ).scalar_one()
+
+    last_polaris_tick = session.execute(
+        text(
+            """
+            SELECT MAX(timestamp) FROM events
+            WHERE workspace_id = :wsid
+              AND agent_name = 'polaris'
+              AND kind = 'polaris.plan'
+            """
+        ),
+        {"wsid": workspace_id},
+    ).scalar_one()
+    last_event = session.execute(
+        text(
+            """
+            SELECT MAX(timestamp) FROM events
+            WHERE workspace_id = :wsid
+            """
+        ),
+        {"wsid": workspace_id},
+    ).scalar_one()
+
+    return {
+        "status": "calm" if issues_count == 0 else "attention",
+        "issues_count": issues_count,
+        "issues": {
+            "pending_approvals": int(pending_approvals or 0),
+            "failed_validations": int(failed_validations or 0),
+            "budget_warnings": int(budget_warnings or 0),
+            "stale_agents": int(stale_agents or 0),
+        },
+        "workspace_name": workspace.name,
+        "agent_count": int(agent_count or 0),
+        "last_polaris_tick_at": (
+            last_polaris_tick.isoformat() if last_polaris_tick else None
+        ),
+        "last_event_at": (
+            last_event.isoformat() if last_event else None
+        ),
+        "as_of": now.isoformat(),
+    }
 
 
 @app.get("/workspaces/me/constellation")
