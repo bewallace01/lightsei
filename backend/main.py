@@ -447,7 +447,7 @@ def on_startup() -> None:
             )
 
 
-# Phase 11.7 demo trigger v4: failure-path run — atlas should report ❌ in Slack.
+# Phase 11.7 demo trigger v5: failure-path run with the right atlas bundle.
 @app.get("/health")
 def health() -> dict[str, Any]:
     """Liveness + lightweight pool/connection telemetry.
