@@ -26,7 +26,14 @@ jobs:
     steps:
       - name: Ping backend /health
         run: |
-          curl --fail --silent --show-error --max-time 30 https://api.lightsei.com/health
+          # Print the response body so the pool + pg_stat_activity counters
+          # exposed by /health are captured in the Actions log. With the cron
+          # firing every 5 min, this gives us a ~288-point/day time series
+          # for diagnosing connection-leak trends.
+          response=$(curl --fail --silent --show-error --max-time 30 https://api.lightsei.com/health)
+          echo "$response"
+          # Surface idle_in_txn on its own line for easy grepping across runs.
+          echo "idle_in_txn=$(echo "$response" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("db",{}).get("idle_in_txn","?"))')"
 
       - name: Ping dashboard /
         run: |
