@@ -370,11 +370,35 @@ function CommandRow({
         style={{ paddingLeft: `${indent + 80}px` }}
       >
         <summary className="cursor-pointer text-gray-500 hover:text-gray-700 select-none">
-          payload {events.length > 0 ? `+ ${events.length} event${events.length === 1 ? "" : "s"}` : ""}
+          payload
+          {cmd.error ? " + error" : ""}
+          {cmd.result ? " + result" : ""}
+          {events.length > 0
+            ? ` + ${events.length} event${events.length === 1 ? "" : "s"}`
+            : ""}
         </summary>
-        <pre className="mt-1 font-mono text-[11px] bg-gray-50 p-2 rounded text-gray-700 overflow-x-auto">
-          {JSON.stringify(cmd.payload, null, 2)}
-        </pre>
+        {cmd.error && (
+          <div className="mt-1">
+            <div className="text-[10px] text-red-600 font-mono">error</div>
+            <pre className="font-mono text-[11px] bg-red-50 border border-red-100 p-2 rounded text-red-800 overflow-x-auto whitespace-pre-wrap">
+              {cmd.error}
+            </pre>
+          </div>
+        )}
+        {cmd.result && (
+          <div className="mt-1">
+            <div className="text-[10px] text-gray-500 font-mono">result</div>
+            <pre className="font-mono text-[11px] bg-gray-50 p-2 rounded text-gray-700 overflow-x-auto">
+              {JSON.stringify(cmd.result, null, 2)}
+            </pre>
+          </div>
+        )}
+        <div className="mt-1">
+          <div className="text-[10px] text-gray-500 font-mono">payload</div>
+          <pre className="font-mono text-[11px] bg-gray-50 p-2 rounded text-gray-700 overflow-x-auto">
+            {JSON.stringify(cmd.payload, null, 2)}
+          </pre>
+        </div>
         {events.map((ev) => (
           <div key={ev.id} className="mt-1">
             <div className="text-[10px] text-gray-500 font-mono">
