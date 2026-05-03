@@ -1,1 +1,1 @@
-lightsei>=0.1.0
+lightsei>=0.1.1

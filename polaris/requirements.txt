@@ -1,2 +1,2 @@
-lightsei>=0.1.0
+lightsei>=0.1.1
 anthropic>=0.40.0
