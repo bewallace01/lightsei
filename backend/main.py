@@ -447,7 +447,7 @@ def on_startup() -> None:
             )
 
 
-# Phase 11.7 demo trigger v5: failure-path run with the right atlas bundle.
+# Phase 11.7 demo trigger v6: full auto-approve chain — should land green ✅ in Slack with zero clicks.
 @app.get("/health")
 def health() -> dict[str, Any]:
     """Liveness + lightweight pool/connection telemetry.
