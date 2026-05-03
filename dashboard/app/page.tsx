@@ -51,24 +51,105 @@ export default function Home() {
   return (
     <main className="px-8 py-10 max-w-6xl mx-auto">
 
-      {/* Phase 11B.2: status hero. Sits at the top, full width within
-          the content container, so "everything calm" or "N things
-          want your attention" is the first thing you read. */}
-      <section className="mb-8">
-        <Hero />
-      </section>
+      {/* Phase 11B.2 + 11B.3: hero text overlays the constellation
+          canvas rather than stacking above it. The hero text sits
+          absolutely positioned in the upper-left while the
+          constellation map fills the entire wrapper, so the empty
+          space next to the headline is filled by stars + agents
+          instead of negative whitespace.
+          The wrapper itself paints the gradient + warmth + scattered
+          field stars so the whole frame reads as one continuous
+          sky. */}
+      <section
+        className="mb-10 relative overflow-hidden rounded-lg border border-indigo-900/50 shadow-lg shadow-indigo-950/30"
+        style={{
+          background:
+            "linear-gradient(180deg, #020617 0%, #1e1b4b 50%, #0f172a 100%)",
+        }}
+      >
+        {/* Centered amber warmth radiating from where Polaris sits
+            (constellation map middle). */}
+        <div
+          className="absolute inset-0 pointer-events-none"
+          style={{
+            background:
+              "radial-gradient(closest-side at 50% 50%, rgba(251,191,36,0.07), rgba(251,191,36,0) 60%)",
+          }}
+        />
+        {/* Field stars scattered across the whole frame — viewBox
+            matches the constellation map's so positions stay
+            consistent across the shared canvas. */}
+        <svg
+          className="absolute inset-0 w-full h-full pointer-events-none"
+          aria-hidden="true"
+          preserveAspectRatio="none"
+          viewBox="0 0 1000 480"
+        >
+          {[
+            { x: 80, y: 30, r: 1, o: 0.6 },
+            { x: 220, y: 60, r: 0.8, o: 0.4 },
+            { x: 540, y: 25, r: 0.8, o: 0.4 },
+            { x: 880, y: 40, r: 1.2, o: 0.5 },
+            { x: 940, y: 110, r: 1, o: 0.4 },
+            { x: 60, y: 130, r: 0.8, o: 0.5 },
+            { x: 200, y: 150, r: 1, o: 0.5 },
+            { x: 360, y: 150, r: 0.8, o: 0.4 },
+            { x: 860, y: 145, r: 1, o: 0.5 },
+            { x: 130, y: 230, r: 0.9, o: 0.5 },
+            { x: 290, y: 265, r: 0.8, o: 0.4 },
+            { x: 470, y: 240, r: 0.7, o: 0.45 },
+            { x: 660, y: 265, r: 0.8, o: 0.45 },
+            { x: 820, y: 230, r: 1, o: 0.55 },
+            { x: 940, y: 265, r: 0.7, o: 0.4 },
+            { x: 60, y: 340, r: 0.9, o: 0.5 },
+            { x: 220, y: 370, r: 0.8, o: 0.4 },
+            { x: 380, y: 385, r: 1, o: 0.55 },
+            { x: 560, y: 350, r: 0.8, o: 0.4 },
+            { x: 720, y: 370, r: 0.9, o: 0.5 },
+            { x: 880, y: 385, r: 0.8, o: 0.45 },
+            { x: 130, y: 445, r: 0.9, o: 0.55 },
+            { x: 280, y: 460, r: 0.8, o: 0.4 },
+            { x: 460, y: 440, r: 0.9, o: 0.5 },
+            { x: 640, y: 455, r: 0.8, o: 0.45 },
+            { x: 820, y: 450, r: 0.9, o: 0.5 },
+          ].map((d, i) => (
+            <circle
+              key={i}
+              cx={d.x}
+              cy={d.y}
+              r={d.r}
+              fill="white"
+              opacity={d.o}
+            />
+          ))}
+        </svg>
 
-      {/* Phase 11B.3: constellation map. The cost panel (11B.4) will
-          slot in below; for now the map sits between the hero and
-          the existing Runs table. */}
-      <section className="mb-10">
-        <div className="flex items-baseline gap-3 mb-3">
-          <span className="text-[11px] uppercase tracking-wider text-indigo-500 font-medium">
-            Constellation
-          </span>
-          <span className="text-xs text-gray-400">your team, at a glance</span>
-        </div>
+        {/* The constellation map fills the canvas. Behind the hero
+            text overlay, but pointer events still work for hover. */}
         <Constellation />
+
+        {/* Hero text + constellation label, positioned absolutely
+            in the upper-left so they overlay the dark canvas rather
+            than reserving their own vertical space above it. The
+            pointer-events-none lets the constellation map's stars
+            stay clickable through the hero's transparent areas; the
+            inner content keeps pointer events on so the headline's
+            expand button still works. */}
+        <div className="absolute inset-x-0 top-0 pointer-events-none">
+          <div className="max-w-md pointer-events-auto">
+            <Hero />
+            <div className="px-6 sm:px-10">
+              <div className="flex items-baseline gap-3">
+                <span className="text-[11px] uppercase tracking-[0.18em] text-indigo-200/85 font-medium">
+                  Constellation
+                </span>
+                <span className="text-xs text-indigo-200/45">
+                  your team, at a glance
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
       </section>
 
       <div className="flex items-baseline justify-between mb-8">

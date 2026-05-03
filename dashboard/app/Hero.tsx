@@ -23,7 +23,7 @@
  */
 
 import Link from "next/link";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   fetchWorkspacePulse,
   PulseIssues,
@@ -75,8 +75,6 @@ export default function Hero() {
   const [pulse, setPulse] = useState<WorkspacePulse | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
-  const [pulsing, setPulsing] = useState(false);
-  const lastEventAt = useRef<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -90,19 +88,6 @@ export default function Hero() {
       try {
         const fresh = await fetchWorkspacePulse();
         if (!alive) return;
-        // Trigger the pulse animation if last_event_at strictly
-        // increased since the previous poll.
-        const prev = lastEventAt.current;
-        if (
-          fresh.last_event_at &&
-          (prev === null || fresh.last_event_at > prev)
-        ) {
-          setPulsing(true);
-          setTimeout(() => {
-            if (alive) setPulsing(false);
-          }, 900);
-        }
-        lastEventAt.current = fresh.last_event_at;
         setPulse(fresh);
         setError(null);
       } catch (e) {
@@ -154,105 +139,16 @@ export default function Hero() {
 
   return (
     <section
-      className="relative overflow-hidden rounded-lg border border-indigo-900/50 shadow-lg shadow-indigo-950/30"
+      className="relative"
       aria-label="Workspace status"
     >
-      <style jsx>{`
-        @keyframes hero-pulse {
-          0% {
-            opacity: 0.55;
-            transform: scale(1);
-          }
-          50% {
-            opacity: 1;
-            transform: scale(1.12);
-          }
-          100% {
-            opacity: 0.55;
-            transform: scale(1);
-          }
-        }
-        .pulse-icon.active {
-          animation: hero-pulse 900ms ease-out 1;
-          transform-origin: center;
-          transform-box: fill-box;
-        }
-        @media (prefers-reduced-motion: reduce) {
-          .pulse-icon.active {
-            animation: none;
-          }
-        }
-      `}</style>
+      {/* No background, no border, no shadow, no field stars —
+          the parent section paints all of that, so this component
+          just contributes its content layer. Keeps the hero ↔
+          constellation transition seamless instead of two stacked
+          cards with their own atmospheres. */}
 
-      {/* Painted sky background — same gradient + warmth as the
-          constellation map so the two widgets feel like one design. */}
-      <div
-        className="absolute inset-0"
-        style={{
-          background:
-            "linear-gradient(135deg, #020617 0%, #1e1b4b 50%, #0f172a 100%)",
-        }}
-      />
-      <div
-        className="absolute inset-0"
-        style={{
-          background:
-            "radial-gradient(closest-side at 50% 100%, rgba(251,191,36,0.06), rgba(251,191,36,0) 70%)",
-        }}
-      />
-      {/* Subtle scattered field stars. Hardcoded positions so they
-          don't shift between renders. */}
-      <svg
-        className="absolute inset-0 w-full h-full"
-        aria-hidden="true"
-        preserveAspectRatio="none"
-        viewBox="0 0 1000 200"
-      >
-        {[
-          { x: 80, y: 30, r: 1, o: 0.6 },
-          { x: 220, y: 60, r: 0.8, o: 0.4 },
-          { x: 380, y: 40, r: 1.2, o: 0.7 },
-          { x: 540, y: 25, r: 0.8, o: 0.4 },
-          { x: 700, y: 70, r: 1, o: 0.6 },
-          { x: 880, y: 40, r: 1.2, o: 0.5 },
-          { x: 940, y: 130, r: 1, o: 0.4 },
-          { x: 60, y: 160, r: 0.8, o: 0.4 },
-          { x: 200, y: 180, r: 1, o: 0.5 },
-          { x: 360, y: 130, r: 0.8, o: 0.4 },
-          { x: 520, y: 170, r: 1, o: 0.5 },
-          { x: 720, y: 160, r: 0.8, o: 0.4 },
-          { x: 860, y: 175, r: 1, o: 0.5 },
-        ].map((d, i) => (
-          <circle
-            key={i}
-            cx={d.x}
-            cy={d.y}
-            r={d.r}
-            fill="white"
-            opacity={d.o}
-          />
-        ))}
-      </svg>
-
-      <div className="relative px-6 sm:px-10 py-10 sm:py-12">
-        {/* Top-right: pulsing constellation icon */}
-        <div className="absolute top-5 right-5 sm:top-6 sm:right-6">
-          <svg
-            width={28}
-            height={28}
-            viewBox="0 0 24 24"
-            aria-hidden="true"
-            className="text-amber-200"
-          >
-            <path
-              className={`pulse-icon ${pulsing ? "active" : ""}`}
-              fill="currentColor"
-              opacity={0.55}
-              d="M12 1.5 L13.4 10.6 L22.5 12 L13.4 13.4 L12 22.5 L10.6 13.4 L1.5 12 L10.6 10.6 Z"
-            />
-          </svg>
-        </div>
-
+      <div className="relative px-6 sm:px-10 pt-10 sm:pt-12 pb-6 sm:pb-7">
         {/* Headline + subtitle */}
         {pulse === null && !error && (
           <>
