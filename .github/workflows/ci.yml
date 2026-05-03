@@ -49,6 +49,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
+          # test_polaris_docs.py imports polaris/bot.py which imports
+          # `lightsei`; pull the SDK source into the env so the import
+          # resolves without depending on the published wheel cadence.
+          pip install -e ../sdk
 
       - name: Run pytest
         working-directory: backend
