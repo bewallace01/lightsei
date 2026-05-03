@@ -9,10 +9,9 @@ def test_smoke():
 
 
 def test_phase_11_7_demo_failure_path():
-    # Phase 11.7 demo: this test fails on purpose so the chain produces a
-    # ❌ Slack message via hermes. Remove or invert the assertion to
-    # turn the chain green again.
-    assert 0 == 1, "deliberate failure for the 11.7 failure-path demo"
+    # Demo flipped back to passing for the variant 2 (full auto-approve)
+    # chain. Toggle the assertion to produce a ❌ in Slack again.
+    assert 1 == 1
 
 
 def test_atlas_bundle_intact():
