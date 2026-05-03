@@ -63,7 +63,9 @@ const ISSUE_LABELS: Record<keyof PulseIssues, { label: string; href: string }> =
   },
   stale_agents: {
     label: "stale agent",
-    href: "/",
+    // /deployments shows desired vs actual state per bot — the right
+    // surface for "agent stopped heart-beating" diagnostics.
+    href: "/deployments",
   },
 };
 

@@ -160,10 +160,13 @@ function compassStarPath(
 
 // Bezier control point for an edge from `from` to `to`. The control
 // point is the midpoint offset perpendicular to the line by a bend
-// amount that scales with distance, biased toward the canvas center
-// so lines curve "inward" through Polaris's gravity. For multi-edges
-// between the same pair (rare in v1, common later), the second edge
-// could call this with `flipBias: true` so they don't overlap.
+// amount that scales with distance, biased AWAY from the canvas
+// center so lines arc around Polaris instead of passing through it.
+// (Polaris always sits at CENTER, so bending toward center routes
+// every dispatch line straight through the orchestrator's star.)
+// For multi-edges between the same pair (rare in v1, common later),
+// the second edge could call this with `flipBias: true` so they
+// don't overlap.
 function bezierControl(
   from: { x: number; y: number },
   to: { x: number; y: number },
@@ -183,9 +186,9 @@ function bezierControl(
     (c1.x - CENTER.x) ** 2 + (c1.y - CENTER.y) ** 2;
   const d2 =
     (c2.x - CENTER.x) ** 2 + (c2.y - CENTER.y) ** 2;
-  // Pick whichever bends toward the canvas center, unless flipped.
-  if (flipBias) return d1 < d2 ? c2 : c1;
-  return d1 < d2 ? c1 : c2;
+  // Pick whichever bends AWAY from canvas center, unless flipped.
+  if (flipBias) return d1 < d2 ? c1 : c2;
+  return d1 < d2 ? c2 : c1;
 }
 
 // ---- Component ---- //
