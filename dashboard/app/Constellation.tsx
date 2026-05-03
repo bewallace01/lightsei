@@ -158,39 +158,6 @@ function compassStarPath(
   ].join(" ");
 }
 
-// Bezier control point for an edge from `from` to `to`. The control
-// point is the midpoint offset perpendicular to the line by a bend
-// amount that scales with distance, biased AWAY from the canvas
-// center so lines arc around Polaris instead of passing through it.
-// (Polaris always sits at CENTER, so bending toward center routes
-// every dispatch line straight through the orchestrator's star.)
-// For multi-edges between the same pair (rare in v1, common later),
-// the second edge could call this with `flipBias: true` so they
-// don't overlap.
-function bezierControl(
-  from: { x: number; y: number },
-  to: { x: number; y: number },
-  flipBias = false,
-): { x: number; y: number } {
-  const mx = (from.x + to.x) / 2;
-  const my = (from.y + to.y) / 2;
-  const dx = to.x - from.x;
-  const dy = to.y - from.y;
-  const len = Math.hypot(dx, dy) || 1;
-  const px = -dy / len;
-  const py = dx / len;
-  const bend = Math.min(36, Math.max(10, len / 8));
-  const c1 = { x: mx + px * bend, y: my + py * bend };
-  const c2 = { x: mx - px * bend, y: my - py * bend };
-  const d1 =
-    (c1.x - CENTER.x) ** 2 + (c1.y - CENTER.y) ** 2;
-  const d2 =
-    (c2.x - CENTER.x) ** 2 + (c2.y - CENTER.y) ** 2;
-  // Pick whichever bends AWAY from canvas center, unless flipped.
-  if (flipBias) return d1 < d2 ? c1 : c2;
-  return d1 < d2 ? c2 : c1;
-}
-
 // ---- Component ---- //
 
 type AgentPlacement = {
@@ -418,18 +385,23 @@ export default function Constellation() {
             const from = placementByName.get(edge.from)?.pos;
             const to = placementByName.get(edge.to)?.pos;
             if (!from || !to) return null;
-            const cp = bezierControl(from, to);
-            // Stroke opacity: log scale, 1 dispatch = 0.30, 100 = 0.70.
+            // Straight lines look cleaner for hub-and-spoke than fighting
+            // bezier control points around the orchestrator. Multi-edges
+            // between the same pair will need bend later, but in v1 the
+            // chain is always a tree rooted at polaris so straight reads
+            // unambiguously.
             const opacity =
               0.3 +
               Math.min(0.4, Math.log10((edge.count_24h || 1) + 1) * 0.2);
             const width =
               Math.min(4, 1 + Math.log10((edge.count_24h || 1) + 1));
             return (
-              <path
+              <line
                 key={`${edge.from}-${edge.to}-${i}`}
-                d={`M${from.x},${from.y} Q${cp.x},${cp.y} ${to.x},${to.y}`}
-                fill="none"
+                x1={from.x}
+                y1={from.y}
+                x2={to.x}
+                y2={to.y}
                 stroke="rgb(199 210 254)"
                 strokeOpacity={opacity}
                 strokeWidth={width}
