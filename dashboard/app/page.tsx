@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { fetchRunSummaries, RunSummary, UnauthorizedError } from "./api";
 import Constellation from "./Constellation";
+import CostPanel from "./CostPanel";
 import Hero from "./Hero";
 
 function fmtTime(iso: string): string {
@@ -150,6 +151,13 @@ export default function Home() {
             </div>
           </div>
         </div>
+      </section>
+
+      {/* Phase 11B.4: cost panel. Light card under the shared sky,
+          bordered in the same indigo accent so it ties to the
+          constellation map without competing for visual focus. */}
+      <section className="mb-10">
+        <CostPanel />
       </section>
 
       <div className="flex items-baseline justify-between mb-8">

@@ -35,6 +35,7 @@ import {
   fetchConstellation,
   UnauthorizedError,
 } from "./api";
+import { hash32, sparklePath, tintForAgent } from "./stars";
 
 // ---- Layout constants. ---- //
 
@@ -63,41 +64,13 @@ const ANGLE_OFFSET_BY_ROLE: Record<ConstellationAgent["role"], number> = {
 
 // ---- Cool palette for non-orchestrator agents. ---- //
 
-// Tint is hash(name) % palette.length so each agent is recognizable
-// at a glance even when status colors collide. Pure white is reserved
-// for the sun, amber is reserved for Polaris's gradient — everything
-// else is the cool half of the color wheel at the lightest tier
-// (*-200) so each star reads as "white with a hint of color" the way
-// real stars look against a dark sky, rather than "saturated UI dot."
-// Spread across the wheel so adjacent palette indices still feel
-// distinct.
-const PALETTE = [
-  "#bfdbfe", // blue-200
-  "#a5f3fc", // cyan-200
-  "#99f6e4", // teal-200
-  "#a7f3d0", // emerald-200
-  "#ddd6fe", // violet-200
-  "#f5d0fe", // fuchsia-200
-  "#fecdd3", // rose-200
-  "#fbcfe8", // pink-200
-];
+// Hash → palette → tint and the sparkle path live in `./stars` so
+// the cost panel + future dispatch view + recent activity timeline
+// can render the same agent-colored sparkle next to a name without
+// duplicating the helper. Atlas is the same violet sparkle wherever
+// it appears.
 
-// ---- Hash + position helpers. ---- //
-
-// FNV-1a 32-bit. Stable across page loads, no crypto needed; the only
-// requirement is "two agents with different names get different angles."
-function hash32(s: string): number {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  return h >>> 0;
-}
-
-function tintForAgent(name: string): string {
-  return PALETTE[hash32(name) % PALETTE.length];
-}
+// ---- Position helper ---- //
 
 function positionFor(
   agent: ConstellationAgent,
@@ -143,36 +116,8 @@ function starSize(agent: ConstellationAgent): number {
   return Math.min(16, Math.max(7, base));
 }
 
-/**
- * 4-point sparkle path matching the Lightsei logo's geometry. `outer`
- * is the distance from center to the four cardinal points; `inner`
- * controls how spiky vs round the sparkle is — lower inner ratio =
- * more pointy. The logo uses ~0.19, which reads as proper celestial
- * sparkle; we use a slightly higher ratio (0.30) for the small agent
- * stars so they stay legible at 7–16px.
- */
-function sparklePath(
-  cx: number,
-  cy: number,
-  outer: number,
-  innerRatio: number,
-): string {
-  const inner = outer * innerRatio;
-  // Inner vertex offset from center along each diagonal. Use sqrt(2)/2
-  // so the inner points sit on a circle of radius `inner`.
-  const i = inner / Math.SQRT2;
-  return [
-    `M${cx},${cy - outer}`, // top
-    `L${cx + i},${cy - i}`, // inner top-right
-    `L${cx + outer},${cy}`, // right
-    `L${cx + i},${cy + i}`, // inner bottom-right
-    `L${cx},${cy + outer}`, // bottom
-    `L${cx - i},${cy + i}`, // inner bottom-left
-    `L${cx - outer},${cy}`, // left
-    `L${cx - i},${cy - i}`, // inner top-left
-    "Z",
-  ].join(" ");
-}
+// sparklePath is imported from ./stars so the cost panel, dispatch
+// view, and any future star-icon use the exact same geometry.
 
 /**
  * 8-point compass-rose star — 4 long cardinal rays (N/E/S/W) plus 4
