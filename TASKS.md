@@ -2,6 +2,9 @@
 
 Read MEMORY.md first if it's been a while. (Older Done Log entries call the project "Beacon" — that was the working code-name through Phase 4. Same product.)
 
+<!-- Phase 12.4 demo trigger: this comment busts polaris's hash cache so the next tick re-emits a plan against the configured provider. -->
+
+
 ## NOW
 
 > **Phase 12.1: provider + model on the Agent row + PATCH endpoint**
