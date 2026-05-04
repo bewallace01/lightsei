@@ -111,8 +111,26 @@ class PolicyCheckIn(BaseModel):
 class AgentPatchIn(BaseModel):
     daily_cost_cap_usd: Optional[float] = None  # null clears the cap
     system_prompt: Optional[str] = None  # null clears the prompt
+    # Phase 12.1: per-agent LLM provider + model pin. null clears.
+    # Provider validated against the small enum below at handler time.
+    provider: Optional[str] = None
+    model: Optional[str] = None
     # Distinguish "field not provided" from "explicitly null". Pydantic v2:
     # we'll detect via model_fields_set.
+
+
+# Providers Lightsei has (or plans to have, in 12.2/12.3) an SDK adapter for.
+# Validating at the API layer rather than a DB CHECK constraint so a future
+# adapter ships without a schema migration. Keeping the set tight on input
+# prevents typos like "antropic" from silently sticking.
+SUPPORTED_PROVIDERS: set[str] = {
+    "openai",
+    "anthropic",
+    "google",
+    "groq",
+    "xai",
+    "cohere",
+}
 
 
 class WorkspaceCreateIn(BaseModel):
@@ -704,6 +722,10 @@ def _serialize_agent(a: Agent) -> dict[str, Any]:
         "name": a.name,
         "daily_cost_cap_usd": a.daily_cost_cap_usd,
         "system_prompt": a.system_prompt,
+        # Phase 12.1: per-agent provider + model pin. null = use whatever
+        # the SDK's auto-patches reported on the latest llm_call_completed.
+        "provider": a.provider,
+        "model": a.model,
         "created_at": a.created_at.isoformat(),
         "updated_at": a.updated_at.isoformat(),
     }
@@ -754,6 +776,25 @@ def patch_agent(
             a.system_prompt = body.system_prompt
         else:
             a.system_prompt = None
+    if "provider" in fields:
+        if body.provider is None or not body.provider.strip():
+            a.provider = None
+        else:
+            normalized = body.provider.strip().lower()
+            if normalized not in SUPPORTED_PROVIDERS:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"unknown provider {body.provider!r}; expected one "
+                        f"of {sorted(SUPPORTED_PROVIDERS)}"
+                    ),
+                )
+            a.provider = normalized
+    if "model" in fields:
+        if body.model is None or not body.model.strip():
+            a.model = None
+        else:
+            a.model = body.model.strip()
     a.updated_at = now
     session.flush()
     return _serialize_agent(a)

@@ -47,3 +47,98 @@ def test_get_agent_404_when_unknown(client, alice):
     h = auth_headers(alice["session_token"])
     r = client.get("/agents/never-seen", headers=h)
     assert r.status_code == 404
+
+
+# ---------- Phase 12.1: provider + model on Agent ---------- #
+
+
+def test_patch_sets_provider_and_model(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.patch(
+        "/agents/atlas",
+        json={"provider": "anthropic", "model": "claude-haiku-4-5"},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["provider"] == "anthropic"
+    assert body["model"] == "claude-haiku-4-5"
+
+    # Round-trip via GET.
+    r = client.get("/agents/atlas", headers=h)
+    assert r.json()["provider"] == "anthropic"
+    assert r.json()["model"] == "claude-haiku-4-5"
+
+
+def test_patch_provider_unknown_value_returns_422(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.patch(
+        "/agents/atlas",
+        json={"provider": "antropic"},  # typo
+        headers=h,
+    )
+    assert r.status_code == 422
+    assert "unknown provider" in str(r.json()["detail"]).lower()
+
+
+def test_patch_provider_normalizes_case(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.patch(
+        "/agents/atlas",
+        json={"provider": "Anthropic"},
+        headers=h,
+    )
+    assert r.status_code == 200
+    assert r.json()["provider"] == "anthropic"
+
+
+def test_patch_provider_null_clears(client, alice):
+    h = auth_headers(alice["session_token"])
+    client.patch(
+        "/agents/atlas",
+        json={"provider": "openai", "model": "gpt-5"},
+        headers=h,
+    )
+    r = client.patch(
+        "/agents/atlas",
+        json={"provider": None, "model": None},
+        headers=h,
+    )
+    assert r.status_code == 200
+    assert r.json()["provider"] is None
+    assert r.json()["model"] is None
+
+
+def test_patch_provider_only_does_not_clear_model(client, alice):
+    """Regression like test_patch_cap_only_does_not_clear_prompt: partial
+    PATCH on provider+model fields must respect model_fields_set so a
+    provider swap doesn't silently null the pinned model."""
+    h = auth_headers(alice["session_token"])
+    client.patch(
+        "/agents/atlas",
+        json={"provider": "anthropic", "model": "claude-haiku-4-5"},
+        headers=h,
+    )
+    r = client.patch(
+        "/agents/atlas",
+        json={"provider": "google"},
+        headers=h,
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["provider"] == "google"
+    assert body["model"] == "claude-haiku-4-5"  # preserved
+
+
+def test_list_agents_serializes_provider_and_model(client, alice):
+    h = auth_headers(alice["session_token"])
+    client.patch(
+        "/agents/atlas",
+        json={"provider": "google", "model": "gemini-1.5-flash"},
+        headers=h,
+    )
+    r = client.get("/agents", headers=h)
+    assert r.status_code == 200
+    atlas = next(a for a in r.json()["agents"] if a["name"] == "atlas")
+    assert atlas["provider"] == "google"
+    assert atlas["model"] == "gemini-1.5-flash"

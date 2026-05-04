@@ -4,7 +4,30 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 12: multi-provider model selector** (or pick from Parking Lot — Phase 11 + 11B fully shipped)
+> **Phase 12.1: provider + model on the Agent row + PATCH endpoint**
+
+Phase 12 is multi-provider: per-agent `provider` + `model` config in the DB and the SDK so swapping a bot from Claude Haiku to Gemini Flash is one DB write, no code change. The cost panel from Phase 11B already has the per-model summary row that becomes the centerpiece of the Phase 12 demo. Shipping in three slices so each one is reviewable in isolation:
+
+### 12.1 Provider + model on Agent + PATCH endpoint
+
+- New columns on `agents`: `provider` (nullable string), `model` (nullable string). Nullable so existing rows don't need backfill — when null, the recorded model still falls back to whatever the SDK reports on the latest `llm_call_completed` event (current Phase 11B.3 behavior).
+- Alembic migration 0021. Both columns added with `server_default = NULL`.
+- Serialize `provider` + `model` in every Agent serializer (`/workspaces/me/constellation`, `/workspaces/me/agents`, agent-detail endpoints).
+- New `PATCH /workspaces/me/agents/{name}` endpoint — accepts partial body with `provider` and/or `model`, validates provider is in the small enum (`openai`, `anthropic`, `google`, `groq`, `xai`, `cohere`), updates the row, returns serialized agent.
+- Tests: PATCH with provider + model persists; PATCH with unknown provider 422s; PATCH on missing agent 404s; cross-workspace PATCH 404s.
+
+### 12.2 SDK Gemini adapter
+
+- `sdk/lightsei/integrations/gemini_patch.py` — patches `google.generativeai.GenerativeModel.generate_content` (and async variant). Same shape as the Anthropic + OpenAI patches: capture model id, input/output tokens, content, surface `provider="google"` on the emitted `llm_call_completed` event.
+- Wire into `_auto_patch()` in `sdk/lightsei/__init__.py` next to the existing two patches; transparent fallback when `google.generativeai` isn't installed (don't fail import).
+- Pricing entries for `gemini-1.5-flash`, `gemini-1.5-pro`, `gemini-2.0-flash-exp` (or whatever ships current at release time) in `backend/pricing.py`.
+- Tests: `test_gemini_patch.py` mirroring the existing `test_anthropic_patch.py` shape.
+
+### 12.3 Dashboard model selector
+
+- Per-agent model config UI on `/agents/[name]` (already exists as a route — it's the constellation click target). Simple form: provider dropdown + model text input, calls the PATCH endpoint from 12.1.
+- The cost panel's per-model row from Phase 11B is what the demo points at: swap atlas's model, push another chain, watch the new model's row light up.
+- Demo script: provision a Gemini API key as a workspace secret, set atlas's provider+model to `(google, gemini-1.5-flash)`, push a backend trigger, observe the chain land with the new model in the cost panel and `atlas.tests_run` event payload's `model` field.
 
 Phases 1-4 shipped 2026-04-25 (spine, cost-cap guardrail, Anthropic + streaming, hosted-readiness). Phase 5 shipped 2026-04-26 (PaaS-for-agents). Phase 6 shipped 2026-04-27 (Polaris orchestrator). Phase 7 shipped 2026-04-28 (output validation, advisory). Phase 8 shipped 2026-04-28 (blocking validators). Phase 9 shipped 2026-04-30 (notifications). Phase 10 shipped 2026-05-01 (GitHub integration: push-to-deploy + Polaris reads docs from the repo). Phase 11 starts the dispatch story: Polaris commands a team of executor agents instead of just emitting plans you read. Phase 11B turns the home page into a real command center while we're at it. Phase 12 is multi-provider so the team can pick the right model per task.
 

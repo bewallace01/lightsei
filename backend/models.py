@@ -198,6 +198,15 @@ class Agent(Base):
     max_dispatch_per_day: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="100"
     )
+    # Phase 12.1: per-agent LLM provider + model pin. Nullable; when null,
+    # the constellation map + cost panel fall back to whatever the latest
+    # `llm_call_completed` event reported. When set, a future scheduling
+    # layer routes the agent's calls to the chosen provider deliberately.
+    # `provider` is validated at the API layer against a small enum
+    # {openai, anthropic, google, groq, xai, cohere}; not enforced at the
+    # DB so a new adapter doesn't need a migration.
+    provider: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    model: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
