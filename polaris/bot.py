@@ -70,6 +70,7 @@ import lightsei
 
 POLL_S = float(os.environ.get("POLARIS_POLL_S", "3600"))
 MODEL = os.environ.get("POLARIS_MODEL", "claude-opus-4-7")
+GEMINI_MODEL = os.environ.get("POLARIS_GEMINI_MODEL", "gemini-1.5-flash")
 DOCS_DIR = Path(os.environ.get("POLARIS_DOCS_DIR", "."))
 DRY_RUN = os.environ.get("POLARIS_DRY_RUN") == "1"
 SYSTEM_PROMPT_PATH = Path(__file__).parent / "system_prompt.md"
@@ -511,20 +512,37 @@ def _call_llm(system_prompt: str, docs: dict) -> dict:
         # swap waits for the next successful fetch.
         print(f"polaris: get_agent_config failed: {e}", flush=True)
 
-    provider = (pin.get("provider") or "anthropic").lower()
-    model = pin.get("model") or MODEL
+    raw_provider = pin.get("provider")
+    raw_model = pin.get("model")
+    provider = raw_provider.strip().lower() if isinstance(raw_provider, str) else ""
+    model = raw_model.strip() if isinstance(raw_model, str) and raw_model.strip() else None
+
+    if provider == "google":
+        model = model or GEMINI_MODEL
+    elif provider == "anthropic" or not provider:
+        if not provider and model:
+            print(
+                "polaris: ignoring model-only pin because provider is unset; "
+                "falling back to anthropic default",
+                flush=True,
+            )
+        provider = "anthropic"
+        model = model or MODEL
+    else:
+        print(
+            f"polaris: provider {provider!r} is not routable from this bot; "
+            "falling back to anthropic default",
+            flush=True,
+        )
+        provider = "anthropic"
+        model = MODEL
+
     print(f"polaris: routing tick to {provider}/{model}", flush=True)
     if provider == "google":
         return _call_gemini(system_prompt, docs, model)
     if provider == "anthropic":
         return _call_anthropic(system_prompt, docs, model)
-    # Unknown provider — surface explicitly rather than silently
-    # falling back to Claude. Future adapters add a branch here.
-    raise RuntimeError(
-        f"polaris: provider {provider!r} not yet routable from this "
-        "bot; supported: anthropic, google. Set agent.provider via "
-        "the dashboard or clear it to fall back to anthropic."
-    )
+    raise RuntimeError(f"unreachable provider route: {provider!r}")
 
 
 @lightsei.track
