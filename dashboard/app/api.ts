@@ -421,10 +421,32 @@ export type AgentManifest = {
   last_seen_at: string | null;
 };
 
+export type AgentProvider =
+  | "openai"
+  | "anthropic"
+  | "google"
+  | "groq"
+  | "xai"
+  | "cohere";
+
+// Mirror of backend's SUPPORTED_PROVIDERS — keep in sync.
+export const AGENT_PROVIDERS: AgentProvider[] = [
+  "openai",
+  "anthropic",
+  "google",
+  "groq",
+  "xai",
+  "cohere",
+];
+
 export type Agent = {
   name: string;
   daily_cost_cap_usd: number | null;
   system_prompt: string | null;
+  // Phase 12.1: per-agent provider + model pin. null = inherit from
+  // whatever the SDK reports on the latest llm_call_completed.
+  provider: AgentProvider | null;
+  model: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -437,7 +459,12 @@ export async function fetchAgent(name: string): Promise<Agent> {
 
 export async function patchAgent(
   name: string,
-  patch: Partial<{ daily_cost_cap_usd: number | null; system_prompt: string | null }>,
+  patch: Partial<{
+    daily_cost_cap_usd: number | null;
+    system_prompt: string | null;
+    provider: AgentProvider | null;
+    model: string | null;
+  }>,
 ): Promise<Agent> {
   return (await authedJson(`/agents/${encodeURIComponent(name)}`, {
     method: "PATCH",

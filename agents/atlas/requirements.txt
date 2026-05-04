@@ -1,2 +1,2 @@
-lightsei>=0.1.1
+lightsei>=0.1.2
 pytest>=8.0

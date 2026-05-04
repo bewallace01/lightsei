@@ -4,9 +4,11 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
+  AGENT_PROVIDERS,
   Agent,
   AgentInstance,
   AgentManifest,
+  AgentProvider,
   cancelCommand,
   Command,
   Deployment,
@@ -428,6 +430,12 @@ export default function AgentPage({ params }: { params: { name: string } }) {
         </div>
       </section>
 
+      <ModelSelector
+        agent={agent}
+        onSaved={(updated) => setAgent(updated)}
+        onError={(msg) => setError(msg)}
+      />
+
       <section className="mb-10">
         <h2 className="text-[11px] font-semibold text-gray-500 mb-4 uppercase tracking-wider">
           Send command
@@ -624,5 +632,119 @@ function CommandTable({
         </tbody>
       </table>
     </div>
+  );
+}
+
+// ---------- Phase 12.3: provider + model picker ---------- //
+
+function ModelSelector({
+  agent,
+  onSaved,
+  onError,
+}: {
+  agent: Agent | null;
+  onSaved: (updated: Agent) => void;
+  onError: (msg: string) => void;
+}) {
+  const [provider, setProvider] = useState<AgentProvider | "">("");
+  const [model, setModel] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+
+  // Mirror server state into the form whenever the agent prop changes,
+  // so an external refresh (heartbeat poll) doesn't fight typed input.
+  useEffect(() => {
+    setProvider(agent?.provider ?? "");
+    setModel(agent?.model ?? "");
+  }, [agent?.provider, agent?.model]);
+
+  if (!agent) return null;
+
+  const dirty =
+    (provider || null) !== (agent.provider ?? null) ||
+    (model.trim() || null) !== (agent.model ?? null);
+
+  const onSave = async () => {
+    setSaving(true);
+    try {
+      const updated = await patchAgent(agent.name, {
+        provider: provider ? (provider as AgentProvider) : null,
+        model: model.trim() ? model.trim() : null,
+      });
+      onSaved(updated);
+      setSavedAt(Date.now());
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="mb-10">
+      <h2 className="text-[11px] font-semibold text-gray-500 mb-4 uppercase tracking-wider">
+        Model
+      </h2>
+      <p className="text-xs text-gray-500 mb-3">
+        Pin this agent&apos;s LLM provider + model id. Leave both blank to
+        let the SDK auto-record whichever model the bot calls. Provider
+        is validated server-side; model id is free-form (it&apos;s just a
+        string the SDK + cost panel match against).
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <label className="block">
+          <span className="text-xs font-medium text-gray-600">Provider</span>
+          <select
+            value={provider}
+            onChange={(e) => setProvider(e.target.value as AgentProvider | "")}
+            className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 focus:outline-none"
+          >
+            <option value="">— inherit —</option>
+            {AGENT_PROVIDERS.map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="block sm:col-span-2">
+          <span className="text-xs font-medium text-gray-600">Model id</span>
+          <input
+            type="text"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            placeholder="e.g. gemini-1.5-flash, claude-haiku-4-5, gpt-4o-mini"
+            className="mt-1 block w-full rounded-md border border-gray-300 px-3 py-1.5 text-sm font-mono focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 focus:outline-none"
+          />
+        </label>
+      </div>
+      <div className="flex items-center gap-3 mt-3">
+        <button
+          type="button"
+          disabled={saving || !dirty}
+          onClick={onSave}
+          className="px-4 py-2 bg-accent-600 hover:bg-accent-700 text-white rounded-md text-sm font-medium disabled:opacity-50 transition-colors"
+        >
+          {saving ? "saving…" : "save"}
+        </button>
+        {savedAt && Date.now() - savedAt < 4000 && (
+          <span className="text-xs text-green-700">saved.</span>
+        )}
+        {agent.provider && agent.model ? (
+          <span className="text-xs text-gray-400">
+            currently pinned to <span className="font-mono">{agent.provider}</span> ·{" "}
+            <span className="font-mono">{agent.model}</span>
+          </span>
+        ) : agent.provider || agent.model ? (
+          <span className="text-xs text-amber-600">
+            partial pin — set both fields or clear both
+          </span>
+        ) : (
+          <span className="text-xs text-gray-400">
+            no pin set; using whatever the SDK reports
+          </span>
+        )}
+      </div>
+    </section>
   );
 }
