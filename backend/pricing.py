@@ -26,6 +26,7 @@ PROVIDER_BY_PREFIX: list[tuple[str, str]] = [
     ("o1", "openai"),
     ("o3", "openai"),
     ("claude-", "anthropic"),
+    ("gemini-", "google"),
 ]
 
 
@@ -57,6 +58,15 @@ PRICING: dict[str, tuple[float, float]] = {
     "claude-sonnet-4-6": (3.00, 15.00),
     "claude-haiku-4-5": (0.80, 4.00),
     "claude-haiku-4-5-20251001": (0.80, 4.00),
+    # Google Gemini (https://ai.google.dev/pricing). Verify against the
+    # vendor page before relying for tight caps; Google publishes per-
+    # 1M-tokens with separate rates above 128k context — we model the
+    # short-context tier here, which covers Polaris/Atlas-style calls.
+    "gemini-1.5-flash": (0.075, 0.30),
+    "gemini-1.5-flash-8b": (0.0375, 0.15),
+    "gemini-1.5-pro": (1.25, 5.00),
+    "gemini-2.0-flash-exp": (0.075, 0.30),
+    "gemini-2.0-flash": (0.10, 0.40),
 }
 
 

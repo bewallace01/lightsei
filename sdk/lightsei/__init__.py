@@ -118,6 +118,11 @@ def _auto_patch() -> None:
         patch_anthropic()
     except Exception as e:
         _log.warning("lightsei anthropic auto-patch failed: %s", e)
+    try:
+        from .integrations.gemini_patch import patch_gemini
+        patch_gemini()
+    except Exception as e:
+        _log.warning("lightsei gemini auto-patch failed: %s", e)
 
 
 def emit(
