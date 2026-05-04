@@ -7,30 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 12.1: provider + model on the Agent row + PATCH endpoint**
-
-Phase 12 is multi-provider: per-agent `provider` + `model` config in the DB and the SDK so swapping a bot from Claude Haiku to Gemini Flash is one DB write, no code change. The cost panel from Phase 11B already has the per-model summary row that becomes the centerpiece of the Phase 12 demo. Shipping in three slices so each one is reviewable in isolation:
-
-### 12.1 Provider + model on Agent + PATCH endpoint
-
-- New columns on `agents`: `provider` (nullable string), `model` (nullable string). Nullable so existing rows don't need backfill — when null, the recorded model still falls back to whatever the SDK reports on the latest `llm_call_completed` event (current Phase 11B.3 behavior).
-- Alembic migration 0021. Both columns added with `server_default = NULL`.
-- Serialize `provider` + `model` in every Agent serializer (`/workspaces/me/constellation`, `/workspaces/me/agents`, agent-detail endpoints).
-- New `PATCH /workspaces/me/agents/{name}` endpoint — accepts partial body with `provider` and/or `model`, validates provider is in the small enum (`openai`, `anthropic`, `google`, `groq`, `xai`, `cohere`), updates the row, returns serialized agent.
-- Tests: PATCH with provider + model persists; PATCH with unknown provider 422s; PATCH on missing agent 404s; cross-workspace PATCH 404s.
-
-### 12.2 SDK Gemini adapter
-
-- `sdk/lightsei/integrations/gemini_patch.py` — patches `google.generativeai.GenerativeModel.generate_content` (and async variant). Same shape as the Anthropic + OpenAI patches: capture model id, input/output tokens, content, surface `provider="google"` on the emitted `llm_call_completed` event.
-- Wire into `_auto_patch()` in `sdk/lightsei/__init__.py` next to the existing two patches; transparent fallback when `google.generativeai` isn't installed (don't fail import).
-- Pricing entries for `gemini-1.5-flash`, `gemini-1.5-pro`, `gemini-2.0-flash-exp` (or whatever ships current at release time) in `backend/pricing.py`.
-- Tests: `test_gemini_patch.py` mirroring the existing `test_anthropic_patch.py` shape.
-
-### 12.3 Dashboard model selector
-
-- Per-agent model config UI on `/agents/[name]` (already exists as a route — it's the constellation click target). Simple form: provider dropdown + model text input, calls the PATCH endpoint from 12.1.
-- The cost panel's per-model row from Phase 11B is what the demo points at: swap atlas's model, push another chain, watch the new model's row light up.
-- Demo script: provision a Gemini API key as a workspace secret, set atlas's provider+model to `(google, gemini-1.5-flash)`, push a backend trigger, observe the chain land with the new model in the cost panel and `atlas.tests_run` event payload's `model` field.
+> **Pick: Phase 13 (more agents) or a Parking-Lot promotion. Phase 12 plumbing fully shipped.**
 
 Phases 1-4 shipped 2026-04-25 (spine, cost-cap guardrail, Anthropic + streaming, hosted-readiness). Phase 5 shipped 2026-04-26 (PaaS-for-agents). Phase 6 shipped 2026-04-27 (Polaris orchestrator). Phase 7 shipped 2026-04-28 (output validation, advisory). Phase 8 shipped 2026-04-28 (blocking validators). Phase 9 shipped 2026-04-30 (notifications). Phase 10 shipped 2026-05-01 (GitHub integration: push-to-deploy + Polaris reads docs from the repo). Phase 11 starts the dispatch story: Polaris commands a team of executor agents instead of just emitting plans you read. Phase 11B turns the home page into a real command center while we're at it. Phase 12 is multi-provider so the team can pick the right model per task.
 
@@ -467,6 +444,31 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-04 — Phase 12: multi-provider model selector
+
+Per-agent `provider` + `model` pin in the DB, an SDK Gemini auto-patch, a dashboard form to swap models, and a polaris routing layer that reads the pin at tick time. Swapping a bot's LLM is now one DB write — no code, no redeploy.
+
+Shipped in four slices:
+
+- [x] **12.1 — Agent row.** Migration `0021` added nullable `provider` + `model` columns on `agents`. PATCH `/agents/{name}` accepts both fields, validates provider against `{openai, anthropic, google, groq, xai, cohere}` with a friendly 422, normalizes to lowercase, respects `model_fields_set` so partial updates don't clear unrelated fields. Six new tests.
+- [x] **12.2 — SDK Gemini adapter.** `sdk/lightsei/integrations/gemini_patch.py` patches `google.generativeai.GenerativeModel.generate_content` (sync + async) and emits the same `llm_call_started/completed/failed` events as the OpenAI + Anthropic patches. Idempotent class marker; soft-import fallback when `google-generativeai` isn't installed. Pricing entries added for `gemini-1.5-flash`, `1.5-flash-8b`, `1.5-pro`, `2.0-flash-exp`, `2.0-flash`, `2.0-flash-lite`, `2.5-flash`, `2.5-pro`. Wired into `_auto_patch()`. Seven new SDK tests using a stubbed `google.generativeai`.
+- [x] **12.3 — Dashboard selector.** New "Model" section on `/agents/[name]` between System Prompt and Send Command. Provider dropdown + free-form model id input; partial fill warns; saved state shows "currently pinned to ..." or "no pin set." Calls the PATCH from 12.1. `AGENT_PROVIDERS` constant + `AgentProvider` type in `api.ts` mirror the backend enum.
+- [x] **12.4 — Polaris routes by pin.** New `lightsei.get_agent_config(name)` SDK helper (returns `{provider, model}`). Polaris's `_call_llm` reads its own pin at tick time and dispatches to `_call_anthropic` (existing tool_use path) or `_call_gemini` (new `response_schema` path). `_strip_schema_for_gemini` walks the `submit_plan` schema and drops the fields Gemini's structured-output mode rejects (`additionalProperties`, `strict`, the `anyOf` nullable trick). Unknown provider raises with a helpful message rather than silently falling back. Eight new tests.
+
+**Released SDK 0.1.3 to PyPI.** Two release dances during this phase: 0.1.2 cut after 12.2, 0.1.3 cut after 12.4 once `get_agent_config` was on the public surface. Both bot bundles' `requirements.txt` bumped to `>=0.1.3`.
+
+**Demo result:** routing proven end-to-end on prod against `app.lightsei.com`. Polaris ticks logged `polaris: routing tick to google/gemini-2.0-flash` and `.../gemini-2.0-flash-lite` after the dashboard pin saved; the call reached Google's API; the response cleared the model+pricing layer correctly. Sustained Gemini calls require a paid Google Cloud project — Polaris's prompt is ~75k tokens (whole MEMORY.md + TASKS.md), and the free-tier `GenerateContentInputTokensPerModelPerMinute` quota tripped after a single tick + the SDK's internal retries. Pin flipped back to anthropic post-demo so the hourly tick keeps producing plans on the existing budget.
+
+**Operational story (the fixes that surfaced):**
+
+- [x] **PyPI 0.1.0 was pre-Phase-11.** The published wheel didn't have `send_command` at all (it landed in unpublished source for 11.1 + 11.5). Polaris's `@on_command` handler crashed with `AttributeError`. Fix: build + publish 0.1.1, bump bot requirements.
+- [x] **Atlas's `source_agent="atlas"` was a latent prod-only crash.** SDK's `send_command` didn't accept the kwarg, and atlas's tests masked it via MagicMock. Found while wiring polaris's same call site; fixed in 0.1.1 by adding the parameter to the public surface + `_impl_send_command`.
+- [x] **SDK auto-poller raced atlas/hermes tick().** The SDK auto-registers a default `ping` handler at module import which makes `has_handlers()` True and starts the auto-poller. Both bots use explicit `claim_command`/`tick()` and don't want the poller — it would race their loop and complete unrecognized command kinds (`atlas.run_tests`, `hermes.post`) as failed before tick() got a turn. Fix: clear `lightsei._commands._handlers` before `init()` in atlas + hermes.
+- [x] **0.1.2 cut before 12.4 landed.** Same release-cadence trap as 0.1.0: I bumped + published 0.1.2 immediately after 12.2/12.3, then shipped 12.4's `get_agent_config` to source-only. Polaris's worker venv pulled 0.1.2 from PyPI, hit `AttributeError: module 'lightsei' has no attribute 'get_agent_config'`, my generic `except Exception` caught it, and routing fell back to anthropic every tick — looked exactly like the pin wasn't being read. Fix: bump to 0.1.3 with the helper, redeploy. Lesson logged: **never publish a wheel until the surface it needs is committed**, not the other way around.
+- [x] **Worker concurrency cap kept biting.** `MAX_CONCURRENT=4` and the worker doesn't auto-retire previous deploys of the same agent, so each `lightsei deploy ./polaris` queued and the running instance held a slot indefinitely. Manual workaround: identify polaris by `setup_validators.py` in its bundle dir, `kill <pid>`, watch the worker claim. Real fix is the parking-lot item "worker should retire stale bot instances on redeploy" — the demo would have been ~30 min faster with that done.
+- [x] **Gemini model name churn.** First attempt pinned `gemini-1.5-flash` per pricing entries — Google deprecated the 1.5 family on the v1beta API endpoint, error: `404 models/gemini-1.5-flash is not found for API version v1beta`. Switched to `gemini-2.0-flash` then `gemini-2.0-flash-lite`. Lesson: pricing.py's model list goes stale fast — pricing entries should age out and we should surface "deprecated" status in the dashboard's model selector (parking-lot).
+- [x] **Free-tier rate limits don't fit Polaris's prompt.** `gemini-2.0-flash` and `flash-lite` both ran out of `GenerateContentInputTokensPerModelPerMinute` after one or two ticks. Each tick is ~75k tokens, and the SDK's internal retries multiply requests on transient failures. Demo verified routing without sustained calls.
 
 ### 2026-05-03 — Phase 11.7: Phase 11 demo on prod
 
