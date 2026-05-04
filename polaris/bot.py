@@ -527,7 +527,7 @@ def _call_llm(system_prompt: str, docs: dict) -> dict:
                 flush=True,
             )
         provider = "anthropic"
-        model = model or MODEL
+        model = model if raw_provider else MODEL
     else:
         print(
             f"polaris: provider {provider!r} is not routable from this bot; "
