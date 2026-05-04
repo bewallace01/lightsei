@@ -168,6 +168,46 @@ def get_secret(name: str, *, ttl_s: Optional[float] = None) -> str:
     return _impl_get_secret(_client, name, ttl_s=ttl_s)
 
 
+def get_agent_config(name: str) -> dict[str, Any]:
+    """Fetch an agent's pinned `provider` + `model` from the dashboard.
+
+    Returns the dict shape `{"provider": str | None, "model": str | None}`
+    — both null when the agent has no pin set, in which case the caller
+    should fall back to whatever default it would use without Lightsei
+    routing. Bots that branch on provider call this once per tick (cheap
+    GET, no caching today) so a dashboard model swap takes effect on the
+    very next tick.
+
+    Raises `LightseiError` on transport failure. A 404 (agent not in this
+    workspace) returns `{provider: None, model: None}` rather than raise,
+    since "no pin" is the right semantics for an unknown agent.
+    """
+    from .errors import LightseiError
+
+    if _client._http is None:
+        raise LightseiError(
+            "get_agent_config called before lightsei.init() — "
+            "no HTTP client available"
+        )
+    try:
+        r = _client._http.get(
+            f"/agents/{name}", timeout=_client.timeout,
+        )
+    except Exception as e:
+        raise LightseiError(f"get_agent_config transport error: {e}") from e
+    if r.status_code == 404:
+        return {"provider": None, "model": None}
+    if r.status_code >= 400:
+        raise LightseiError(
+            f"get_agent_config failed: {r.status_code} {r.text[:200]}"
+        )
+    body = r.json() or {}
+    return {
+        "provider": body.get("provider"),
+        "model": body.get("model"),
+    }
+
+
 def send_command(
     target_agent: str,
     kind: str,

@@ -353,7 +353,49 @@ SUBMIT_PLAN_TOOL = {
 }
 
 
-def _call_claude(system_prompt: str, docs: dict) -> dict:
+def _build_user_msg(docs: dict) -> str:
+    """Wrap each doc in an XML tag named after its filename. The default
+    case (MEMORY.md + TASKS.md) lands the same prompt shape as before;
+    custom POLARIS_GITHUB_DOCS_PATHS just adds more tags.
+    """
+    return "\n\n".join(
+        f"<{filename}>\n{text}\n</{filename}>"
+        for filename, text in docs["docs"].items()
+    )
+
+
+def _strip_schema_for_gemini(schema: dict) -> dict:
+    """Gemini's response_schema is JSONSchema-ish but doesn't accept all
+    fields Anthropic's tool_use input_schema uses (`additionalProperties`,
+    `strict`, `anyOf` of object+null, etc.). Walk the schema and drop the
+    ones Gemini rejects so the same SUBMIT_PLAN_TOOL spec drives both
+    providers.
+    """
+    if isinstance(schema, list):
+        return [_strip_schema_for_gemini(s) for s in schema]
+    if not isinstance(schema, dict):
+        return schema
+    out: dict = {}
+    for k, v in schema.items():
+        if k in ("additionalProperties", "strict"):
+            continue
+        if k == "anyOf":
+            # `{"anyOf": [{"type": "string"}, {"type": "null"}]}` is how
+            # Anthropic's strict tool_use spells "nullable string". Gemini
+            # doesn't accept that shape; drop the null branch and keep the
+            # primary type. blocked_by becomes effectively required-string,
+            # which is acceptable for the demo.
+            non_null = [b for b in v if b.get("type") != "null"]
+            if non_null:
+                first = _strip_schema_for_gemini(non_null[0])
+                if isinstance(first, dict):
+                    out.update(first)
+            continue
+        out[k] = _strip_schema_for_gemini(v)
+    return out
+
+
+def _call_anthropic(system_prompt: str, docs: dict, model: str) -> dict:
     """Calls Claude with a forced submit_plan tool call.
 
     `strict: true` + `tool_choice` to a specific tool guarantees the
@@ -362,13 +404,7 @@ def _call_claude(system_prompt: str, docs: dict) -> dict:
     """
     import anthropic
 
-    # Wrap each doc in an XML tag named after its filename. The default
-    # case (MEMORY.md + TASKS.md) lands the same prompt shape as before;
-    # custom POLARIS_GITHUB_DOCS_PATHS just adds more tags.
-    user_msg = "\n\n".join(
-        f"<{filename}>\n{text}\n</{filename}>"
-        for filename, text in docs["docs"].items()
-    )
+    user_msg = _build_user_msg(docs)
     client = anthropic.Anthropic()
     # Note: adaptive thinking is incompatible with `tool_choice` forcing a
     # specific tool (Opus 4.7 returns 400). For Polaris we want the
@@ -377,7 +413,7 @@ def _call_claude(system_prompt: str, docs: dict) -> dict:
     # `tool_choice: {"type": "any"}` (still forces a tool call, but allows
     # thinking) — works because `submit_plan` is the only tool defined.
     resp = client.messages.create(
-        model=MODEL,
+        model=model,
         max_tokens=4000,
         output_config={"effort": "high"},
         system=system_prompt,
@@ -406,6 +442,89 @@ def _call_claude(system_prompt: str, docs: dict) -> dict:
         "tokens_out": resp.usage.output_tokens,
         "stop_reason": resp.stop_reason,
     }
+
+
+def _call_gemini(system_prompt: str, docs: dict, model: str) -> dict:
+    """Calls Gemini with response_schema set to SUBMIT_PLAN_TOOL's input.
+
+    Gemini's structured-output mode (response_mime_type=application/json
+    + response_schema) is its closest equivalent to Anthropic's forced
+    tool_use. The body comes back as a JSON string in resp.text which
+    we parse — same shape as the Claude path so the caller doesn't need
+    to know which provider ran.
+    """
+    import google.generativeai as genai  # type: ignore
+
+    api_key = os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "GOOGLE_API_KEY not set; can't call Gemini "
+            "(provision it as a workspace secret)"
+        )
+    genai.configure(api_key=api_key)
+
+    user_msg = _build_user_msg(docs)
+    schema = _strip_schema_for_gemini(SUBMIT_PLAN_TOOL["input_schema"])
+    gen_model = genai.GenerativeModel(model, system_instruction=system_prompt)
+    resp = gen_model.generate_content(
+        user_msg,
+        generation_config={
+            "response_mime_type": "application/json",
+            "response_schema": schema,
+            "max_output_tokens": 4000,
+        },
+    )
+
+    try:
+        plan = json.loads(resp.text)
+    except (ValueError, AttributeError) as e:
+        raise RuntimeError(
+            f"gemini response was not parseable JSON: {e}"
+        ) from e
+
+    usage = getattr(resp, "usage_metadata", None)
+    return {
+        "input": plan,
+        "model": model,
+        "tokens_in": getattr(usage, "prompt_token_count", 0) if usage else 0,
+        "tokens_out": getattr(usage, "candidates_token_count", 0) if usage else 0,
+        "stop_reason": "stop",
+    }
+
+
+def _call_llm(system_prompt: str, docs: dict) -> dict:
+    """Route Polaris's plan call to the configured provider + model.
+
+    Reads the agent's pinned `(provider, model)` from the backend at
+    tick time so a dashboard model swap takes effect on the next tick
+    without a redeploy. Falls back to Anthropic + the env-default MODEL
+    when the agent has no pin.
+    """
+    pin: dict[str, Any] = {"provider": None, "model": None}
+    try:
+        pin = lightsei.get_agent_config(
+            os.environ.get("LIGHTSEI_AGENT_NAME", "polaris")
+        )
+    except Exception as e:
+        # Backend unreachable mid-tick. Fall back to the env-default
+        # provider/model rather than crash the loop — a dashboard model
+        # swap waits for the next successful fetch.
+        print(f"polaris: get_agent_config failed: {e}", flush=True)
+
+    provider = (pin.get("provider") or "anthropic").lower()
+    model = pin.get("model") or MODEL
+    print(f"polaris: routing tick to {provider}/{model}", flush=True)
+    if provider == "google":
+        return _call_gemini(system_prompt, docs, model)
+    if provider == "anthropic":
+        return _call_anthropic(system_prompt, docs, model)
+    # Unknown provider — surface explicitly rather than silently
+    # falling back to Claude. Future adapters add a branch here.
+    raise RuntimeError(
+        f"polaris: provider {provider!r} not yet routable from this "
+        "bot; supported: anthropic, google. Set agent.provider via "
+        "the dashboard or clear it to fall back to anthropic."
+    )
 
 
 @lightsei.track
@@ -448,7 +567,7 @@ def tick() -> None:
         return
 
     system_prompt = SYSTEM_PROMPT_PATH.read_text()
-    result = _call_claude(system_prompt, docs)
+    result = _call_llm(system_prompt, docs)
     plan = result["input"]
 
     payload = {
