@@ -7,7 +7,55 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Pick: Phase 13 (more agents) or a Parking-Lot promotion. Phase 12 plumbing fully shipped.**
+> **Phase 12B.1: backend `/workspaces/me/agents/generate` endpoint with curated system prompt**
+
+Phase 12B is "describe a bot, get a bot" — the user types what they want their agent to do in natural language, Lightsei generates a working `bot.py` + `requirements.txt` against the SDK and the workspace's existing constellation, then ships it through the existing deploy pipeline. Promoted ahead of Phase 13 (more agents) because the LLM generator partially obsoletes it — instead of hand-coding Argus / Vega / Sirius, users describe what they want and ship.
+
+Why this is the leverage move for the audience: today, "deploy a bot" requires both knowing Python and understanding the Lightsei SDK. The browser-deploy work from 2026-05-04 closed the second wall (no terminal needed) but the first wall — actually authoring `bot.py` — is still there. 12B closes it. After 12B, signing up + describing what you want + clicking deploy is a complete onboarding path for a non-engineer.
+
+### 12B.1 Backend generate endpoint
+
+- New `POST /workspaces/me/agents/generate` taking `{description, target_agents?, name_hint?}` and returning `{bot_py, requirements_txt, agent_name_suggestion, model_used, tokens_in, tokens_out}`. Calls Claude (Opus 4.7 by default; configurable per workspace later) with a curated system prompt.
+- The system prompt teaches the SDK surface: `@lightsei.on_command`, `lightsei.send_command(target, kind, payload, source_agent=...)`, `lightsei.emit`, `lightsei.get_secret`, the auto-instrumented OpenAI / Anthropic / Gemini patches (no manual instrumentation needed). One canonical "minimal bot" template + 2-3 worked examples (`hermes.post` style notifier; `atlas.run_tests` style executor; an LLM-calling planner).
+- Inject the user's existing constellation into the prompt so coordination Just Works: hit `/workspaces/me/agents` for the agent list, hit `/agents/{name}/manifest` for each agent's command kinds, render as a "the following agents already exist; dispatch to them rather than reinventing" block.
+- Cost guardrail: respect the workspace's existing daily cost cap (Phase 2.3 plumbing). Track generation calls via the same `add_run_cost_from_event` path as runtime LLM calls so they show up on the cost panel.
+- Tests: stubbed Anthropic client returns canned response; verify the prompt includes the workspace's agent list; verify the response shape; verify daily-cost-cap enforcement.
+
+### 12B.2 Dashboard generate page
+
+- New `/agents/generate` route (or section on `/agents/new` next to the drop-zone) with a textarea for the description, a small dropdown for "coordinate with these agents" (multi-select; defaults to all), and a generate button. Loading state while the backend calls Claude.
+- Output: a code preview (textarea is fine for v1; Monaco can come later) showing the generated `bot.py` + `requirements.txt`. User can edit inline before deploying.
+- Deploy button: uses the existing `uploadDeploymentBundle` path — zip the generated files in-browser via JSZip (small dep, ~50KB; this is the natural place to add it since we'll need it for the parking-lot in-browser zipping anyway), post the zip, route to `/deployments/{id}` on success.
+
+### 12B.3 Iteration loop
+
+- "Regenerate with these tweaks" textarea below the preview. Sends Claude a follow-up turn with the prior generation + the tweak request. Replaces the preview with the new version.
+- Backend extends the endpoint to take `{previous_bot_py, previous_requirements_txt, tweak_request}` instead of (or alongside) `description`.
+- Cap the iteration depth at e.g. 5 turns per generation session — past that, ask the user to restart.
+
+### 12B.4 Validation gate before showing the user
+
+- Pyflakes / py_compile pass on the generated `bot.py` before returning. If it fails, retry the LLM call once with the error appended to the prompt; if it still fails, surface the error to the user with a "regenerate" button rather than ship broken code into their deploy pipeline.
+- requirements.txt sanity check: every import in bot.py either resolves to stdlib, `lightsei`, or appears in requirements.txt. Catches the common "the LLM imported `requests` but didn't add it" failure.
+
+### 12B.5 Demo
+
+- Sign up a fresh workspace (or use the existing one with a name like "demo-12B").
+- On `/agents/generate`, type a prompt like "Write me a bot that polls a public RSS feed once an hour and posts new items to Slack via Hermes." Hit generate.
+- Verify the generated bot.py uses `lightsei.send_command("hermes", "hermes.post", ...)` (because the prompt told Claude that hermes already exists).
+- Edit one line ("change the poll interval to 30 minutes"). Click deploy. Watch it go to `/deployments/{id}`, see the build, see the bot run.
+- Push to GitHub: registering the generated agent path on `/github` and using push-to-deploy still works because the deployment machinery is unchanged.
+
+## Phase 13: more agents (deferred)
+
+Originally next, now deferred behind 12B since most of these can be generated rather than hand-written once 12B ships. Keeping the names + roles around because the constellation still wants seeded teammates for the home page to feel populated:
+
+- Argus (security + secret scanner)
+- Vega (PR reviewer)
+- Sirius (alert triager + on-call)
+- Cassiopeia (incident scribe)
+
+Each will be a 12B-generated bot we curate + harden rather than a hand-written one.
 
 Phases 1-4 shipped 2026-04-25 (spine, cost-cap guardrail, Anthropic + streaming, hosted-readiness). Phase 5 shipped 2026-04-26 (PaaS-for-agents). Phase 6 shipped 2026-04-27 (Polaris orchestrator). Phase 7 shipped 2026-04-28 (output validation, advisory). Phase 8 shipped 2026-04-28 (blocking validators). Phase 9 shipped 2026-04-30 (notifications). Phase 10 shipped 2026-05-01 (GitHub integration: push-to-deploy + Polaris reads docs from the repo). Phase 11 starts the dispatch story: Polaris commands a team of executor agents instead of just emitting plans you read. Phase 11B turns the home page into a real command center while we're at it. Phase 12 is multi-provider so the team can pick the right model per task.
 
