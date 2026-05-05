@@ -142,3 +142,63 @@ def test_list_agents_serializes_provider_and_model(client, alice):
     atlas = next(a for a in r.json()["agents"] if a["name"] == "atlas")
     assert atlas["provider"] == "google"
     assert atlas["model"] == "gemini-1.5-flash"
+
+
+# ---------- Per-agent tick interval ---------- #
+
+
+def test_patch_sets_tick_interval(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.patch(
+        "/agents/polaris",
+        json={"tick_interval_s": 300},
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["tick_interval_s"] == 300
+    # Round-trip via GET.
+    assert client.get("/agents/polaris", headers=h).json()["tick_interval_s"] == 300
+
+
+def test_patch_tick_interval_null_clears(client, alice):
+    h = auth_headers(alice["session_token"])
+    client.patch("/agents/polaris", json={"tick_interval_s": 600}, headers=h)
+    r = client.patch(
+        "/agents/polaris", json={"tick_interval_s": None}, headers=h,
+    )
+    assert r.status_code == 200
+    assert r.json()["tick_interval_s"] is None
+
+
+def test_patch_tick_interval_too_small_returns_422(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.patch(
+        "/agents/polaris", json={"tick_interval_s": 5}, headers=h,
+    )
+    assert r.status_code == 422
+    assert "60" in r.json()["detail"]  # min bound
+
+
+def test_patch_tick_interval_too_large_returns_422(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.patch(
+        "/agents/polaris", json={"tick_interval_s": 999999}, headers=h,
+    )
+    assert r.status_code == 422
+    assert "86400" in r.json()["detail"]  # max bound
+
+
+def test_patch_tick_interval_does_not_clear_other_fields(client, alice):
+    h = auth_headers(alice["session_token"])
+    client.patch(
+        "/agents/polaris",
+        json={"system_prompt": "be concise", "provider": "anthropic"},
+        headers=h,
+    )
+    r = client.patch(
+        "/agents/polaris", json={"tick_interval_s": 300}, headers=h,
+    )
+    body = r.json()
+    assert body["tick_interval_s"] == 300
+    assert body["system_prompt"] == "be concise"
+    assert body["provider"] == "anthropic"

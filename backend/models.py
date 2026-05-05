@@ -207,6 +207,10 @@ class Agent(Base):
     # DB so a new adapter doesn't need a migration.
     provider: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     model: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    # Phase 12C-adjacent: cron-style bots (Polaris) read this at tick time
+    # to override their POLL_S env default. Null = use the bot's own env
+    # default. Reactive bots (atlas, hermes) ignore it.
+    tick_interval_s: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )

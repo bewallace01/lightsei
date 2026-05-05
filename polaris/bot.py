@@ -798,7 +798,22 @@ def main() -> None:
         except Exception:
             print(f"tick crashed:\n{traceback.format_exc()}", flush=True)
         lightsei.flush(timeout=2.0)
-        time.sleep(POLL_S)
+        # Per-agent override: the dashboard's "Schedule" form on
+        # /agents/polaris writes tick_interval_s onto the agent row,
+        # which we read fresh each cycle so a setting change takes
+        # effect on the very next sleep without a redeploy. Falls
+        # back to POLARIS_POLL_S env / 3600s default if unset.
+        sleep_s = POLL_S
+        try:
+            cfg = lightsei.get_agent_config(agent_name)
+            override = cfg.get("tick_interval_s")
+            if override is not None:
+                sleep_s = float(override)
+        except Exception as e:
+            # Don't let a bad fetch break the loop; just use the env
+            # default this cycle.
+            print(f"polaris: tick_interval fetch failed: {e}", flush=True)
+        time.sleep(sleep_s)
 
 
 if __name__ == "__main__":

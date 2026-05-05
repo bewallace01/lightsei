@@ -447,6 +447,9 @@ export type Agent = {
   // whatever the SDK reports on the latest llm_call_completed.
   provider: AgentProvider | null;
   model: string | null;
+  // Per-agent tick interval (seconds) for cron-style bots. null = bot
+  // uses its env default. Reactive bots ignore this value.
+  tick_interval_s: number | null;
   created_at: string;
   updated_at: string;
 };
@@ -464,6 +467,7 @@ export async function patchAgent(
     system_prompt: string | null;
     provider: AgentProvider | null;
     model: string | null;
+    tick_interval_s: number | null;
   }>,
 ): Promise<Agent> {
   return (await authedJson(`/agents/${encodeURIComponent(name)}`, {

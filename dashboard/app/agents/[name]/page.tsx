@@ -436,6 +436,12 @@ export default function AgentPage({ params }: { params: { name: string } }) {
         onError={(msg) => setError(msg)}
       />
 
+      <ScheduleSelector
+        agent={agent}
+        onSaved={(updated) => setAgent(updated)}
+        onError={(msg) => setError(msg)}
+      />
+
       <section className="mb-10">
         <h2 className="text-[11px] font-semibold text-gray-500 mb-4 uppercase tracking-wider">
           Send command
@@ -744,6 +750,142 @@ function ModelSelector({
             no pin set; using whatever the SDK reports
           </span>
         )}
+      </div>
+    </section>
+  );
+}
+
+// ---------- Schedule selector (per-agent tick interval) ---------- //
+
+const TICK_PRESETS: { seconds: number; label: string; hint: string }[] = [
+  { seconds: 60, label: "every 1 min", hint: "tight feedback for active dev; can burn budget fast on LLM-calling bots" },
+  { seconds: 300, label: "every 5 min", hint: "frequent; reasonable for low-cost agents (notifiers, watchers)" },
+  { seconds: 900, label: "every 15 min", hint: "balanced; the sweet spot for most schedule-driven LLM agents" },
+  { seconds: 3600, label: "every hour", hint: "default; recommended for production planners like Polaris" },
+  { seconds: 14400, label: "every 4 hours", hint: "low frequency; documentation maintainers, summarizers" },
+  { seconds: 86400, label: "daily", hint: "minimal cost; cron-style daily digests" },
+];
+
+function fmtInterval(s: number): string {
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.round(s / 60)}m`;
+  if (s < 86400) return `${(s / 3600).toFixed(s % 3600 === 0 ? 0 : 1)}h`;
+  return `${(s / 86400).toFixed(s % 86400 === 0 ? 0 : 1)}d`;
+}
+
+function ScheduleSelector({
+  agent,
+  onSaved,
+  onError,
+}: {
+  agent: Agent | null;
+  onSaved: (updated: Agent) => void;
+  onError: (msg: string) => void;
+}) {
+  const [custom, setCustom] = useState<string>("");
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+
+  useEffect(() => {
+    setCustom(agent?.tick_interval_s != null ? String(agent.tick_interval_s) : "");
+  }, [agent?.tick_interval_s]);
+
+  if (!agent) return null;
+
+  const current = agent.tick_interval_s;
+
+  const apply = async (next: number | null) => {
+    setSaving(true);
+    try {
+      const updated = await patchAgent(agent.name, { tick_interval_s: next });
+      onSaved(updated);
+      setSavedAt(Date.now());
+    } catch (e) {
+      onError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const onPreset = (s: number) => apply(s);
+  const onClear = () => apply(null);
+  const onApplyCustom = () => {
+    const n = parseInt(custom, 10);
+    if (Number.isNaN(n) || n < 60 || n > 86400) {
+      onError("custom interval must be between 60 and 86400 seconds");
+      return;
+    }
+    apply(n);
+  };
+
+  return (
+    <section className="mb-10">
+      <h2 className="text-[11px] font-semibold text-gray-500 mb-4 uppercase tracking-wider">
+        Schedule
+      </h2>
+      <p className="text-xs text-gray-500 mb-3">
+        How often this bot ticks. Cron-style bots (Polaris, future planners) read
+        this at the start of each sleep cycle, so a change here takes effect on
+        the very next tick — no redeploy. Reactive bots (Atlas, Hermes — they
+        claim commands instead of ticking) ignore the setting.
+      </p>
+      <div className="flex flex-wrap gap-2 mb-3">
+        {TICK_PRESETS.map((p) => (
+          <button
+            key={p.seconds}
+            type="button"
+            disabled={saving}
+            onClick={() => onPreset(p.seconds)}
+            title={p.hint}
+            className={
+              "px-3 py-1.5 text-xs rounded-full border transition-colors " +
+              (current === p.seconds
+                ? "bg-accent-600 text-white border-accent-600"
+                : "bg-white text-gray-700 border-gray-300 hover:border-gray-400")
+            }
+          >
+            {p.label}
+          </button>
+        ))}
+        <button
+          type="button"
+          disabled={saving || current == null}
+          onClick={onClear}
+          className="px-3 py-1.5 text-xs rounded-full border border-gray-300 text-gray-600 hover:border-gray-400 disabled:opacity-50"
+        >
+          use bot default
+        </button>
+      </div>
+      <div className="flex items-baseline gap-3">
+        <label className="text-xs text-gray-600 flex items-center gap-2">
+          custom (seconds):
+          <input
+            type="number"
+            min={60}
+            max={86400}
+            value={custom}
+            onChange={(e) => setCustom(e.target.value)}
+            placeholder="60–86400"
+            disabled={saving}
+            className="w-28 px-2 py-1 border border-gray-300 rounded text-sm font-mono focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 focus:outline-none disabled:opacity-50"
+          />
+          <button
+            type="button"
+            onClick={onApplyCustom}
+            disabled={saving || !custom.trim()}
+            className="px-3 py-1 text-xs bg-accent-600 text-white rounded hover:bg-accent-700 disabled:opacity-50"
+          >
+            apply
+          </button>
+        </label>
+        {savedAt && Date.now() - savedAt < 4000 && (
+          <span className="text-xs text-green-700">saved.</span>
+        )}
+        <span className="text-xs text-gray-400 ml-auto">
+          {current != null
+            ? `currently set to ${fmtInterval(current)}`
+            : "no override; using bot env default"}
+        </span>
       </div>
     </section>
   );

@@ -115,8 +115,20 @@ class AgentPatchIn(BaseModel):
     # Provider validated against the small enum below at handler time.
     provider: Optional[str] = None
     model: Optional[str] = None
+    # Per-agent tick interval (seconds). null = use the bot's env default.
+    # Validated against the bounds below at handler time so a typo in the
+    # dashboard doesn't melt budget by setting a 1-second tick.
+    tick_interval_s: Optional[int] = None
     # Distinguish "field not provided" from "explicitly null". Pydantic v2:
     # we'll detect via model_fields_set.
+
+
+# Tick-interval bounds. 60s lower bound: anything tighter will rate-limit
+# against vendor LLM APIs and burn budget. 86400s (24h) upper bound: longer
+# intervals than that should use a different mechanism (cron, scheduled
+# routine), not a tick loop.
+AGENT_TICK_INTERVAL_MIN_S = 60
+AGENT_TICK_INTERVAL_MAX_S = 86400
 
 
 # Providers Lightsei has (or plans to have, in 12.2/12.3) an SDK adapter for.
@@ -750,6 +762,8 @@ def _serialize_agent(a: Agent) -> dict[str, Any]:
         # the SDK's auto-patches reported on the latest llm_call_completed.
         "provider": a.provider,
         "model": a.model,
+        # Per-agent tick interval (seconds). null = use the bot's env default.
+        "tick_interval_s": a.tick_interval_s,
         "created_at": a.created_at.isoformat(),
         "updated_at": a.updated_at.isoformat(),
     }
@@ -819,6 +833,21 @@ def patch_agent(
             a.model = None
         else:
             a.model = body.model.strip()
+    if "tick_interval_s" in fields:
+        if body.tick_interval_s is None:
+            a.tick_interval_s = None
+        else:
+            v = int(body.tick_interval_s)
+            if v < AGENT_TICK_INTERVAL_MIN_S or v > AGENT_TICK_INTERVAL_MAX_S:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"tick_interval_s must be between "
+                        f"{AGENT_TICK_INTERVAL_MIN_S} and "
+                        f"{AGENT_TICK_INTERVAL_MAX_S} seconds (got {v})"
+                    ),
+                )
+            a.tick_interval_s = v
     a.updated_at = now
     session.flush()
     return _serialize_agent(a)

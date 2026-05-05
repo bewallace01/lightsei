@@ -1,2 +1,2 @@
-lightsei>=0.1.3
+lightsei>=0.1.4
 httpx>=0.27.0

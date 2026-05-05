@@ -205,6 +205,9 @@ def get_agent_config(name: str) -> dict[str, Any]:
     return {
         "provider": body.get("provider"),
         "model": body.get("model"),
+        # Optional per-agent schedule override for cron-style bots.
+        # null when unset; bot reads its env default in that case.
+        "tick_interval_s": body.get("tick_interval_s"),
     }
 
 
