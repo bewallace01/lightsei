@@ -542,6 +542,36 @@ export async function fetchDeployments(
   return body.deployments;
 }
 
+// Phase 12B.1: describe-a-bot generator. Calls Claude server-side
+// with the curated SDK prompt + the workspace's existing constellation.
+// Returns the generated bot.py + requirements.txt for the user to
+// review/edit before deploying.
+export type AgentGenerateInput = {
+  description: string;
+  target_agents?: string[];
+  name_hint?: string;
+};
+
+export type AgentGenerateOutput = {
+  agent_name_suggestion: string;
+  rationale: string;
+  bot_py: string;
+  requirements_txt: string;
+  model_used: string;
+  tokens_in: number | null;
+  tokens_out: number | null;
+};
+
+export async function generateAgent(
+  input: AgentGenerateInput,
+): Promise<AgentGenerateOutput> {
+  return (await authedJson("/workspaces/me/agents/generate", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  })) as AgentGenerateOutput;
+}
+
 // Browser-native deploy. Same multipart shape the CLI uses: agent_name
 // as a form field and `bundle` as the .zip file. We bypass authedJson
 // because that helper sets content-type=application/json; multipart

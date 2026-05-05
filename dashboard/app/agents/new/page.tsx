@@ -87,11 +87,29 @@ export default function NewAgentDeployPage() {
       <h1 className="text-2xl font-semibold tracking-tight mb-2">
         Deploy an agent
       </h1>
-      <p className="text-sm text-gray-500 mb-8">
+      <p className="text-sm text-gray-500 mb-6">
         Drop a zipped bot directory below, give it a name, hit deploy. The
         worker builds a venv from your <code>requirements.txt</code> and starts{" "}
         <code>bot.py</code>. No CLI required.
       </p>
+      <div className="mb-8 p-4 rounded-lg border border-indigo-200 bg-indigo-50 flex items-start gap-3">
+        <span className="text-lg">✨</span>
+        <div className="flex-1 text-sm">
+          <div className="font-medium text-indigo-900 mb-0.5">
+            Don&apos;t have a bot written yet?
+          </div>
+          <div className="text-indigo-800">
+            Describe what you want and Lightsei generates one for you that
+            coordinates with your existing agents.{" "}
+            <Link
+              href="/agents/generate"
+              className="font-medium text-indigo-700 hover:text-indigo-900 underline"
+            >
+              Generate a bot →
+            </Link>
+          </div>
+        </div>
+      </div>
 
       <form onSubmit={onSubmit} className="space-y-6">
         <label className="block">
