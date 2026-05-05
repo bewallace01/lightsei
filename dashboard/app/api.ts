@@ -550,6 +550,11 @@ export type AgentGenerateInput = {
   description: string;
   target_agents?: string[];
   name_hint?: string;
+  // Phase 12B.3 iteration loop. Set all three together to refine a
+  // prior generation rather than start over.
+  tweak_request?: string;
+  previous_bot_py?: string;
+  previous_requirements_txt?: string;
 };
 
 export type AgentGenerateOutput = {

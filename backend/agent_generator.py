@@ -448,3 +448,217 @@ def build_user_message(
             f"Name hint (the user prefers this name if it fits the dictionary): `{name_hint}`"
         )
     return "\n\n".join(parts)
+
+
+def build_iteration_message(
+    *,
+    previous_bot_py: str,
+    previous_requirements_txt: str,
+    tweak_request: str,
+) -> str:
+    """Phase 12B.3: a follow-up turn the endpoint sends when the user
+    asks for tweaks rather than a fresh generation.
+
+    The prior generation is included verbatim so Claude can diff against
+    it; the tweak is the user's instruction. Keeps the same submit_bot
+    tool contract — the response shape is identical to a fresh generation.
+    """
+    return (
+        "Here is the bot you generated previously:\n\n"
+        "```python\n"
+        f"# bot.py\n{previous_bot_py.strip()}\n"
+        "```\n\n"
+        "```\n"
+        f"# requirements.txt\n{previous_requirements_txt.strip()}\n"
+        "```\n\n"
+        "The user's tweak request:\n\n"
+        f"{tweak_request.strip()}\n\n"
+        "Update the bot to satisfy the tweak and call submit_bot again. "
+        "Keep the same agent_name unless the tweak meaningfully changes "
+        "the bot's role and a different star-dictionary name fits better."
+    )
+
+
+# ---------- Phase 12B.4: validation gate ---------- #
+
+# A small whitelist of stdlib top-level modules. Far from exhaustive; it's
+# a fast-check seed so import-validation can rule the obvious cases out
+# without a full sys.stdlib_module_names lookup. Misses here just mean a
+# stdlib import gets flagged as missing-from-requirements; the LLM-retry
+# is harmless if that happens once. Real prod check uses
+# `sys.stdlib_module_names` at runtime — see `_is_stdlib_module`.
+
+_KNOWN_STDLIB_PREFIXES = {
+    # Common ones we don't want to bother sys.stdlib_module_names for.
+    "os", "sys", "time", "json", "re", "io", "subprocess", "datetime",
+    "pathlib", "typing", "logging", "asyncio", "threading", "uuid",
+    "hashlib", "hmac", "base64", "urllib", "http", "email", "csv",
+    "collections", "functools", "itertools", "contextlib", "math",
+    "random", "secrets", "tempfile", "shutil", "glob", "argparse",
+    "configparser", "dataclasses", "enum", "abc", "warnings", "copy",
+    "string", "textwrap", "traceback",
+}
+
+
+def _is_stdlib_module(name: str) -> bool:
+    """Best-effort check: is the top-level package `name` part of the
+    Python stdlib?
+
+    Uses sys.stdlib_module_names where available (3.10+); falls back to
+    the seed whitelist above. Importing into the running interpreter to
+    check would be slow + side-effecty, so we don't.
+    """
+    import sys
+    head = name.split(".", 1)[0]
+    if head in _KNOWN_STDLIB_PREFIXES:
+        return True
+    stdlib = getattr(sys, "stdlib_module_names", None)
+    if stdlib is not None and head in stdlib:
+        return True
+    return False
+
+
+def _extract_imports(source: str) -> list[str]:
+    """Walk the AST and pull out every top-level package an `import` or
+    `from X import` references. Returns the list of head-of-dotted names
+    so requirements.txt can be checked against them.
+    """
+    import ast
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return []
+    imports: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.add(alias.name.split(".", 1)[0])
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            imports.add(node.module.split(".", 1)[0])
+    return sorted(imports)
+
+
+def _parse_requirements(source: str) -> set[str]:
+    """Return the set of top-level package names declared in a
+    requirements.txt blob. Handles common pin / extra / comment forms;
+    skips -r includes and -e editable installs (rare in our world).
+    """
+    import re
+    names: set[str] = set()
+    for raw in (source or "").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("-"):
+            continue  # -r / -e / --extra-index-url etc.
+        # Strip extras + version pins to leave the bare distribution name.
+        m = re.match(r"^([A-Za-z0-9_.\-]+)", line)
+        if m:
+            names.add(m.group(1).lower().replace("_", "-"))
+    return names
+
+
+# Common PyPI distribution names that don't match their import-time module
+# name. requirements.txt has the dist name; bot.py imports the module.
+_DIST_NAME_OVERRIDES = {
+    # imported_module_top_level: pypi_dist_name
+    "yaml": "pyyaml",
+    "bs4": "beautifulsoup4",
+    "PIL": "pillow",
+    "cv2": "opencv-python",
+    "google": "google-generativeai",  # the closest match for our use case
+    "anthropic": "anthropic",
+    "openai": "openai",
+    "lightsei": "lightsei",
+}
+
+
+def validate_generated_bot(
+    bot_py: str,
+    requirements_txt: str,
+) -> list[str]:
+    """Phase 12B.4: run every cheap check we can on the LLM's output and
+    return a list of problem strings (empty list = passes). The endpoint
+    feeds the list back to Claude as corrective context if anything failed
+    and retries once.
+
+    Checks:
+    - bot.py compiles (no SyntaxError)
+    - bot.py defines a `main` callable (looser than top-level `def main():`
+      to allow lambdas / re-exports, but it has to exist by name)
+    - every import in bot.py is either stdlib, lightsei, or appears in
+      requirements.txt (handles common dist-name mismatches)
+    - requirements.txt mentions lightsei (any version)
+    """
+    problems: list[str] = []
+
+    # 1. Syntax compile.
+    try:
+        compile(bot_py, "<generated bot.py>", "exec")
+    except SyntaxError as exc:
+        problems.append(
+            f"bot.py has a SyntaxError on line {exc.lineno}: {exc.msg}"
+        )
+        # Don't bother continuing; the AST walk below would also fail.
+        return problems
+
+    # 2. main() exists.
+    import ast
+    tree = ast.parse(bot_py)
+    has_main = any(
+        (isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == "main")
+        or (isinstance(n, ast.Assign) and any(
+            isinstance(t, ast.Name) and t.id == "main" for t in n.targets
+        ))
+        for n in tree.body
+    )
+    if not has_main:
+        problems.append(
+            "bot.py does not define a top-level `main` function. The worker "
+            "runs `python bot.py`, so the script needs a main() (or an "
+            "if __name__ == '__main__' block calling one)."
+        )
+
+    # 3. Imports vs requirements.txt.
+    imports = _extract_imports(bot_py)
+    declared = _parse_requirements(requirements_txt)
+    if "lightsei" not in declared:
+        problems.append(
+            "requirements.txt must include `lightsei>=0.1.3`."
+        )
+    missing: list[str] = []
+    for mod in imports:
+        if _is_stdlib_module(mod):
+            continue
+        if mod == "lightsei":
+            continue
+        # Apply dist-name overrides — `import yaml` → `pyyaml` in reqs.
+        dist = _DIST_NAME_OVERRIDES.get(mod, mod).lower().replace("_", "-")
+        if dist not in declared:
+            missing.append(f"`{mod}` (expected in requirements.txt as `{dist}`)")
+    if missing:
+        problems.append(
+            "These imports in bot.py aren't declared in requirements.txt: "
+            + ", ".join(missing)
+        )
+
+    return problems
+
+
+def build_validation_retry_message(problems: list[str]) -> str:
+    """Render the list of validation problems as a corrective follow-up
+    turn so Claude can fix them in a second pass.
+    """
+    lines = [
+        "Your previous submit_bot call produced code with the following "
+        "issues. Fix every one of them and call submit_bot again.",
+        "",
+    ]
+    for i, p in enumerate(problems, 1):
+        lines.append(f"{i}. {p}")
+    lines.append("")
+    lines.append(
+        "Keep the same agent_name unless one of the issues was the name "
+        "itself."
+    )
+    return "\n".join(lines)

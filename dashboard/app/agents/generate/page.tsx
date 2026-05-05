@@ -34,6 +34,11 @@ export default function GenerateAgentPage() {
   const [editBotPy, setEditBotPy] = useState("");
   const [editRequirements, setEditRequirements] = useState("");
 
+  // Iteration loop (12B.3): textarea for refinement requests below the
+  // preview. Wraps the same generate endpoint with tweak_request +
+  // previous_* set so Claude refines instead of starting over.
+  const [tweakRequest, setTweakRequest] = useState("");
+
   const [deploying, setDeploying] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -73,6 +78,32 @@ export default function GenerateAgentPage() {
         name_hint: nameHint.trim() || undefined,
       });
       setOutput(result);
+    } catch (e) {
+      if (e instanceof UnauthorizedError) {
+        router.replace("/login");
+        return;
+      }
+      setError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setGenerating(false);
+    }
+  };
+
+  const onTweak = async () => {
+    if (!tweakRequest.trim() || !editBotPy.trim()) return;
+    setGenerating(true);
+    setError(null);
+    try {
+      const result = await generateAgent({
+        description: description.trim(),
+        target_agents: targets.size > 0 ? Array.from(targets) : undefined,
+        name_hint: nameHint.trim() || undefined,
+        tweak_request: tweakRequest.trim(),
+        previous_bot_py: editBotPy,
+        previous_requirements_txt: editRequirements,
+      });
+      setOutput(result);
+      setTweakRequest("");
     } catch (e) {
       if (e instanceof UnauthorizedError) {
         router.replace("/login");
@@ -283,14 +314,44 @@ export default function GenerateAgentPage() {
             />
           </label>
 
+          {/* Iteration loop: ask the LLM to revise without starting over. */}
+          <div className="rounded-lg border border-indigo-100 bg-indigo-50/40 p-4">
+            <label className="block">
+              <span className="text-xs font-medium text-indigo-900 uppercase tracking-wider">
+                Regenerate with tweaks
+              </span>
+              <textarea
+                value={tweakRequest}
+                onChange={(e) => setTweakRequest(e.target.value)}
+                placeholder="e.g. Use httpx instead of requests; tick every 30 minutes instead of 60; also dispatch to argus for security scans."
+                rows={2}
+                disabled={generating || deploying}
+                className="mt-1 block w-full rounded-md border border-indigo-200 bg-white px-3 py-2 text-sm focus:border-indigo-400 focus:ring-1 focus:ring-indigo-400 focus:outline-none disabled:opacity-50"
+              />
+              <span className="text-[11px] text-indigo-700 mt-1 block">
+                The LLM sees your current edits — describe what you want
+                changed and it produces a refined version.
+              </span>
+            </label>
+            <button
+              type="button"
+              onClick={onTweak}
+              disabled={generating || deploying || !tweakRequest.trim()}
+              className="mt-3 px-4 py-1.5 border border-indigo-300 bg-white text-indigo-700 rounded-md text-sm font-medium hover:bg-indigo-100 disabled:opacity-50 transition-colors"
+            >
+              {generating ? "regenerating…" : "regenerate"}
+            </button>
+          </div>
+
           <div className="flex items-center justify-between pt-2">
             <button
               type="button"
               onClick={() => {
                 setOutput(null);
                 setError(null);
+                setTweakRequest("");
               }}
-              disabled={deploying}
+              disabled={deploying || generating}
               className="text-sm text-gray-500 hover:text-gray-900 disabled:opacity-50"
             >
               start over
@@ -298,7 +359,9 @@ export default function GenerateAgentPage() {
             <button
               type="button"
               onClick={onDeploy}
-              disabled={deploying || !editName.trim() || !editBotPy.trim()}
+              disabled={
+                deploying || generating || !editName.trim() || !editBotPy.trim()
+              }
               className="px-5 py-2 bg-accent-600 text-white rounded-md text-sm font-medium hover:bg-accent-700 disabled:opacity-50 transition-colors"
             >
               {deploying ? "deploying…" : "deploy"}

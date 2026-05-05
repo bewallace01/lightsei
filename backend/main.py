@@ -212,18 +212,27 @@ class AgentManifestIn(BaseModel):
 
 
 class AgentGenerateIn(BaseModel):
-    """Phase 12B.1: input to `POST /workspaces/me/agents/generate`.
+    """Input to `POST /workspaces/me/agents/generate`.
 
-    `description` is the user's natural-language prompt — what the bot
-    should do. `target_agents` is an optional whitelist of existing
+    `description` (Phase 12B.1) is the user's natural-language prompt — what
+    the bot should do. `target_agents` is an optional whitelist of existing
     agents to encourage coordination with (the LLM still sees the full
-    workspace constellation either way; this is a hint). `name_hint`
-    lets the user nudge toward a specific star-dictionary name, which
-    is honored if the name fits the role; otherwise the LLM picks.
+    workspace constellation either way; this is a hint). `name_hint` lets
+    the user nudge toward a specific star-dictionary name, which is honored
+    if the name fits the role; otherwise the LLM picks.
+
+    Phase 12B.3 iteration loop: when `tweak_request` is set alongside
+    `previous_bot_py` and `previous_requirements_txt`, the endpoint sends
+    a follow-up turn that includes the prior generation + the tweak so
+    Claude can refine rather than start over.
     """
     description: str = Field(min_length=8, max_length=4000)
     target_agents: Optional[list[str]] = None
     name_hint: Optional[str] = None
+    # Iteration loop fields (12B.3). All three set together → refinement.
+    tweak_request: Optional[str] = Field(default=None, max_length=4000)
+    previous_bot_py: Optional[str] = Field(default=None, max_length=200_000)
+    previous_requirements_txt: Optional[str] = Field(default=None, max_length=20_000)
 
 
 class ThreadCreateIn(BaseModel):
@@ -4096,15 +4105,32 @@ def generate_agent(
         name_hint=body.name_hint,
     )
 
+    # Phase 12B.3: when the user is iterating on a previous generation,
+    # append the prior bot + their tweak as additional user turns. The
+    # `description` field still serves as the original framing so Claude
+    # has the full context.
+    iteration_turn: Optional[str] = None
+    if (
+        body.tweak_request
+        and body.previous_bot_py
+        and body.previous_requirements_txt
+    ):
+        iteration_turn = agent_generator.build_iteration_message(
+            previous_bot_py=body.previous_bot_py,
+            previous_requirements_txt=body.previous_requirements_txt,
+            tweak_request=body.tweak_request,
+        )
+
     client = anthropic.Anthropic(api_key=anthropic_key)
     model = "claude-opus-4-7"
 
     def _ask(extra_user_msg: Optional[str] = None) -> Any:
         messages: list[dict[str, Any]] = [{"role": "user", "content": user_msg}]
+        if iteration_turn:
+            messages.append({"role": "user", "content": iteration_turn})
         if extra_user_msg:
-            # Second-pass retry: append a turn nudging toward dictionary
-            # compliance. Same conversation; Claude has its first attempt
-            # in scope.
+            # Retry pass: append corrective feedback. Same conversation;
+            # Claude has its prior attempt(s) in scope.
             messages.append({"role": "user", "content": extra_user_msg})
         return client.messages.create(
             model=model,
@@ -4175,11 +4201,52 @@ def generate_agent(
                 ),
             )
 
+    # 5. Phase 12B.4 validation gate: compile bot.py, check imports vs
+    # requirements.txt, ensure main() exists. If anything fails, retry
+    # once with the problems appended as a corrective turn. After two
+    # tries we surface the failures rather than ship broken code into
+    # the user's deploy pipeline.
+    bot_py = out.get("bot_py") or ""
+    requirements_txt = out.get("requirements_txt") or ""
+    problems = agent_generator.validate_generated_bot(bot_py, requirements_txt)
+    if problems:
+        retry_msg = agent_generator.build_validation_retry_message(problems)
+        try:
+            resp = _ask(extra_user_msg=retry_msg)
+            out = _extract(resp)
+        except anthropic.APIError as e:
+            raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}")
+        # Re-validate the name (Claude might have changed it during the
+        # retry) and the code.
+        suggested = (out.get("agent_name") or "").strip().lower()
+        if (
+            not agent_generator.is_valid_star_name(suggested)
+            or suggested in reserved_names
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"validation retry produced an invalid name "
+                    f"(got {suggested!r})"
+                ),
+            )
+        bot_py = out.get("bot_py") or ""
+        requirements_txt = out.get("requirements_txt") or ""
+        remaining = agent_generator.validate_generated_bot(bot_py, requirements_txt)
+        if remaining:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "generator could not produce a valid bot after retry; "
+                    "remaining issues: " + " | ".join(remaining)
+                ),
+            )
+
     return {
         "agent_name_suggestion": suggested,
         "rationale": out.get("rationale") or "",
-        "bot_py": out.get("bot_py") or "",
-        "requirements_txt": out.get("requirements_txt") or "",
+        "bot_py": bot_py,
+        "requirements_txt": requirements_txt,
         "model_used": getattr(resp, "model", model),
         "tokens_in": getattr(getattr(resp, "usage", None), "input_tokens", None),
         "tokens_out": getattr(getattr(resp, "usage", None), "output_tokens", None),

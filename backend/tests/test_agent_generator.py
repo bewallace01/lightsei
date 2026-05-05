@@ -109,8 +109,27 @@ class _FakeUsage:
         self.output_tokens = out_t
 
 
-def _fake_response(*, agent_name: str, bot_py: str = "print('hi')",
-                   requirements_txt: str = "lightsei>=0.1.3",
+# A minimally-valid bot the validation gate accepts: defines main(),
+# imports only stdlib + lightsei (covered by the lightsei>=0.1.3 line).
+_VALID_BOT_PY = '''import lightsei
+import os
+import time
+
+lightsei.init(api_key=os.environ["LIGHTSEI_API_KEY"], agent_name="x")
+
+
+def main():
+    while True:
+        time.sleep(60)
+
+
+if __name__ == "__main__":
+    main()
+'''
+
+
+def _fake_response(*, agent_name: str, bot_py: str = _VALID_BOT_PY,
+                   requirements_txt: str = "lightsei>=0.1.3\n",
                    rationale: str = "test bot") -> SimpleNamespace:
     """Build the `messages.create` return value the endpoint expects."""
     tool_block = SimpleNamespace(
@@ -160,8 +179,6 @@ def test_generate_returns_bot_with_dictionary_name(client, alice, monkeypatch):
     fake = _FakeClient()
     fake.messages.create = lambda **kwargs: _fake_response(
         agent_name="vega",
-        bot_py="import lightsei\nlightsei.init(api_key='x', agent_name='vega')\n",
-        requirements_txt="lightsei>=0.1.3\n",
         rationale="Vega for code review.",
     )
     monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
@@ -177,6 +194,7 @@ def test_generate_returns_bot_with_dictionary_name(client, alice, monkeypatch):
     body = r.json()
     assert body["agent_name_suggestion"] == "vega"
     assert "lightsei.init" in body["bot_py"]
+    assert "def main" in body["bot_py"]
     assert "lightsei>=" in body["requirements_txt"]
     assert body["rationale"] == "Vega for code review."
     assert body["model_used"] == "claude-opus-4-7"
@@ -305,3 +323,185 @@ def test_generate_unauthenticated(client):
         json={"description": "Build a hello-world bot."},
     )
     assert r.status_code == 401
+
+
+# ---------- Phase 12B.4: validation gate ---------- #
+
+
+def test_validate_clean_bot_returns_no_problems():
+    from agent_generator import validate_generated_bot
+    assert validate_generated_bot(_VALID_BOT_PY, "lightsei>=0.1.3\n") == []
+
+
+def test_validate_catches_syntax_error():
+    from agent_generator import validate_generated_bot
+    bad = "def main(:\n    pass\n"
+    problems = validate_generated_bot(bad, "lightsei>=0.1.3\n")
+    assert any("SyntaxError" in p for p in problems)
+
+
+def test_validate_catches_missing_main():
+    from agent_generator import validate_generated_bot
+    no_main = "import lightsei\nlightsei.init(api_key='x', agent_name='y')\n"
+    problems = validate_generated_bot(no_main, "lightsei>=0.1.3\n")
+    assert any("main" in p for p in problems)
+
+
+def test_validate_catches_missing_lightsei_in_requirements():
+    from agent_generator import validate_generated_bot
+    problems = validate_generated_bot(_VALID_BOT_PY, "")
+    assert any("lightsei>=0.1.3" in p for p in problems)
+
+
+def test_validate_catches_undeclared_import():
+    from agent_generator import validate_generated_bot
+    bot_py = _VALID_BOT_PY.replace(
+        "import time", "import time\nimport requests"
+    )
+    problems = validate_generated_bot(bot_py, "lightsei>=0.1.3\n")
+    assert any("requests" in p for p in problems)
+
+
+def test_validate_recognizes_dist_name_overrides():
+    from agent_generator import validate_generated_bot
+    # `import yaml` should be satisfied by `pyyaml` in requirements.
+    bot_py = _VALID_BOT_PY.replace(
+        "import time", "import time\nimport yaml"
+    )
+    problems = validate_generated_bot(
+        bot_py, "lightsei>=0.1.3\npyyaml>=6.0\n"
+    )
+    assert problems == []
+
+
+def test_generate_retries_when_validation_fails(client, alice, monkeypatch):
+    """Validation gate: if the first generation has a SyntaxError or
+    missing main(), the endpoint retries once with the problems
+    appended as a corrective turn."""
+    api_key = alice["api_key"]["plaintext"]
+    _set_anthropic_secret(client, api_key)
+
+    bad_bot = "import lightsei\n# no main() defined\n"
+    calls = {"n": 0}
+
+    def fake_create(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _fake_response(agent_name="vega", bot_py=bad_bot)
+        return _fake_response(agent_name="vega")  # valid default
+
+    fake = _FakeClient()
+    fake.messages.create = fake_create
+    monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
+
+    r = client.post(
+        "/workspaces/me/agents/generate",
+        headers=auth_headers(api_key),
+        json={"description": "Build a code review bot."},
+    )
+    assert r.status_code == 200
+    assert calls["n"] == 2  # one retry happened
+    assert "def main" in r.json()["bot_py"]
+
+
+def test_generate_422_when_validation_retry_also_fails(client, alice, monkeypatch):
+    api_key = alice["api_key"]["plaintext"]
+    _set_anthropic_secret(client, api_key)
+
+    bad_bot = "import lightsei\n# no main() defined\n"
+    fake = _FakeClient()
+    fake.messages.create = lambda **kw: _fake_response(
+        agent_name="vega", bot_py=bad_bot
+    )
+    monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
+
+    r = client.post(
+        "/workspaces/me/agents/generate",
+        headers=auth_headers(api_key),
+        json={"description": "Build a code review bot."},
+    )
+    assert r.status_code == 422
+    assert "valid bot" in r.json()["detail"].lower()
+
+
+# ---------- Phase 12B.3: iteration loop ---------- #
+
+
+def test_iteration_message_includes_previous_and_tweak():
+    from agent_generator import build_iteration_message
+    msg = build_iteration_message(
+        previous_bot_py="def main(): pass",
+        previous_requirements_txt="lightsei>=0.1.3",
+        tweak_request="poll every 30 minutes instead of 60",
+    )
+    assert "def main(): pass" in msg
+    assert "lightsei>=0.1.3" in msg
+    assert "30 minutes" in msg
+    assert "submit_bot" in msg
+
+
+def test_generate_iteration_includes_previous_in_messages(client, alice, monkeypatch):
+    """When `tweak_request` + `previous_*` are set, the messages list
+    sent to Claude includes both the original description AND the
+    iteration turn referencing the prior bot."""
+    api_key = alice["api_key"]["plaintext"]
+    _set_anthropic_secret(client, api_key)
+
+    captured: dict[str, list] = {"messages": []}
+
+    def fake_create(**kwargs):
+        captured["messages"] = kwargs.get("messages", [])
+        return _fake_response(agent_name="vega")
+
+    fake = _FakeClient()
+    fake.messages.create = fake_create
+    monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
+
+    r = client.post(
+        "/workspaces/me/agents/generate",
+        headers=auth_headers(api_key),
+        json={
+            "description": "A code review bot",
+            "tweak_request": "Make it post to slack via hermes",
+            "previous_bot_py": "def main(): pass",
+            "previous_requirements_txt": "lightsei>=0.1.3",
+        },
+    )
+    assert r.status_code == 200, r.text
+    msgs = captured["messages"]
+    assert len(msgs) >= 2
+    # First message: original description framing.
+    assert "A code review bot" in msgs[0]["content"]
+    # Second message: the iteration turn with prior bot + tweak.
+    assert "def main(): pass" in msgs[1]["content"]
+    assert "Make it post to slack via hermes" in msgs[1]["content"]
+
+
+def test_generate_iteration_alone_without_previous_ignored(client, alice, monkeypatch):
+    """If only `tweak_request` is set without the previous_* fields, we
+    treat it as a fresh generation (no iteration turn appended)."""
+    api_key = alice["api_key"]["plaintext"]
+    _set_anthropic_secret(client, api_key)
+
+    captured: dict[str, list] = {"messages": []}
+
+    def fake_create(**kwargs):
+        captured["messages"] = kwargs.get("messages", [])
+        return _fake_response(agent_name="vega")
+
+    fake = _FakeClient()
+    fake.messages.create = fake_create
+    monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
+
+    r = client.post(
+        "/workspaces/me/agents/generate",
+        headers=auth_headers(api_key),
+        json={
+            "description": "A code review bot",
+            "tweak_request": "Make it faster",
+            # previous_* deliberately omitted.
+        },
+    )
+    assert r.status_code == 200
+    # Only the framing message; no iteration turn.
+    assert len(captured["messages"]) == 1
