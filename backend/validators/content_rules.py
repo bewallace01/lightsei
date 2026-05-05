@@ -44,9 +44,14 @@ DEFAULT_RULE_PACK = [
     },
     {
         "name": "banned_destructive_verbs",
-        # Same case-insensitive treatment: "Delete the cache" should
-        # fire as readily as "delete the cache".
-        "pattern": r"(?i)\b(delete|drop|truncate|destroy|nuke)\b",
+        # Case-insensitive: "Delete the cache" should fire as readily
+        # as "delete the cache". `drop` was originally on this list but
+        # produced too many false positives in normal English usage
+        # (drop a file on /agents/new, drop a parking-lot item, drag-
+        # and-drop UX, "drop" used as "remove from a small list"). The
+        # other four verbs have unambiguously destructive valence in
+        # software contexts; we keep them.
+        "pattern": r"(?i)\b(delete|truncate|destroy|nuke)\b",
         "fields": ["next_actions[].task"],
         "mode": "must_not_match",
         "severity": "fail",

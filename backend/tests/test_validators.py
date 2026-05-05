@@ -227,7 +227,7 @@ def test_content_rules_emits_one_violation_per_array_match():
         "summary": "tidy up",
         "next_actions": [
             {"task": "delete this file", "blocked_by": None},
-            {"task": "drop the table", "blocked_by": None},
+            {"task": "destroy the cache", "blocked_by": None},
             {"task": "leave alone", "blocked_by": None},
         ],
     }
@@ -235,7 +235,19 @@ def test_content_rules_emits_one_violation_per_array_match():
     assert result["ok"] is False
     assert len(result["violations"]) == 2
     matched = sorted(v["matched"] for v in result["violations"])
-    assert matched == ["delete", "drop"]
+    assert matched == ["delete", "destroy"]
+
+
+def test_content_rules_does_not_flag_drop_as_destructive():
+    """Regression: `drop` was in the banned-verbs list originally and
+    produced too many false positives on normal English usage. Plans
+    that say "drop a file on /agents/new" or "drop the parking-lot
+    item" should pass; the rule still catches the unambiguously
+    destructive verbs (delete / truncate / destroy / nuke)."""
+    payload = _polaris_like_payload(task="drop a zip on the dashboard")
+    result = content_rules_validate(payload, {"rules": DEFAULT_RULE_PACK})
+    assert result["ok"] is True
+    assert result["violations"] == []
 
 
 def test_content_rules_must_match_mode_fails_on_missing_pattern():
@@ -370,7 +382,7 @@ def test_default_rule_pack_is_case_insensitive():
         "summary": "ping Alice@EXAMPLE.com if a deploy needs sign-off",
         "next_actions": [
             {"task": "Delete the orphaned cache rows", "blocked_by": None},
-            {"task": "DROP TABLE staging_runs", "blocked_by": None},
+            {"task": "TRUNCATE TABLE staging_runs", "blocked_by": None},
         ],
     }
     result = content_rules_validate(payload, {"rules": DEFAULT_RULE_PACK})
