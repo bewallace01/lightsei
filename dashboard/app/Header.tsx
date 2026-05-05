@@ -24,6 +24,7 @@ type NavItem =
     };
 
 const NAV: NavItem[] = [
+  { kind: "link", href: "/", label: "home" },
   { kind: "link", href: "/polaris", label: "polaris" },
   {
     kind: "group",
@@ -46,22 +47,7 @@ const NAV: NavItem[] = [
       },
     ],
   },
-  {
-    kind: "group",
-    label: "activity",
-    children: [
-      {
-        href: "/",
-        label: "runs",
-        hint: "Every LLM call your bots made",
-      },
-      {
-        href: "/dispatch",
-        label: "dispatch chains",
-        hint: "Cause-and-effect trees of agent commands",
-      },
-    ],
-  },
+  { kind: "link", href: "/dispatch", label: "dispatch" },
   {
     kind: "group",
     label: "integrations",
@@ -262,7 +248,12 @@ export default function Header() {
   return (
     <header className="sticky top-0 z-20 bg-white/95 backdrop-blur border-b border-gray-100">
       <div className="max-w-6xl mx-auto px-6 sm:px-8 h-14 flex items-center justify-between">
-        <Link href="/" className="no-underline">
+        <Link
+          href="/"
+          title="Go to dashboard home"
+          aria-label="Lightsei — go to dashboard home"
+          className="no-underline -ml-2 px-2 py-1 rounded-md hover:bg-gray-100 transition-colors flex items-center"
+        >
           <Logo />
         </Link>
 
