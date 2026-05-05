@@ -369,6 +369,52 @@ export async function deleteSecret(name: string): Promise<void> {
   });
 }
 
+// ----- Validators (Phase 7+) -----
+
+export type ValidatorMode = "advisory" | "blocking";
+
+export type ValidatorConfig = {
+  event_kind: string;
+  validator_name: string;
+  config: Record<string, unknown>;
+  mode: ValidatorMode;
+  created_at: string;
+  updated_at: string;
+};
+
+export async function fetchValidators(): Promise<ValidatorConfig[]> {
+  const body = (await authedJson("/workspaces/me/validators")) as {
+    validators: ValidatorConfig[];
+  };
+  return body.validators;
+}
+
+export async function putValidator(
+  eventKind: string,
+  validatorName: string,
+  config: Record<string, unknown>,
+  mode: ValidatorMode,
+): Promise<ValidatorConfig> {
+  return (await authedJson(
+    `/workspaces/me/validators/${encodeURIComponent(eventKind)}/${encodeURIComponent(validatorName)}`,
+    {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ config, mode }),
+    },
+  )) as ValidatorConfig;
+}
+
+export async function deleteValidator(
+  eventKind: string,
+  validatorName: string,
+): Promise<void> {
+  await authedJson(
+    `/workspaces/me/validators/${encodeURIComponent(eventKind)}/${encodeURIComponent(validatorName)}`,
+    { method: "DELETE" },
+  );
+}
+
 // ----- Commands -----
 
 export type Command = {

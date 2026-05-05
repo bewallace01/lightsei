@@ -55,7 +55,11 @@ const ISSUE_LABELS: Record<keyof PulseIssues, { label: string; href: string }> =
   },
   failed_validations: {
     label: "failed validation",
-    href: "/runs",
+    // /validators is the fix-it surface (edit / disable the rule that
+    // tripped). The runs list is where you'd see the specific event,
+    // but the user usually wants to tune the rule, not investigate
+    // each match.
+    href: "/validators",
   },
   budget_warnings: {
     label: "budget warning",

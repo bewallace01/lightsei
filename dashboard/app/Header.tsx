@@ -82,6 +82,11 @@ const NAV: NavItem[] = [
         label: "github",
         hint: "Push-to-deploy + Polaris doc fetch",
       },
+      {
+        href: "/validators",
+        label: "validators",
+        hint: "Per-event rules: edit, disable, or change mode",
+      },
     ],
   },
   { kind: "link", href: "/getting-started", label: "docs" },
