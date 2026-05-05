@@ -7,9 +7,9 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 12B.1: backend `/workspaces/me/agents/generate` endpoint with curated system prompt**
+> **Phase 12C.1: backend `/workspaces/me/teams/plan` endpoint (drop a README, propose a team)**
 
-Phase 12B is "describe a bot, get a bot" — the user types what they want their agent to do in natural language, Lightsei generates a working `bot.py` + `requirements.txt` against the SDK and the workspace's existing constellation, then ships it through the existing deploy pipeline. Promoted ahead of Phase 13 (more agents) because the LLM generator partially obsoletes it — instead of hand-coding Argus / Vega / Sirius, users describe what they want and ship.
+Phase 12B fully shipped + demo'd against prod 2026-05-04. See Done Log. Phase 12C builds on it: instead of one bot at a time, the user drops a README (or pastes one) and Lightsei proposes a tailored team rooted at Polaris — calling 12B's per-bot generator in a loop to flesh out each role.
 
 Why this is the leverage move for the audience: today, "deploy a bot" requires both knowing Python and understanding the Lightsei SDK. The browser-deploy work from 2026-05-04 closed the second wall (no terminal needed) but the first wall — actually authoring `bot.py` — is still there. 12B closes it. After 12B, signing up + describing what you want + clicking deploy is a complete onboarding path for a non-engineer.
 
@@ -580,6 +580,23 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-04 — Phase 12B: describe a bot, get a bot
+
+End-to-end LLM-generated bots from a natural-language description. Routes through a backend endpoint that calls Claude with a curated system prompt + the workspace's existing constellation, validates the output, and hands the user editable `bot.py` + `requirements.txt` they can tweak and deploy in the browser without ever touching a terminal.
+
+- [x] **12B.1 — backend `/workspaces/me/agents/generate`.** Endpoint reads the workspace's `ANTHROPIC_API_KEY` secret, snapshots the existing constellation (agents + their command kinds), assembles a curated system prompt (SDK reference + 3 worked examples + star-naming dictionary with reserved names filtered out), and calls Claude Opus 4.7 with forced `submit_bot` tool_choice for guaranteed-shape output. Workspace budget cap from Phase 11B.1 enforced as a 429 gate. Backend `requirements.txt` bumped to include `anthropic>=0.40.0` (the local backend had it transitively / dev-side; Railway's strict resolver was 500ing on `ImportError` until this lined up).
+- [x] **12B.2 — dashboard `/agents/generate` page.** Form with description textarea, multi-select for "coordinate with these agents" (populated from `/agents`), optional name hint. Generated bot lands in editable textareas (name + bot.py + requirements.txt). Deploy button assembles the two files into a `.zip` in-browser via JSZip (~50KB new dep — also unblocks parking-lot directory zipping later) and posts to the existing upload endpoint, routing to `/deployments/{id}` on success.
+- [x] **12B.3 — iteration loop.** When the user wants to refine instead of restart, a "regenerate with tweaks" textarea appears below the preview. The endpoint accepts `tweak_request` + `previous_bot_py` + `previous_requirements_txt` together and appends an iteration turn to the Claude conversation so the prior bot is in scope and Claude diffs against it.
+- [x] **12B.4 — validation gate.** Every generation passes through `validate_generated_bot()` before being returned: bot.py compiles (no SyntaxError), defines a top-level `main`, every import resolves (stdlib / lightsei / declared in requirements.txt with a small dist-name override table for `yaml→pyyaml`, `bs4→beautifulsoup4`, `PIL→pillow`, `cv2→opencv-python`), and requirements.txt mentions lightsei. Failures get one corrective retry; second-failure surfaces as 422 with the remaining issues so the dashboard can show the user rather than ship broken code.
+- [x] **12B.5 — demo against prod.** First call: `description="Build a hello-world bot that emits a custom event."` → `lyra` (harmony / coordination glue) in ~8s, clean bot, validation passed. Second call: `description="Build a security scanner bot that scans pushes for secrets and dispatches to hermes when something is found."` → `argus` in ~25s (all-seeing giant — the dictionary picked the right star unprompted), wrote a real secret-detection regex table covering AWS / GitHub / Slack / OpenAI / Anthropic / Google / Stripe / PEM keys / generic password assignments, used `@lightsei.on_command("argus.scan")` and `@lightsei.track` correctly, validation passed first try. Quality of the generated code on both demos was deploy-ready with light edits.
+
+**Star-naming worked exactly as intended.** Both demos picked names from the dictionary (`lyra`, `argus`) that thematically matched the role, with no name_hint. The system prompt's filtered-by-reserved-names dictionary + the post-response validation + retry path is the right structural answer.
+
+**Operational notes:**
+
+- Anthropic library missing from `backend/requirements.txt` was the only operational hiccup — caught immediately on first prod call, fixed in `c117089`. Mirror of the Phase 11.5 lesson "never publish a wheel until the surface it needs is committed": the same trap applies to backend deps. Add a CI check that compares `requirements.txt` against actual imports at some point.
+- Generation latency is ~8-25s for short-to-medium prompts. Railway's default request deadline handles this fine. Longer / more elaborate prompts may approach the deadline; revisit if users hit timeouts.
 
 ### 2026-05-04 — Worker retires previous deploys + browser-native deploy
 
