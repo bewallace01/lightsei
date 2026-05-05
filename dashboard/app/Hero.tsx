@@ -211,9 +211,13 @@ export default function Hero() {
             <p className="font-serif text-sm text-indigo-200/70 mt-3">
               <span>{pulse.workspace_name}</span>
               <span className="mx-2 text-indigo-300/40">·</span>
-              <span>
+              <Link
+                href="/agents"
+                className="hover:text-indigo-100 transition-colors"
+                title="See every agent — change pinned model, schedule, system prompt"
+              >
                 {pluralize(pulse.agent_count, "agent")}
-              </span>
+              </Link>
               <span className="mx-2 text-indigo-300/40">·</span>
               <span>
                 Polaris last tick {relativeTime(pulse.last_polaris_tick_at)}

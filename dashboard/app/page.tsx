@@ -145,9 +145,13 @@ export default function Home() {
             <Hero />
             <div className="px-6 sm:px-10">
               <div className="flex items-baseline gap-3">
-                <span className="text-[11px] uppercase tracking-[0.18em] text-indigo-200/85 font-medium">
-                  Constellation
-                </span>
+                <Link
+                  href="/agents"
+                  className="text-[11px] uppercase tracking-[0.18em] text-indigo-200/85 font-medium hover:text-indigo-100 transition-colors"
+                  title="See every agent — change pinned model, schedule, system prompt"
+                >
+                  Constellation →
+                </Link>
                 <span className="text-xs text-indigo-200/45">
                   your team, at a glance
                 </span>

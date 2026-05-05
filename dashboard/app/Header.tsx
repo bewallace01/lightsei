@@ -28,8 +28,13 @@ const NAV: NavItem[] = [
   { kind: "link", href: "/polaris", label: "polaris" },
   {
     kind: "group",
-    label: "deploy",
+    label: "agents",
     children: [
+      {
+        href: "/agents",
+        label: "all agents",
+        hint: "Roster, pinned models, schedules, recent activity",
+      },
       {
         href: "/agents/generate",
         label: "✨ generate from description",
@@ -42,7 +47,7 @@ const NAV: NavItem[] = [
       },
       {
         href: "/deployments",
-        label: "all deployments",
+        label: "deployments",
         hint: "What the worker is running, plus history",
       },
     ],

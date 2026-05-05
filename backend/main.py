@@ -1114,15 +1114,25 @@ def get_workspace_pulse(
         {"wsid": workspace_id, "now": now},
     ).scalar_one()
 
+    # Failed validations in the last 24h, EXCEPT ones whose validator
+    # has been edited since the failure landed. Editing a rule on
+    # /validators is the user's signal that they've addressed it; old
+    # fails of that rule are stale (the new pattern may not even fire
+    # on that input anymore) and shouldn't keep nagging the home pulse.
     failed_validations = session.execute(
         text(
             """
             SELECT COUNT(*) AS n
             FROM event_validations ev
             JOIN events e ON e.id = ev.event_id
+            LEFT JOIN validator_configs vc
+              ON vc.workspace_id = e.workspace_id
+              AND vc.event_kind = e.kind
+              AND vc.validator_name = ev.validator_name
             WHERE e.workspace_id = :wsid
               AND ev.status = 'fail'
               AND ev.created_at >= :cutoff_24h
+              AND (vc.updated_at IS NULL OR ev.created_at >= vc.updated_at)
             """
         ),
         {"wsid": workspace_id, "cutoff_24h": cutoff_24h},
