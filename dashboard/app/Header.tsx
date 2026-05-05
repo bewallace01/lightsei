@@ -13,13 +13,193 @@ import {
 } from "./api";
 import Logo from "./Logo";
 
-const NAV: { href: string; label: string }[] = [
-  { href: "/polaris", label: "polaris" },
-  { href: "/dispatch", label: "dispatch" },
-  { href: "/notifications", label: "notifications" },
-  { href: "/github", label: "github" },
-  { href: "/getting-started", label: "docs" },
+// Top-level nav items. Either a single `href` link or a `children` dropdown
+// group. Order matters — left-to-right rendering.
+type NavItem =
+  | { kind: "link"; href: string; label: string }
+  | {
+      kind: "group";
+      label: string;
+      children: { href: string; label: string; hint?: string }[];
+    };
+
+const NAV: NavItem[] = [
+  { kind: "link", href: "/polaris", label: "polaris" },
+  {
+    kind: "group",
+    label: "deploy",
+    children: [
+      {
+        href: "/agents/generate",
+        label: "✨ generate from description",
+        hint: "Describe a bot, Lightsei generates one",
+      },
+      {
+        href: "/agents/new",
+        label: "drop a zip",
+        hint: "Upload a pre-zipped bot directory",
+      },
+      {
+        href: "/deployments",
+        label: "all deployments",
+        hint: "What the worker is running, plus history",
+      },
+    ],
+  },
+  {
+    kind: "group",
+    label: "activity",
+    children: [
+      {
+        href: "/",
+        label: "runs",
+        hint: "Every LLM call your bots made",
+      },
+      {
+        href: "/dispatch",
+        label: "dispatch chains",
+        hint: "Cause-and-effect trees of agent commands",
+      },
+    ],
+  },
+  {
+    kind: "group",
+    label: "integrations",
+    children: [
+      {
+        href: "/notifications",
+        label: "notifications",
+        hint: "Slack, Discord, Teams, Mattermost, webhook",
+      },
+      {
+        href: "/github",
+        label: "github",
+        hint: "Push-to-deploy + Polaris doc fetch",
+      },
+    ],
+  },
+  { kind: "link", href: "/getting-started", label: "docs" },
 ];
+
+
+function NavLink({
+  href,
+  label,
+  active,
+}: {
+  href: string;
+  label: string;
+  active: boolean;
+}) {
+  return (
+    <Link
+      href={href}
+      className={
+        "transition-colors " +
+        (active
+          ? "text-gray-900 font-medium"
+          : "text-gray-500 hover:text-gray-900")
+      }
+    >
+      {label}
+    </Link>
+  );
+}
+
+
+function NavDropdown({
+  label,
+  children,
+  active,
+}: {
+  label: string;
+  children: { href: string; label: string; hint?: string }[];
+  active: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const pathname = usePathname();
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  // Close on route change so the panel doesn't linger after a nav.
+  useEffect(() => {
+    setOpen(false);
+  }, [pathname]);
+
+  return (
+    <div className="relative" ref={wrapRef}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-haspopup="menu"
+        className={
+          "flex items-center gap-1 transition-colors " +
+          (active
+            ? "text-gray-900 font-medium"
+            : "text-gray-500 hover:text-gray-900")
+        }
+      >
+        {label}
+        <svg
+          width="11"
+          height="11"
+          viewBox="0 0 16 16"
+          aria-hidden="true"
+          className={"transition-transform " + (open ? "rotate-180" : "")}
+        >
+          <path
+            d="M4 6 L8 10 L12 6"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </button>
+
+      {open && (
+        <div
+          role="menu"
+          className="absolute left-0 mt-2 w-72 rounded-lg border border-gray-200 bg-white shadow-lg overflow-hidden py-1"
+        >
+          {children.map((c) => (
+            <Link
+              key={c.href}
+              href={c.href}
+              role="menuitem"
+              className="block px-3 py-2 hover:bg-gray-50"
+            >
+              <div className="text-sm text-gray-900">{c.label}</div>
+              {c.hint && (
+                <div className="text-[11px] text-gray-500 mt-0.5">{c.hint}</div>
+              )}
+            </Link>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 
 export default function Header() {
   const router = useRouter();
@@ -72,8 +252,12 @@ export default function Header() {
     router.push("/login");
   };
 
-  const isActive = (href: string) =>
-    pathname === href || (pathname ?? "").startsWith(href + "/");
+  const isActive = (href: string) => {
+    if (href === "/") {
+      return pathname === "/";
+    }
+    return pathname === href || (pathname ?? "").startsWith(href + "/");
+  };
 
   return (
     <header className="sticky top-0 z-20 bg-white/95 backdrop-blur border-b border-gray-100">
@@ -85,20 +269,23 @@ export default function Header() {
         {user ? (
           <div className="flex items-center gap-6 text-sm">
             <nav className="flex items-center gap-6">
-              {NAV.map((n) => (
-                <Link
-                  key={n.href}
-                  href={n.href}
-                  className={
-                    "transition-colors " +
-                    (isActive(n.href)
-                      ? "text-gray-900 font-medium"
-                      : "text-gray-500 hover:text-gray-900")
-                  }
-                >
-                  {n.label}
-                </Link>
-              ))}
+              {NAV.map((n) =>
+                n.kind === "link" ? (
+                  <NavLink
+                    key={n.href}
+                    href={n.href}
+                    label={n.label}
+                    active={isActive(n.href)}
+                  />
+                ) : (
+                  <NavDropdown
+                    key={n.label}
+                    label={n.label}
+                    children={n.children}
+                    active={n.children.some((c) => isActive(c.href))}
+                  />
+                ),
+              )}
             </nav>
 
             <div className="relative" ref={menuRef}>
