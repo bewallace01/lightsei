@@ -72,6 +72,49 @@ See "12C.1 detail" under the NOW pointer above for the current spec.
 - Edit the team: rename one, remove one, add a "weekly digest" bot. Generate. Review one bot's code. Deploy.
 - Watch them all show up on the constellation. Push a commit. See the chain fan out across the new team.
 
+## Phase 12D: cost intelligence (Polaris is smart about spending)
+
+Goal: Lightsei stops being a passive cost-recorder and becomes an active cost-optimizer. Today /cost shows what you spent. 12D is "where your dollars went, what was wasted, and one-click ways to spend less without losing capability." Promoted ahead of Phase 13 because every new agent we add (12B-generated or hand-written) compounds spend, and most of those agents will use Opus by default — the ROI on a "you're spending $X on Opus tasks Haiku would handle for $0.10X" recommendation grows linearly with team size.
+
+Three layers, build in order:
+
+### 12D.1 — Spending audit (read-only insights)
+
+A new `/cost/insights` page (or section on `/cost`) that surfaces concrete waste signals computed from the existing `runs` + `events` + `model_pricing` tables. No code changes to any bot — pure analytics on data we already have.
+
+- **Cache-skip savings.** Polaris's Phase 6.2 hash cache already skips identical-doc ticks; the dashboard never showed how many tokens that saved. Compute: for each `polaris.tick_skipped` event, multiply the prior `polaris.plan` event's token count by the cache hit count. Surface as "your hash cache saved $X this month."
+- **Plan-volatility analysis.** For polaris specifically: hash each `polaris.plan` event's `summary` + `next_actions`. Identify N consecutive plans where the hash matches. Surface as "the last 5 plans were 90% identical — consider doubling your tick interval from 1h to 2h." One-click apply via the existing `/agents/[name]` Schedule section.
+- **Model-tier mismatch.** Compute per-agent `tokens_in / tokens_out` distribution. If an agent never crosses a complexity threshold the cheaper-tier model handles, surface as "Atlas spent $X on Opus this month; Haiku would have cost ~$0.07X based on observed token ranges." One-click apply via the model pin.
+- **Failed-call cost.** `llm_call_failed` events still cost tokens (anthropic charges for partial generations / refusals). Tally + surface as "failed calls this month: $X. Top reason: <error type>."
+- **Per-trigger ROI.** Rate of agent invocation × cost per invocation × % "useful" outcome. Useful = produced a non-skip plan, or dispatched a command, or emitted a structured event. Bots whose useful-rate is below ~10% are candidates for either a smarter trigger filter or retirement.
+
+### 12D.2 — Polaris emits a periodic self-analysis
+
+Polaris already ticks on a schedule and reads docs. Add a second cron-style task (or fold into the existing tick) that produces a `polaris.cost_analysis` event:
+
+- Pulls the last week's runs + costs + plan hashes for itself + the constellation
+- Calls Claude (or just runs the heuristics from 12D.1 in pure code; cheaper) to summarize what was spent on what, what was useful, what was wasted
+- Emits a `polaris.cost_analysis` event the home page renders next to `polaris.plan`
+- "What's wasted" examples Polaris can call out: ticks producing identical plans (suggest longer interval), agents using a model tier above what their inputs require, dispatch chains that always end the same way regardless of input (suggest making the dispatch conditional)
+
+This is the version of "Polaris is smart about spending" that surfaces the audit *during* the user's normal review flow rather than requiring them to visit a dedicated insights page.
+
+### 12D.3 — Auto-optimization with explicit consent
+
+The dangerous + powerful slice. Lightsei proposes a config change ("switch atlas from Opus to Haiku, projected savings $X / month") and the user one-click accepts. Three guardrails before this is safe:
+
+- **Reversibility.** Every applied recommendation gets an audit row + a "revert to previous" button. Failed downgrades (the cheaper model produces noticeably worse output) are caught in the next 12D.2 cycle and offered as a revert recommendation.
+- **Scoped to model + interval, not behavioral.** 12D.3 only changes provider/model and tick_interval_s — the two reversible knobs. Anything that touches dispatch logic / approval rules / system prompts requires the user to do it manually via the existing surfaces.
+- **Quality watch.** After applying a recommendation, watch the next N runs' validation pass-rate + plan-hash divergence. If quality dropped (more validation fails OR plans suddenly very different from prior pattern), suggest revert.
+
+12D.3 specifically depends on Phase 14 (continuous eval) being further along — auto-tuning needs a quality signal to safely tune against. Park this slice until 14 lands.
+
+### Demo for 12D
+
+- Walk through `/cost/insights`. Pick the recommendation with the highest projected savings.
+- Click apply (12D.3) or apply manually (12D.1 + dashboard pin).
+- One week later, the next 12D.2 tick reports actual savings vs projected and any quality regressions.
+
 ## Phase 13: more agents (deferred)
 
 Originally next, now deferred behind 12B + 12C since most of these can be generated rather than hand-written once those phases ship. Keeping the names + roles around because the constellation still wants seeded teammates for the home page to feel populated:
