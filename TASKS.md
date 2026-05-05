@@ -9,78 +9,9 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 > **Phase 12C.1: backend `/workspaces/me/teams/plan` endpoint (drop a README, propose a team)**
 
-Phase 12B fully shipped + demo'd against prod 2026-05-04. See Done Log. Phase 12C builds on it: instead of one bot at a time, the user drops a README (or pastes one) and Lightsei proposes a tailored team rooted at Polaris — calling 12B's per-bot generator in a loop to flesh out each role.
+Phase 12B fully shipped + demo'd against prod 2026-05-04. See Done Log. Phase 12C builds on it: instead of one bot at a time, the user drops a README (or pastes one) and Lightsei proposes a tailored team rooted at Polaris — calling 12B's per-bot generator in a loop to flesh out each role. This is the leverage move for the non-engineer audience: 12B closed the "I don't know how to write Python" wall; 12C closes the "I don't know what bots I need" wall.
 
-Why this is the leverage move for the audience: today, "deploy a bot" requires both knowing Python and understanding the Lightsei SDK. The browser-deploy work from 2026-05-04 closed the second wall (no terminal needed) but the first wall — actually authoring `bot.py` — is still there. 12B closes it. After 12B, signing up + describing what you want + clicking deploy is a complete onboarding path for a non-engineer.
-
-### 12B.1 Backend generate endpoint
-
-- New `POST /workspaces/me/agents/generate` taking `{description, target_agents?, name_hint?}` and returning `{bot_py, requirements_txt, agent_name_suggestion, model_used, tokens_in, tokens_out}`. Calls Claude (Opus 4.7 by default; configurable per workspace later) with a curated system prompt.
-- The system prompt teaches the SDK surface: `@lightsei.on_command`, `lightsei.send_command(target, kind, payload, source_agent=...)`, `lightsei.emit`, `lightsei.get_secret`, the auto-instrumented OpenAI / Anthropic / Gemini patches (no manual instrumentation needed). One canonical "minimal bot" template + 2-3 worked examples (`hermes.post` style notifier; `atlas.run_tests` style executor; an LLM-calling planner).
-- Inject the user's existing constellation into the prompt so coordination Just Works: hit `/workspaces/me/agents` for the agent list, hit `/agents/{name}/manifest` for each agent's command kinds, render as a "the following agents already exist; dispatch to them rather than reinventing" block.
-- **Star-themed naming.** The agent name returned in `agent_name_suggestion` MUST be a star, constellation, or celestial body whose meaning thematically matches the bot's role (Polaris orchestrates / navigates, Atlas supports / runs heavy work, Hermes carries messages, etc.). Include the curated dictionary below in the system prompt so Claude has on-theme options to pick from rather than invent — and so we get consistent vibes across users' workspaces. Reject + retry once if the proposed name is already in use in the workspace, or if it isn't on the dictionary.
-- Cost guardrail: respect the workspace's existing daily cost cap (Phase 2.3 plumbing). Track generation calls via the same `add_run_cost_from_event` path as runtime LLM calls so they show up on the cost panel.
-- Tests: stubbed Anthropic client returns canned response; verify the prompt includes the workspace's agent list + the star dictionary; verify the response shape; verify daily-cost-cap enforcement; verify the agent_name_suggestion is in the dictionary.
-
-#### Star-naming dictionary (curated; injected into 12B.1's system prompt and reused by 12C.1)
-
-The bots Lightsei seeds with (`polaris`, `atlas`, `hermes`) set the convention. Generated bots follow it. This is the starter list — extend over time as new roles emerge:
-
-| name | theme / role |
-|---|---|
-| polaris | orchestration, navigation, the north star you align by |
-| atlas | bearing weight, running heavy or repeated work (tests, builds) |
-| hermes | messenger, posts notifications outbound (Slack, email, SMS) |
-| argus | the all-seeing giant — security scanning, secret detection, audit |
-| vega | sharp + bright — code review, PR scrutiny, structural critique |
-| sirius | the dog star, alerting / on-call, the one that pages you |
-| cassiopeia | storyteller in the sky — incident scribe, post-mortem writer |
-| lyra | harmony — coordination, cross-agent integration glue |
-| vela | the sails — deployment, shipping, release verification |
-| spica | wheat-ear, harvest — summarization, digest, weekly recap |
-| rigel | the foot — infrastructure watcher, bedrock health |
-| antares | heart of the scorpion — watching one critical thing closely |
-| altair | flying / fast — realtime streaming, low-latency reactions |
-| capella | the little she-goat herding her kids — fleet monitoring |
-| bellatrix | the warrior — defensive guards, intrusion / abuse detection |
-| procyon | "before the dog" — pre-commit hooks, pre-flight checks |
-| aldebaran | the follower — cleanup / sweep tasks downstream of others |
-| betelgeuse | red supergiant — long-running batch jobs, overnight work |
-| canopus | second-brightest in the sky — secondary backup, fallback agent |
-| arcturus | the herdsman — managing other bots' lifecycles |
-
-### 12B.2 Dashboard generate page
-
-- New `/agents/generate` route (or section on `/agents/new` next to the drop-zone) with a textarea for the description, a small dropdown for "coordinate with these agents" (multi-select; defaults to all), and a generate button. Loading state while the backend calls Claude.
-- Output: a code preview (textarea is fine for v1; Monaco can come later) showing the generated `bot.py` + `requirements.txt`. User can edit inline before deploying.
-- Deploy button: uses the existing `uploadDeploymentBundle` path — zip the generated files in-browser via JSZip (small dep, ~50KB; this is the natural place to add it since we'll need it for the parking-lot in-browser zipping anyway), post the zip, route to `/deployments/{id}` on success.
-
-### 12B.3 Iteration loop
-
-- "Regenerate with these tweaks" textarea below the preview. Sends Claude a follow-up turn with the prior generation + the tweak request. Replaces the preview with the new version.
-- Backend extends the endpoint to take `{previous_bot_py, previous_requirements_txt, tweak_request}` instead of (or alongside) `description`.
-- Cap the iteration depth at e.g. 5 turns per generation session — past that, ask the user to restart.
-
-### 12B.4 Validation gate before showing the user
-
-- Pyflakes / py_compile pass on the generated `bot.py` before returning. If it fails, retry the LLM call once with the error appended to the prompt; if it still fails, surface the error to the user with a "regenerate" button rather than ship broken code into their deploy pipeline.
-- requirements.txt sanity check: every import in bot.py either resolves to stdlib, `lightsei`, or appears in requirements.txt. Catches the common "the LLM imported `requests` but didn't add it" failure.
-
-### 12B.5 Demo
-
-- Sign up a fresh workspace (or use the existing one with a name like "demo-12B").
-- On `/agents/generate`, type a prompt like "Write me a bot that polls a public RSS feed once an hour and posts new items to Slack via Hermes." Hit generate.
-- Verify the generated bot.py uses `lightsei.send_command("hermes", "hermes.post", ...)` (because the prompt told Claude that hermes already exists).
-- Edit one line ("change the poll interval to 30 minutes"). Click deploy. Watch it go to `/deployments/{id}`, see the build, see the bot run.
-- Push to GitHub: registering the generated agent path on `/github` and using push-to-deploy still works because the deployment machinery is unchanged.
-
-## Phase 12C: drop a README, get a team
-
-Natural extension of 12B that arrives once the per-bot generator is solid. Instead of "describe one bot, get one bot," the user drops their project's README (or a GitHub repo URL) and Lightsei proposes + generates a tailored constellation of bots wired up to maintain it. Calling 12B's per-bot generator in a loop is the implementation core; the new work is the project-analysis layer on top + the bulk-deploy + auto-approval-rule wiring.
-
-Why this matters: the 12B v1 still requires the user to know what bots they want. For most non-engineer users that's the harder cognitive step than writing the description. Watching a Lightsei-proposed team appear from a README does the framing work for them — they're reviewing a plan rather than authoring one.
-
-### 12C.1 Project analysis endpoint
+### 12C.1 detail
 
 - New `POST /workspaces/me/teams/plan` taking `{readme_text?, github_repo?, github_branch?, freeform_description?}` and returning a roster of proposed bots:
   ```
@@ -101,9 +32,20 @@ Why this matters: the 12B v1 still requires the user to know what bots they want
   }
   ```
 - LLM system prompt teaches the analysis step: read the project, identify recurring kinds of work (testing, security, deploy verification, PR review, oncall, doc maintenance, content moderation, ...), propose 3-7 bots with non-overlapping roles, wire the dispatch graph so each bot has at most one or two outgoing edges (avoid spaghetti).
-- The prompt also includes the curated SDK surface from 12B.1 so the proposed `command_kinds` are realistic, plus the workspace's existing constellation so the plan can incorporate (rather than duplicate) Polaris/Atlas/Hermes if they exist.
-- Each proposed bot's `name` MUST be from the star-naming dictionary in 12B.1, picked to thematically match the role. Names already in use in the workspace are off-limits; the prompt reserves them. The plan endpoint also rejects + retries if Claude returns a name not in the dictionary.
+- The prompt also includes the curated SDK surface from 12B.1 + the star-naming dictionary so the proposed `command_kinds` and `name`s are realistic, plus the workspace's existing constellation so the plan can incorporate (rather than duplicate) Polaris/Atlas/Hermes if they exist.
+- Each proposed bot's `name` MUST be from the star-naming dictionary (see `backend/agent_generator.py:STAR_DICTIONARY`), picked to thematically match the role. Names already in use in the workspace are off-limits; the prompt reserves them. The plan endpoint also rejects + retries if Claude returns a name not in the dictionary.
 - GitHub-repo input path reuses Phase 10.3's `github_api.fetch_directory_zip` (or a lighter "just fetch the README") so the user can paste a repo URL instead of copying README contents.
+- Tests mirror 12B.1's stubbed-Anthropic shape: canned response, prompt-content assertions, name-validation, retry path.
+
+## Phase 12C: drop a README, get a team
+
+Natural extension of 12B that arrives once the per-bot generator is solid. Instead of "describe one bot, get one bot," the user drops their project's README (or a GitHub repo URL) and Lightsei proposes + generates a tailored constellation of bots wired up to maintain it. Calling 12B's per-bot generator in a loop is the implementation core; the new work is the project-analysis layer on top + the bulk-deploy + auto-approval-rule wiring.
+
+Why this matters: the 12B v1 still requires the user to know what bots they want. For most non-engineer users that's the harder cognitive step than writing the description. Watching a Lightsei-proposed team appear from a README does the framing work for them — they're reviewing a plan rather than authoring one.
+
+### 12C.1 Project analysis endpoint
+
+See "12C.1 detail" under the NOW pointer above for the current spec.
 
 ### 12C.2 Team review UI
 
@@ -132,11 +74,7 @@ Why this matters: the 12B v1 still requires the user to know what bots they want
 
 ## Phase 13: more agents (deferred)
 
-Originally next, now deferred behind 12B since most of these can be generated rather than hand-written once 12B ships. Keeping the names + roles around because the constellation still wants seeded teammates for the home page to feel populated:
-
-## Phase 13: more agents (deferred)
-
-Originally next, now deferred behind 12B since most of these can be generated rather than hand-written once 12B ships. Keeping the names + roles around because the constellation still wants seeded teammates for the home page to feel populated:
+Originally next, now deferred behind 12B + 12C since most of these can be generated rather than hand-written once those phases ship. Keeping the names + roles around because the constellation still wants seeded teammates for the home page to feel populated:
 
 - Argus (security + secret scanner)
 - Vega (PR reviewer)
@@ -580,6 +518,31 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-05 — Phase 12B aftercare: dashboard polish + missing surfaces
+
+A long stretch of UX work after Phase 12B + the parking-lot promotions on 2026-05-04. Theme: turn the home page from "list every state somewhere, hope the user finds it" into "every counter / label / failure on the home page links to the place that fixes or explains it." Most of these are individual commits; bundling here for the audit trail.
+
+- [x] **Per-agent tick interval.** New `agents.tick_interval_s` column (migration 0021) + dashboard "Schedule" section on `/agents/[name]` with six preset buttons (1m / 5m / 15m / 1h / 4h / daily) and a custom seconds input. Polaris's main loop reads the override at the start of each sleep cycle via `lightsei.get_agent_config()` (added to SDK 0.1.4) — change takes effect on the very next sleep, no redeploy. Reactive bots (atlas, hermes) ignore the column. SDK 0.1.4 published to PyPI.
+- [x] **`/getting-started` page + sharper empty states.** New 5-step walkthrough (API key → deploy a bot → see runs → optional Slack/GitHub → concept primer for agents/dispatch chains/approval gates/validators). Includes a sample `bot.py` + `requirements.txt` to copy. Header gets a `docs` nav link. Empty states on `/`, `/dispatch`, `/deployments` rewritten to define the concept first, then offer a primary action + a secondary "read the guide" button.
+- [x] **Header reorg into dropdowns.** Flat `polaris / dispatch / notifications / github / docs` collapsed into 6 logical slots: `home / polaris / agents ▾ / activity ▾ / integrations ▾ / docs`. Each dropdown item has a one-line hint so the menu reads as a mini onboarding. Logo + new explicit `home` tab both teach the dashboard-home affordance for users who don't know "logo = home" by convention.
+- [x] **Home page split.** Runs section on `/` capped at 5 entries with a "see all N runs →" footer; `CostPanel` got a `compact` prop that hides per-agent + per-model breakdowns and shows a "see breakdown by agent + model →" link. Two new dedicated pages: `/runs` (full unbounded table) and `/cost` (full breakdown). Activity dropdown brings them back into the nav (`runs / dispatch chains / cost`).
+- [x] **`/validators` management page.** Backend already had GET/PUT/DELETE — needed a UI. New page lists every workspace validator (event_kind × validator_name × mode), inline edit per row (mode dropdown + JSON config textarea), failed JSON parse on save shows a clean error rather than corrupting the row. The home page's "X failed validation" pulse chip now links here (was `/runs`, which was a list view, not a fix-it surface).
+- [x] **`/agents` directory roster.** New page lists every bot in the workspace with name (linked to detail) + 2-line description sub-row + role + status + pinned model + tick interval + runs(24h) + cost(24h) + last seen + delete. Inline model edit per row (provider dropdown + model id input + save / × buttons). Sorted orchestrator-first then by activity. Delete button per row with confirm dialog (history kept; only the agents row drops). Linked from the home page's "9 agents" Hero label and the "Constellation →" header label.
+- [x] **`/agents/[name]` description editor.** New top-of-page Description section above Model. 12B-generated bots auto-populate from the LLM rationale on deploy (the `/agents/generate` flow now PATCHes the new agent with `{description: rationale}` after upload). Hand-deployed bots get an empty editor.
+- [x] **Migration 0023: `agents.description`** (nullable text) + AgentPatchIn + serializer + dashboard wiring.
+- [x] **DELETE `/agents/{name}`.** Hard-deletes the agents row; past runs/events/commands stay as audit trail (their string `agent_name` reference survives). Workspace-isolated. Three new tests.
+- [x] **`failed_validations` pulse counter auto-clears when a rule is edited.** SQL change: the LEFT JOIN against validator_configs filters out fails older than the validator's `updated_at`. Editing a rule on `/validators` is the user's signal that they've addressed it; stale fails of an already-tuned rule disappear from the home pulse. Closes the "I fixed the rule, why is the home page still nagging me" paper cut.
+- [x] **`drop` removed from banned-destructive-verbs default rule pack.** Polaris's plan landed FAIL because the verb fired on innocuous English ("drop a zip on /agents/new", "drop an entry from the parking lot"). Tightened to `(delete|truncate|destroy|nuke)` — the four with unambiguously destructive valence. Tests updated; new regression test asserts plans containing "drop" pass cleanly. Re-registered the live workspace's rule via PUT.
+- [x] **Stale-agents counter retightened** earlier on 2026-05-04. Constellation map now filters by recent activity (heartbeat in last hour OR event in last 24h OR role=orchestrator); stale-agents pulse counter only counts agents that were recently relevant (so abandoned test bots from weeks ago don't keep nagging).
+- [x] **Constellation polish** earlier on 2026-05-04. Even-angle layout per role ring (was hash-based with a post-hoc collision bump that left atlas + hermes on top of each other once their FNV-1a hashes clashed). Edges switched from bezier to straight lines (cleaner for hub-and-spoke than fighting bezier control points around the orchestrator).
+- [x] **`/deployments` index page** earlier on 2026-05-04. The `[id]` subroute existed but `/deployments` itself 404'd; new index lists every deployment with status pill, source + commit, last heartbeat, error, link to detail.
+
+**What this leaves on the table for tomorrow:**
+
+- 12C.1 (project analysis endpoint, drop a README → propose a team)
+- "Edit auto-approval rules from the dispatch view" — 11.6 already has the side panel, no work needed but unmentioned in the docs walkthrough
+- 12B's parking-lot followups (in-browser directory zip via the existing JSZip dep, "deploy from GitHub repo path" form)
 
 ### 2026-05-04 — Phase 12B: describe a bot, get a bot
 
