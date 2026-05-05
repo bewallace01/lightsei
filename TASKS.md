@@ -46,6 +46,65 @@ Why this is the leverage move for the audience: today, "deploy a bot" requires b
 - Edit one line ("change the poll interval to 30 minutes"). Click deploy. Watch it go to `/deployments/{id}`, see the build, see the bot run.
 - Push to GitHub: registering the generated agent path on `/github` and using push-to-deploy still works because the deployment machinery is unchanged.
 
+## Phase 12C: drop a README, get a team
+
+Natural extension of 12B that arrives once the per-bot generator is solid. Instead of "describe one bot, get one bot," the user drops their project's README (or a GitHub repo URL) and Lightsei proposes + generates a tailored constellation of bots wired up to maintain it. Calling 12B's per-bot generator in a loop is the implementation core; the new work is the project-analysis layer on top + the bulk-deploy + auto-approval-rule wiring.
+
+Why this matters: the 12B v1 still requires the user to know what bots they want. For most non-engineer users that's the harder cognitive step than writing the description. Watching a Lightsei-proposed team appear from a README does the framing work for them — they're reviewing a plan rather than authoring one.
+
+### 12C.1 Project analysis endpoint
+
+- New `POST /workspaces/me/teams/plan` taking `{readme_text?, github_repo?, github_branch?, freeform_description?}` and returning a roster of proposed bots:
+  ```
+  {
+    "rationale": "<1-3 sentences on why this team fits the project>",
+    "team": [
+      {
+        "name": "argus",
+        "role": "specialist",
+        "summary": "scans every push for hardcoded secrets",
+        "command_kinds": ["argus.scan"],
+        "dispatches_to": ["hermes"],
+        "needs_workspace_secrets": ["GITHUB_TOKEN"],
+        "draft_description": "<paragraph the 12B generator can use as input>"
+      },
+      ...
+    ]
+  }
+  ```
+- LLM system prompt teaches the analysis step: read the project, identify recurring kinds of work (testing, security, deploy verification, PR review, oncall, doc maintenance, content moderation, ...), propose 3-7 bots with non-overlapping roles, wire the dispatch graph so each bot has at most one or two outgoing edges (avoid spaghetti).
+- The prompt also includes the curated SDK surface from 12B.1 so the proposed `command_kinds` are realistic, plus the workspace's existing constellation so the plan can incorporate (rather than duplicate) Polaris/Atlas/Hermes if they exist.
+- GitHub-repo input path reuses Phase 10.3's `github_api.fetch_directory_zip` (or a lighter "just fetch the README") so the user can paste a repo URL instead of copying README contents.
+
+### 12C.2 Team review UI
+
+- New `/agents/team-from-readme` page (or section on `/agents/generate`). Drop zone for a README file + textarea for freeform context + optional GitHub URL field.
+- Output: a visual preview of the proposed team — same star-and-edge aesthetic as the existing constellation map, but rendered against the proposed bots rather than what's actually deployed. Click a star to see that bot's role + commands + the draft description that'll feed 12B.
+- Inline editing: rename, remove, add a new bot, edit the role/description. Each edit just mutates the in-memory plan; nothing's deployed yet.
+- "Generate and deploy" button at the bottom — kicks off 12C.3.
+
+### 12C.3 Bulk generation
+
+- For each bot in the approved plan, call 12B.1's generate endpoint with `description = bot.draft_description + "Coordinate with these other agents in this team: ..."`. Run them in parallel (Claude's API supports it; cheap with concurrent requests).
+- Validation gate from 12B.4 runs per-bot. If any bot fails generation after retries, surface the failure and let the user choose: skip that bot, retry, or edit the description and retry.
+- Per-bot generated code shown in the same preview shape as 12B.2 — user can review + edit each one before final deploy. This step is gated on user click; we don't auto-deploy generated code without a human seeing it.
+
+### 12C.4 Bulk deploy + rule wiring
+
+- For each approved+reviewed bot, call `uploadDeploymentBundle` (the existing 2026-05-04 path). Show progress per-bot.
+- After all deploys are queued, install the auto-approval rules from the plan's dispatch graph: `(source_agent, target_agent, command_kind) -> auto_approve` for the edges the plan declared. Uses the existing PUT `/workspaces/me/auto-approval-rules` endpoint from Phase 11.2.
+- If the plan called for workspace secrets the user hasn't set (e.g. `SLACK_WEBHOOK_URL`, `GITHUB_TOKEN`), surface a checklist on the success page rather than silently letting the bots crash on first run.
+
+### 12C.5 Demo
+
+- Drop the Lightsei project's own README on `/agents/team-from-readme`. Generate. Expect Claude to propose something like: a documentation maintainer (reads MEMORY.md + TASKS.md, suggests cleanups), a PR reviewer, a security scanner, a build watcher. Whatever the LLM picks — that's the demo's first surprise.
+- Edit the team: rename one, remove one, add a "weekly digest" bot. Generate. Review one bot's code. Deploy.
+- Watch them all show up on the constellation. Push a commit. See the chain fan out across the new team.
+
+## Phase 13: more agents (deferred)
+
+Originally next, now deferred behind 12B since most of these can be generated rather than hand-written once 12B ships. Keeping the names + roles around because the constellation still wants seeded teammates for the home page to feel populated:
+
 ## Phase 13: more agents (deferred)
 
 Originally next, now deferred behind 12B since most of these can be generated rather than hand-written once 12B ships. Keeping the names + roles around because the constellation still wants seeded teammates for the home page to feel populated:
