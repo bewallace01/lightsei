@@ -71,6 +71,11 @@ const NAV: NavItem[] = [
         label: "cost",
         hint: "MTD spend + per-agent / per-model breakdown",
       },
+      {
+        href: "/cost/insights",
+        label: "✨ cost insights",
+        hint: "Where dollars went, what was wasted, one-click fixes",
+      },
     ],
   },
   {

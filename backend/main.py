@@ -1108,6 +1108,25 @@ def get_workspace_cost(
     return workspace_cost_mtd(session, workspace_id)
 
 
+@app.get("/workspaces/me/cost/insights")
+def get_cost_insights(
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 12D.1: where your dollars went, what was wasted, and
+    one-click fixes where they exist.
+
+    Returns a homogeneous list of insight dicts (model-tier swaps that
+    would save money, agents with low useful-rate, cache savings to
+    date, failed-call cost, plan volatility for tick-interval tuning).
+    Pure analytics over existing data — no LLM calls, no schema
+    changes; safe to poll on every page load (the /cost/insights page
+    refreshes every 30s the same way /cost does).
+    """
+    import cost_insights as _ci
+    return _ci.all_insights(session, workspace_id)
+
+
 @app.get("/workspaces/me/pulse")
 def get_workspace_pulse(
     session: Session = Depends(get_session),

@@ -1195,6 +1195,30 @@ export async function fetchWorkspaceCost(): Promise<WorkspaceCost> {
   return (await authedJson("/workspaces/me/cost")) as WorkspaceCost;
 }
 
+// Phase 12D.1: cost-intelligence insights. Each entry is one
+// recommendation or audit datapoint with a homogeneous shape so the
+// rendering can be a generic map. `apply` is non-null when the
+// dashboard can offer a one-click fix.
+export type CostInsightApply = {
+  href: string;
+  label: string;
+  patch?: Record<string, unknown>;
+};
+
+export type CostInsight = {
+  kind: string;
+  headline: string;
+  detail: Record<string, unknown>;
+  apply: CostInsightApply | null;
+};
+
+export async function fetchCostInsights(): Promise<CostInsight[]> {
+  const body = (await authedJson("/workspaces/me/cost/insights")) as {
+    insights: CostInsight[];
+  };
+  return body.insights;
+}
+
 // ---------- Status pulse (Phase 11B.2) ---------- //
 
 export type PulseIssues = {
