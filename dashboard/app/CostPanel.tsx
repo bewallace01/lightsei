@@ -72,7 +72,7 @@ function StarBullet({ name, size = 8 }: { name: string; size?: number }) {
   );
 }
 
-export default function CostPanel() {
+export default function CostPanel({ compact = false }: { compact?: boolean }) {
   const [data, setData] = useState<WorkspaceCost | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [sortAgentsBy, setSortAgentsBy] =
@@ -236,7 +236,7 @@ export default function CostPanel() {
           )}
 
           {/* Per-agent breakdown */}
-          {sortedAgents.length > 0 && (
+          {!compact && sortedAgents.length > 0 && (
             <div className="mt-6">
               <div className="flex items-baseline justify-between mb-2">
                 <span className="text-[11px] uppercase tracking-wider text-gray-500 font-medium">
@@ -305,7 +305,7 @@ export default function CostPanel() {
           {/* Per-model summary — Phase 12's multi-provider work makes
               this row interesting (Atlas-on-Haiku vs Atlas-on-Llama-Groq
               would show the cost shift here at a glance). */}
-          {data.by_model.length > 0 && (
+          {!compact && data.by_model.length > 0 && (
             <div className="mt-5">
               <span className="text-[11px] uppercase tracking-wider text-gray-500 font-medium">
                 By model
@@ -332,6 +332,16 @@ export default function CostPanel() {
                   );
                 })}
               </div>
+            </div>
+          )}
+          {compact && (
+            <div className="mt-4 text-right">
+              <Link
+                href="/cost"
+                className="text-xs text-indigo-700 hover:text-indigo-900"
+              >
+                see breakdown by agent + model →
+              </Link>
             </div>
           )}
         </>

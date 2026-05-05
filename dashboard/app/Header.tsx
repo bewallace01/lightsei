@@ -47,7 +47,27 @@ const NAV: NavItem[] = [
       },
     ],
   },
-  { kind: "link", href: "/dispatch", label: "dispatch" },
+  {
+    kind: "group",
+    label: "activity",
+    children: [
+      {
+        href: "/runs",
+        label: "runs",
+        hint: "Every LLM call your bots have made",
+      },
+      {
+        href: "/dispatch",
+        label: "dispatch chains",
+        hint: "Cause-and-effect trees of agent commands",
+      },
+      {
+        href: "/cost",
+        label: "cost",
+        hint: "MTD spend + per-agent / per-model breakdown",
+      },
+    ],
+  },
   {
     kind: "group",
     label: "integrations",
