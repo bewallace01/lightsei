@@ -274,3 +274,60 @@ def test_unauthenticated_blocked(client):
         files={"bundle": ("b.zip", io.BytesIO(b"abc"), "application/zip")},
     )
     assert r.status_code == 401
+
+
+# ---------- Worker retire-on-redeploy ---------- #
+
+
+def test_redeploy_retires_previous_active_instance(client, alice):
+    """Uploading a new bundle for an existing agent should flip the
+    previous deployment's desired_state to 'stopped' so the worker's
+    supervisor terminates the old bot and frees the concurrency slot
+    for the new one."""
+    h = auth_headers(alice["session_token"])
+
+    first = _upload(client, h, "polaris", payload=b"PK\x03\x04first").json()
+    assert first["desired_state"] == "running"
+
+    second = _upload(client, h, "polaris", payload=b"PK\x03\x04second").json()
+    assert second["desired_state"] == "running"
+    assert second["id"] != first["id"]
+
+    # The first one should now be marked desired_state=stopped server-side.
+    r = client.get(f"/workspaces/me/deployments/{first['id']}", headers=h)
+    assert r.status_code == 200
+    assert r.json()["desired_state"] == "stopped"
+
+
+def test_redeploy_only_affects_same_agent(client, alice):
+    """Uploading a new bundle for agent A must not retire deployments
+    for agent B — they're independent supervisors."""
+    h = auth_headers(alice["session_token"])
+
+    atlas = _upload(client, h, "atlas").json()
+    hermes = _upload(client, h, "hermes").json()
+    # New atlas upload should retire the first atlas only.
+    _upload(client, h, "atlas", payload=b"PK\x03\x04new")
+
+    r = client.get(f"/workspaces/me/deployments/{atlas['id']}", headers=h)
+    assert r.json()["desired_state"] == "stopped"
+    r = client.get(f"/workspaces/me/deployments/{hermes['id']}", headers=h)
+    assert r.json()["desired_state"] == "running"  # untouched
+
+
+def test_redeploy_does_not_revive_already_stopped(client, alice):
+    """A deployment manually stopped earlier shouldn't be 'retired'
+    again — its desired_state stays 'stopped' (the helper only flips
+    rows whose status is queued / building / running AND desired_state
+    is currently 'running')."""
+    h = auth_headers(alice["session_token"])
+    first = _upload(client, h, "polaris").json()
+    # Manually stop the first one.
+    r = client.post(
+        f"/workspaces/me/deployments/{first['id']}/stop", headers=h,
+    )
+    assert r.status_code == 200
+    # Upload a second one. Helper finds zero active rows to retire.
+    _upload(client, h, "polaris", payload=b"PK\x03\x04new")
+    r = client.get(f"/workspaces/me/deployments/{first['id']}", headers=h)
+    assert r.json()["desired_state"] == "stopped"  # unchanged

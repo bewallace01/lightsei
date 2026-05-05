@@ -2368,6 +2368,46 @@ def _collect_touched_paths(commits: list[dict[str, Any]]) -> list[str]:
     return out
 
 
+def _retire_active_deployments_for_agent(
+    session: Session,
+    *,
+    workspace_id: str,
+    agent_name: str,
+) -> int:
+    """Flip `desired_state` to 'stopped' on every existing deployment for
+    `(workspace_id, agent_name)` that's still queued / building / running.
+
+    Called immediately before persisting a NEW deployment for the same
+    agent, so the worker's claim loop + the running supervisor's
+    desired-state poll cooperate to retire the old bundle and free the
+    concurrency slot for the new one. Without this, every redeploy
+    accumulates an orphan bot until MAX_CONCURRENT is hit and queues
+    silently stall (the issue we worked around with manual `pkill`
+    during the Phase 11.7 demo and the Phase 12.4 polaris dance).
+
+    Returns the count of rows retired so the caller can log it.
+    """
+    rows = (
+        session.execute(
+            select(Deployment).where(
+                Deployment.workspace_id == workspace_id,
+                Deployment.agent_name == agent_name,
+                Deployment.desired_state == "running",
+                Deployment.status.in_(["queued", "building", "running"]),
+            )
+        )
+        .scalars()
+        .all()
+    )
+    now = utcnow()
+    for d in rows:
+        d.desired_state = "stopped"
+        d.updated_at = now
+    if rows:
+        session.flush()
+    return len(rows)
+
+
 def _queue_github_redeploy(
     session: Session,
     *,
@@ -2438,6 +2478,11 @@ def _queue_github_redeploy(
     session.flush()
 
     ensure_agent(session, integration.workspace_id, agent_name, now)
+    _retire_active_deployments_for_agent(
+        session,
+        workspace_id=integration.workspace_id,
+        agent_name=agent_name,
+    )
     dep = Deployment(
         id=str(uuid.uuid4()),
         workspace_id=integration.workspace_id,
@@ -2716,6 +2761,9 @@ async def upload_deployment(
     session.flush()
 
     ensure_agent(session, workspace_id, agent_name, now)
+    _retire_active_deployments_for_agent(
+        session, workspace_id=workspace_id, agent_name=agent_name,
+    )
     dep = Deployment(
         id=str(uuid.uuid4()),
         workspace_id=workspace_id,
