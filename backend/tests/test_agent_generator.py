@@ -1,0 +1,307 @@
+"""Phase 12B.1: backend agent-code generation.
+
+Two surfaces under test:
+
+1. The pure `agent_generator` module — star dictionary, prompt-building
+   helpers, schema. No HTTP, no Anthropic, no DB.
+2. The `POST /workspaces/me/agents/generate` endpoint with a stubbed
+   Anthropic client. We patch `anthropic.Anthropic` to return canned
+   tool_use responses so CI doesn't need a real API key.
+"""
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+
+from agent_generator import (
+    STAR_DICTIONARY,
+    SUBMIT_BOT_TOOL,
+    build_system_prompt,
+    build_user_message,
+    is_valid_star_name,
+    render_star_dictionary_for_prompt,
+)
+from tests.conftest import auth_headers
+
+
+# ---------- Pure-module unit tests ---------- #
+
+
+def test_star_dictionary_has_seeded_agents():
+    names = {n for n, _ in STAR_DICTIONARY}
+    # The bots we ship out of the box must be in the dictionary so the
+    # generator can recognize them as already-taken in their workspaces.
+    assert {"polaris", "atlas", "hermes"}.issubset(names)
+
+
+def test_is_valid_star_name_lowercase_and_strip():
+    assert is_valid_star_name("polaris")
+    assert is_valid_star_name("Polaris")
+    assert is_valid_star_name("  ATLAS  ")
+    assert not is_valid_star_name("nonstar")
+    assert not is_valid_star_name("")
+    assert not is_valid_star_name(None)  # type: ignore[arg-type]
+
+
+def test_render_dictionary_filters_reserved_names():
+    full = render_star_dictionary_for_prompt(reserved=set())
+    filtered = render_star_dictionary_for_prompt(
+        reserved={"polaris", "atlas"}
+    )
+    assert "polaris" in full
+    assert "atlas" in full
+    assert "polaris" not in filtered
+    assert "atlas" not in filtered
+    # Other names are still listed.
+    assert "hermes" in filtered
+
+
+def test_build_system_prompt_includes_agents_and_dictionary():
+    prompt = build_system_prompt(
+        existing_agents=[
+            {
+                "name": "polaris",
+                "role": "orchestrator",
+                "provider": None,
+                "model": None,
+                "command_kinds": ["polaris.evaluate_push"],
+            },
+        ],
+        reserved_names={"polaris"},
+    )
+    # Existing agent rendered.
+    assert "polaris" in prompt
+    assert "polaris.evaluate_push" in prompt
+    # Star dictionary excludes polaris (reserved).
+    assert "| `polaris` |" not in prompt
+    assert "| `hermes` |" in prompt
+    # Always-on prompt scaffolding.
+    assert "submit_bot" in prompt
+    assert "lightsei.init" in prompt
+
+
+def test_build_user_message_optional_hints():
+    plain = build_user_message("post a haiku to slack")
+    assert "post a haiku to slack" in plain
+    assert "Coordinate" not in plain  # no targets passed
+
+    full = build_user_message(
+        "post a haiku to slack",
+        target_agents=["hermes"],
+        name_hint="vega",
+    )
+    assert "hermes" in full
+    assert "vega" in full
+
+
+def test_submit_bot_schema_required_fields():
+    required = set(SUBMIT_BOT_TOOL["input_schema"]["required"])
+    # Anything missing here breaks the dashboard's render contract.
+    assert required == {"agent_name", "rationale", "bot_py", "requirements_txt"}
+
+
+# ---------- Endpoint tests with stubbed Anthropic ---------- #
+
+
+class _FakeUsage:
+    def __init__(self, in_t: int, out_t: int) -> None:
+        self.input_tokens = in_t
+        self.output_tokens = out_t
+
+
+def _fake_response(*, agent_name: str, bot_py: str = "print('hi')",
+                   requirements_txt: str = "lightsei>=0.1.3",
+                   rationale: str = "test bot") -> SimpleNamespace:
+    """Build the `messages.create` return value the endpoint expects."""
+    tool_block = SimpleNamespace(
+        type="tool_use",
+        name="submit_bot",
+        input={
+            "agent_name": agent_name,
+            "rationale": rationale,
+            "bot_py": bot_py,
+            "requirements_txt": requirements_txt,
+        },
+    )
+    return SimpleNamespace(
+        content=[tool_block],
+        stop_reason="tool_use",
+        model="claude-opus-4-7",
+        usage=_FakeUsage(123, 456),
+    )
+
+
+class _FakeClient:
+    """Stand-in for `anthropic.Anthropic`. Configurable per-test by
+    monkeypatching `messages.create` to return whatever response the
+    test scenario wants."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        # Each instance gets its own messages obj so tests can set
+        # `.messages.create = lambda ...` without leakage.
+        self.messages = SimpleNamespace(create=lambda **kw: None)
+
+
+def _set_anthropic_secret(client, api_key: str, value: str = "sk-ant-fake"):
+    """The endpoint reads ANTHROPIC_API_KEY from the workspace's secrets
+    store. Set it once per test."""
+    r = client.put(
+        "/workspaces/me/secrets/ANTHROPIC_API_KEY",
+        headers=auth_headers(api_key),
+        json={"value": value},
+    )
+    assert r.status_code == 200, r.text
+
+
+def test_generate_returns_bot_with_dictionary_name(client, alice, monkeypatch):
+    api_key = alice["api_key"]["plaintext"]
+    _set_anthropic_secret(client, api_key)
+
+    fake = _FakeClient()
+    fake.messages.create = lambda **kwargs: _fake_response(
+        agent_name="vega",
+        bot_py="import lightsei\nlightsei.init(api_key='x', agent_name='vega')\n",
+        requirements_txt="lightsei>=0.1.3\n",
+        rationale="Vega for code review.",
+    )
+    monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
+
+    r = client.post(
+        "/workspaces/me/agents/generate",
+        headers=auth_headers(api_key),
+        json={
+            "description": "Build a code review bot that posts findings via hermes.",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["agent_name_suggestion"] == "vega"
+    assert "lightsei.init" in body["bot_py"]
+    assert "lightsei>=" in body["requirements_txt"]
+    assert body["rationale"] == "Vega for code review."
+    assert body["model_used"] == "claude-opus-4-7"
+    assert body["tokens_in"] == 123
+    assert body["tokens_out"] == 456
+
+
+def test_generate_400_when_anthropic_secret_missing(client, alice):
+    api_key = alice["api_key"]["plaintext"]
+    r = client.post(
+        "/workspaces/me/agents/generate",
+        headers=auth_headers(api_key),
+        json={"description": "Build a hello-world bot."},
+    )
+    assert r.status_code == 400
+    assert "ANTHROPIC_API_KEY" in r.json()["detail"]
+
+
+def test_generate_retries_when_name_off_dictionary(client, alice, monkeypatch):
+    api_key = alice["api_key"]["plaintext"]
+    _set_anthropic_secret(client, api_key)
+
+    # First call returns an off-dictionary name; second returns a valid one.
+    calls = {"n": 0}
+
+    def fake_create(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _fake_response(agent_name="invented-name")
+        return _fake_response(agent_name="vega")
+
+    fake = _FakeClient()
+    fake.messages.create = fake_create
+    monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
+
+    r = client.post(
+        "/workspaces/me/agents/generate",
+        headers=auth_headers(api_key),
+        json={"description": "Build a code review bot."},
+    )
+    assert r.status_code == 200
+    assert r.json()["agent_name_suggestion"] == "vega"
+    assert calls["n"] == 2  # one retry happened
+
+
+def test_generate_422_when_retry_also_off_dictionary(client, alice, monkeypatch):
+    api_key = alice["api_key"]["plaintext"]
+    _set_anthropic_secret(client, api_key)
+
+    fake = _FakeClient()
+    fake.messages.create = lambda **kw: _fake_response(agent_name="invented-name")
+    monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
+
+    r = client.post(
+        "/workspaces/me/agents/generate",
+        headers=auth_headers(api_key),
+        json={"description": "Build a hello-world bot."},
+    )
+    assert r.status_code == 422
+    assert "valid star name" in r.json()["detail"].lower()
+
+
+def test_generate_retries_when_name_already_taken(client, alice, monkeypatch):
+    api_key = alice["api_key"]["plaintext"]
+    _set_anthropic_secret(client, api_key)
+
+    # Make `polaris` an existing agent in alice's workspace by patching
+    # one (PATCH endpoint auto-creates the row).
+    r = client.patch(
+        "/agents/polaris",
+        headers=auth_headers(api_key),
+        json={"system_prompt": "you are polaris"},
+    )
+    assert r.status_code == 200
+
+    calls = {"n": 0}
+
+    def fake_create(**kwargs):
+        calls["n"] += 1
+        # First attempt collides with the in-use polaris; retry picks vega.
+        if calls["n"] == 1:
+            return _fake_response(agent_name="polaris")
+        return _fake_response(agent_name="vega")
+
+    fake = _FakeClient()
+    fake.messages.create = fake_create
+    monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
+
+    r = client.post(
+        "/workspaces/me/agents/generate",
+        headers=auth_headers(api_key),
+        json={"description": "Build a planner."},
+    )
+    assert r.status_code == 200
+    assert r.json()["agent_name_suggestion"] == "vega"
+    assert calls["n"] == 2
+
+
+def test_generate_workspace_isolation(client, alice, bob, monkeypatch):
+    """Bob calling generate without his own ANTHROPIC_API_KEY 400s even
+    if alice has hers set — secrets are workspace-scoped."""
+    _set_anthropic_secret(client, alice["api_key"]["plaintext"])
+    r = client.post(
+        "/workspaces/me/agents/generate",
+        headers=auth_headers(bob["api_key"]["plaintext"]),
+        json={"description": "Build a hello-world bot."},
+    )
+    assert r.status_code == 400
+    assert "ANTHROPIC_API_KEY" in r.json()["detail"]
+
+
+def test_generate_short_description_validates(client, alice):
+    api_key = alice["api_key"]["plaintext"]
+    _set_anthropic_secret(client, api_key)
+    r = client.post(
+        "/workspaces/me/agents/generate",
+        headers=auth_headers(api_key),
+        json={"description": "x"},  # below min_length=8
+    )
+    assert r.status_code == 422  # Pydantic validation, not our handler
+
+
+def test_generate_unauthenticated(client):
+    r = client.post(
+        "/workspaces/me/agents/generate",
+        json={"description": "Build a hello-world bot."},
+    )
+    assert r.status_code == 401

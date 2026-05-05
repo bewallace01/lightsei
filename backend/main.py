@@ -211,6 +211,21 @@ class AgentManifestIn(BaseModel):
     command_handlers: list[dict[str, Any]] = Field(default_factory=list)
 
 
+class AgentGenerateIn(BaseModel):
+    """Phase 12B.1: input to `POST /workspaces/me/agents/generate`.
+
+    `description` is the user's natural-language prompt — what the bot
+    should do. `target_agents` is an optional whitelist of existing
+    agents to encourage coordination with (the LLM still sees the full
+    workspace constellation either way; this is a hint). `name_hint`
+    lets the user nudge toward a specific star-dictionary name, which
+    is honored if the name fits the role; otherwise the LLM picks.
+    """
+    description: str = Field(min_length=8, max_length=4000)
+    target_agents: Optional[list[str]] = None
+    name_hint: Optional[str] = None
+
+
 class ThreadCreateIn(BaseModel):
     title: Optional[str] = None
 
@@ -3980,6 +3995,195 @@ def get_manifest(
             "last_seen_at": None,
         }
     return _serialize_manifest(a)
+
+
+# ---------- Phase 12B.1: agent code generation ---------- #
+
+
+@app.post("/workspaces/me/agents/generate")
+def generate_agent(
+    body: AgentGenerateIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Generate `bot.py` + `requirements.txt` from a natural-language
+    description by calling Claude with a curated system prompt that
+    teaches the SDK + injects this workspace's existing constellation.
+
+    The agent_name returned is constrained to the star-naming dictionary
+    (see `agent_generator.STAR_DICTIONARY`); names already in use in this
+    workspace are filtered out of the prompt and rejected if Claude
+    re-suggests one anyway. One automatic retry with corrective feedback
+    if the first response violates the constraint; otherwise 422.
+
+    Cost: counts against the workspace's daily cap. Anthropic API key
+    is read from the workspace's `ANTHROPIC_API_KEY` secret — the same
+    secret bots use, no new key plumbing.
+    """
+    import agent_generator
+    import anthropic
+
+    # 1. Auth-paired prereqs: workspace's Anthropic key + cost-cap room.
+    secret_row = session.get(
+        WorkspaceSecret, (workspace_id, "ANTHROPIC_API_KEY")
+    )
+    if secret_row is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "ANTHROPIC_API_KEY not set on this workspace. Add it on "
+                "/account before using the bot generator."
+            ),
+        )
+    try:
+        anthropic_key = secrets_crypto.decrypt(secret_row.encrypted_value)
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="failed to decrypt ANTHROPIC_API_KEY (server config issue)",
+        )
+
+    # Cost-cap check: workspace.budget_usd_monthly is the cap; reject
+    # if MTD spend already at or over. Generation calls are LLM calls
+    # like any other and shouldn't bypass the budget gate.
+    workspace = session.get(Workspace, workspace_id)
+    if workspace and workspace.budget_usd_monthly is not None:
+        cost = workspace_cost_mtd(session, workspace_id)
+        used = float(cost.get("total_usd") or 0)
+        cap = float(workspace.budget_usd_monthly)
+        if cap > 0 and used >= cap:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"workspace MTD spend ${used:.2f} ≥ budget ${cap:.2f}; "
+                    "bump the budget on /account to keep generating."
+                ),
+            )
+
+    # 2. Snapshot the workspace's constellation for the prompt.
+    agent_rows = session.execute(
+        select(Agent).where(Agent.workspace_id == workspace_id).order_by(Agent.name)
+    ).scalars().all()
+    existing_agents: list[dict[str, Any]] = []
+    reserved_names: set[str] = set()
+    for a in agent_rows:
+        reserved_names.add(a.name.strip().lower())
+        cmd_kinds: list[str] = []
+        for h in a.command_handlers or []:
+            kind = (h or {}).get("kind") if isinstance(h, dict) else None
+            if isinstance(kind, str):
+                cmd_kinds.append(kind)
+        existing_agents.append(
+            {
+                "name": a.name,
+                "role": a.role,
+                "provider": a.provider,
+                "model": a.model,
+                "command_kinds": cmd_kinds,
+            }
+        )
+
+    # 3. Build prompts and call Claude. Forced tool_choice on submit_bot
+    # gives us guaranteed-shape JSON output (same trick Polaris uses for
+    # submit_plan in Phase 6.5).
+    system_prompt = agent_generator.build_system_prompt(
+        existing_agents=existing_agents,
+        reserved_names=reserved_names,
+    )
+    user_msg = agent_generator.build_user_message(
+        body.description,
+        target_agents=body.target_agents,
+        name_hint=body.name_hint,
+    )
+
+    client = anthropic.Anthropic(api_key=anthropic_key)
+    model = "claude-opus-4-7"
+
+    def _ask(extra_user_msg: Optional[str] = None) -> Any:
+        messages: list[dict[str, Any]] = [{"role": "user", "content": user_msg}]
+        if extra_user_msg:
+            # Second-pass retry: append a turn nudging toward dictionary
+            # compliance. Same conversation; Claude has its first attempt
+            # in scope.
+            messages.append({"role": "user", "content": extra_user_msg})
+        return client.messages.create(
+            model=model,
+            max_tokens=8000,
+            system=system_prompt,
+            tools=[agent_generator.SUBMIT_BOT_TOOL],
+            tool_choice={"type": "tool", "name": "submit_bot"},
+            messages=messages,
+        )
+
+    def _extract(resp: Any) -> dict[str, Any]:
+        block = next(
+            (
+                b for b in resp.content
+                if getattr(b, "type", None) == "tool_use"
+                and getattr(b, "name", None) == "submit_bot"
+            ),
+            None,
+        )
+        if block is None:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "model did not call submit_bot "
+                    f"(stop_reason={getattr(resp, 'stop_reason', '?')})"
+                ),
+            )
+        return block.input
+
+    try:
+        resp = _ask()
+        out = _extract(resp)
+    except anthropic.APIError as e:
+        raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}")
+
+    # 4. Validate name. If the LLM picked off-dictionary or already-in-use,
+    # retry once with a corrective hint; if still bad, surface a 422 with
+    # the chosen name so the dashboard can show the user what happened.
+    suggested = (out.get("agent_name") or "").strip().lower()
+    if not agent_generator.is_valid_star_name(suggested) or suggested in reserved_names:
+        retry_msg = (
+            f"The name `{suggested}` you proposed is "
+            + (
+                "already taken in this workspace"
+                if suggested in reserved_names
+                else "not in the star-naming dictionary"
+            )
+            + ". Pick a different name from the dictionary in the system prompt "
+            "and call submit_bot again with the same bot_py/requirements_txt."
+        )
+        try:
+            resp = _ask(extra_user_msg=retry_msg)
+            out = _extract(resp)
+            suggested = (out.get("agent_name") or "").strip().lower()
+        except anthropic.APIError as e:
+            raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}")
+
+        if (
+            not agent_generator.is_valid_star_name(suggested)
+            or suggested in reserved_names
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"generator could not pick a valid star name "
+                    f"(got {suggested!r}); try editing the description or pass "
+                    "a name_hint."
+                ),
+            )
+
+    return {
+        "agent_name_suggestion": suggested,
+        "rationale": out.get("rationale") or "",
+        "bot_py": out.get("bot_py") or "",
+        "requirements_txt": out.get("requirements_txt") or "",
+        "model_used": getattr(resp, "model", model),
+        "tokens_in": getattr(getattr(resp, "usage", None), "input_tokens", None),
+        "tokens_out": getattr(getattr(resp, "usage", None), "output_tokens", None),
+    }
 
 
 def _serialize_instance(i: AgentInstance, now: datetime) -> dict[str, Any]:
