@@ -119,6 +119,8 @@ class AgentPatchIn(BaseModel):
     # Validated against the bounds below at handler time so a typo in the
     # dashboard doesn't melt budget by setting a 1-second tick.
     tick_interval_s: Optional[int] = None
+    # Short freeform description shown on the /agents roster. null clears.
+    description: Optional[str] = Field(default=None, max_length=2000)
     # Distinguish "field not provided" from "explicitly null". Pydantic v2:
     # we'll detect via model_fields_set.
 
@@ -764,6 +766,7 @@ def _serialize_agent(a: Agent) -> dict[str, Any]:
         "model": a.model,
         # Per-agent tick interval (seconds). null = use the bot's env default.
         "tick_interval_s": a.tick_interval_s,
+        "description": a.description,
         "created_at": a.created_at.isoformat(),
         "updated_at": a.updated_at.isoformat(),
     }
@@ -848,6 +851,11 @@ def patch_agent(
                     ),
                 )
             a.tick_interval_s = v
+    if "description" in fields:
+        if body.description is None or not body.description.strip():
+            a.description = None
+        else:
+            a.description = body.description.strip()
     a.updated_at = now
     session.flush()
     return _serialize_agent(a)

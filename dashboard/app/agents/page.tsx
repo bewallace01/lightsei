@@ -63,6 +63,7 @@ type AgentRow = {
   runs_24h: number;
   cost_24h_usd: number;
   tick_interval_s: number | null;
+  description: string | null;
   last_event_at: string | null;
 };
 
@@ -92,6 +93,7 @@ export default function AgentsPage() {
           runs_24h: 0,
           cost_24h_usd: 0,
           tick_interval_s: a.tick_interval_s,
+          description: a.description,
           last_event_at: null,
         });
       }
@@ -119,6 +121,7 @@ export default function AgentsPage() {
             runs_24h: c.runs_24h,
             cost_24h_usd: c.cost_24h_usd,
             tick_interval_s: null,
+            description: null,
             last_event_at: c.last_event_at,
           });
         }
@@ -232,13 +235,21 @@ export default function AgentsPage() {
                     (i !== rows.length - 1 ? "border-b border-gray-100" : "")
                   }
                 >
-                  <td className="px-4 py-3">
+                  <td className="px-4 py-3 max-w-xs">
                     <Link
                       href={`/agents/${encodeURIComponent(r.name)}`}
                       className="font-mono text-accent-600 hover:text-accent-700 font-medium"
                     >
                       {r.name}
                     </Link>
+                    {r.description && (
+                      <div
+                        className="text-xs text-gray-500 mt-0.5 line-clamp-2"
+                        title={r.description}
+                      >
+                        {r.description}
+                      </div>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-600">
                     {r.role ?? "—"}

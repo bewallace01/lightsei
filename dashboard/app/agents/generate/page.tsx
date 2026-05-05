@@ -10,6 +10,7 @@ import {
   UnauthorizedError,
   fetchAgents,
   generateAgent,
+  patchAgent,
   uploadDeploymentBundle,
 } from "../../api";
 
@@ -130,6 +131,16 @@ export default function GenerateAgentPage() {
         type: "application/zip",
       });
       const dep = await uploadDeploymentBundle(editName.trim(), file);
+      // Carry the LLM's rationale forward as the agent's description so
+      // it shows up on the /agents roster. Best-effort — don't block the
+      // navigation if it fails (the bot deployed; description is polish).
+      if (output?.rationale) {
+        try {
+          await patchAgent(editName.trim(), { description: output.rationale });
+        } catch {
+          /* ignore */
+        }
+      }
       router.push(`/deployments/${dep.id}`);
     } catch (e) {
       if (e instanceof UnauthorizedError) {

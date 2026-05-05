@@ -430,6 +430,12 @@ export default function AgentPage({ params }: { params: { name: string } }) {
         </div>
       </section>
 
+      <DescriptionSection
+        agent={agent}
+        onSaved={(updated) => setAgent(updated)}
+        onError={(msg) => setError(msg)}
+      />
+
       <ModelSelector
         agent={agent}
         onSaved={(updated) => setAgent(updated)}
@@ -886,6 +892,79 @@ function ScheduleSelector({
             ? `currently set to ${fmtInterval(current)}`
             : "no override; using bot env default"}
         </span>
+      </div>
+    </section>
+  );
+}
+
+// ---------- Description editor ---------- //
+
+function DescriptionSection({
+  agent,
+  onSaved,
+  onError,
+}: {
+  agent: Agent | null;
+  onSaved: (updated: Agent) => void;
+  onError: (msg: string) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+
+  useEffect(() => {
+    setDraft(agent?.description ?? "");
+  }, [agent?.description]);
+
+  if (!agent) return null;
+
+  const dirty = (draft.trim() || null) !== (agent.description ?? null);
+
+  const onSave = async () => {
+    setSaving(true);
+    try {
+      const updated = await patchAgent(agent.name, {
+        description: draft.trim() ? draft.trim() : null,
+      });
+      onSaved(updated);
+      setSavedAt(Date.now());
+    } catch (e) {
+      onError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <section className="mb-10">
+      <h2 className="text-[11px] font-semibold text-gray-500 mb-4 uppercase tracking-wider">
+        Description
+      </h2>
+      <p className="text-xs text-gray-500 mb-3">
+        One-line summary shown on the /agents roster. Generated bots get
+        this auto-populated from the LLM&apos;s rationale; for hand-
+        deployed bots, write your own. Markdown not rendered.
+      </p>
+      <textarea
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        rows={2}
+        placeholder="e.g. Scans every push for hardcoded secrets and dispatches alerts via hermes."
+        disabled={saving}
+        className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent-500/30 focus:border-accent-500 disabled:opacity-50"
+      />
+      <div className="flex items-center gap-3 mt-2">
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={saving || !dirty}
+          className="px-4 py-1.5 bg-accent-600 hover:bg-accent-700 text-white rounded-md text-sm font-medium disabled:opacity-50 transition-colors"
+        >
+          {saving ? "saving…" : "save"}
+        </button>
+        {savedAt && Date.now() - savedAt < 4000 && (
+          <span className="text-xs text-green-700">saved.</span>
+        )}
       </div>
     </section>
   );

@@ -211,6 +211,11 @@ class Agent(Base):
     # to override their POLL_S env default. Null = use the bot's own env
     # default. Reactive bots (atlas, hermes) ignore it.
     tick_interval_s: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Short "what this bot does" description, surfaced on the /agents
+    # roster + the agent detail page. Auto-populated from the LLM
+    # rationale when the bot is generated via 12B; hand-deployed bots
+    # start null until the user writes one.
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )

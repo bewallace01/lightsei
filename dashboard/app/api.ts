@@ -496,6 +496,10 @@ export type Agent = {
   // Per-agent tick interval (seconds) for cron-style bots. null = bot
   // uses its env default. Reactive bots ignore this value.
   tick_interval_s: number | null;
+  // Short "what this bot does" description shown on the /agents roster.
+  // Auto-populated from the LLM rationale when the bot is generated
+  // via /agents/generate; hand-deployed bots start null.
+  description: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -514,6 +518,7 @@ export async function patchAgent(
     provider: AgentProvider | null;
     model: string | null;
     tick_interval_s: number | null;
+    description: string | null;
   }>,
 ): Promise<Agent> {
   return (await authedJson(`/agents/${encodeURIComponent(name)}`, {
