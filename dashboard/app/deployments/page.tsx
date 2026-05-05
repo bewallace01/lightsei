@@ -76,7 +76,15 @@ export default function DeploymentsPage() {
             Every bot the worker is running, plus stopped + failed history.
           </p>
         </div>
-        <span className="text-xs text-gray-400">refreshes every 5s</span>
+        <div className="flex items-center gap-4">
+          <span className="text-xs text-gray-400">refreshes every 5s</span>
+          <Link
+            href="/agents/new"
+            className="px-3 py-1.5 text-sm bg-accent-600 text-white rounded-md hover:bg-accent-700 no-underline"
+          >
+            + new deploy
+          </Link>
+        </div>
       </div>
 
       {error && (
@@ -90,14 +98,23 @@ export default function DeploymentsPage() {
       ) : rows.length === 0 ? (
         <div className="border border-dashed border-gray-200 rounded-lg p-10 text-center">
           <div className="text-gray-700 font-medium mb-1">No deployments yet</div>
-          <p className="text-sm text-gray-500">
-            Deploy a bot via the CLI (<code>lightsei deploy ./your-bot</code>) or
-            push to a registered agent path on{" "}
+          <p className="text-sm text-gray-500 mb-4">
+            Drop a .zip on{" "}
+            <Link href="/agents/new" className="text-accent-600 hover:underline">
+              /agents/new
+            </Link>
+            , push to a registered agent path on{" "}
             <Link href="/github" className="text-accent-600 hover:underline">
               /github
             </Link>
-            .
+            , or use the CLI: <code>lightsei deploy ./your-bot</code>.
           </p>
+          <Link
+            href="/agents/new"
+            className="inline-block px-4 py-2 bg-accent-600 text-white rounded-md text-sm font-medium hover:bg-accent-700 no-underline"
+          >
+            + new deploy
+          </Link>
         </div>
       ) : (
         <div className="rounded-lg border border-gray-200 overflow-hidden">

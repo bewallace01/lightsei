@@ -542,6 +542,58 @@ export async function fetchDeployments(
   return body.deployments;
 }
 
+// Browser-native deploy. Same multipart shape the CLI uses: agent_name
+// as a form field and `bundle` as the .zip file. We bypass authedJson
+// because that helper sets content-type=application/json; multipart
+// uploads need fetch's auto-boundary instead.
+export async function uploadDeploymentBundle(
+  agentName: string,
+  zipFile: File,
+  onProgress?: (loaded: number, total: number) => void,
+): Promise<Deployment> {
+  const form = new FormData();
+  form.append("agent_name", agentName);
+  form.append("bundle", zipFile, zipFile.name || "bundle.zip");
+
+  // XMLHttpRequest gives us upload progress events; fetch() can't.
+  return await new Promise<Deployment>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", `${API_URL}/workspaces/me/deployments`);
+    const headers = authHeaders();
+    Object.entries(headers).forEach(([k, v]) => xhr.setRequestHeader(k, v));
+    if (onProgress) {
+      xhr.upload.onprogress = (e) => {
+        if (e.lengthComputable) onProgress(e.loaded, e.total);
+      };
+    }
+    xhr.onerror = () => reject(new Error("network error during upload"));
+    xhr.onload = () => {
+      if (xhr.status === 401) {
+        reject(new UnauthorizedError());
+        return;
+      }
+      if (xhr.status >= 400) {
+        let msg = `${xhr.status}`;
+        try {
+          const body = JSON.parse(xhr.responseText);
+          if (typeof body?.detail === "string") msg = body.detail;
+          else if (body?.detail !== undefined) msg = JSON.stringify(body.detail);
+        } catch {
+          /* ignore */
+        }
+        reject(new Error(msg));
+        return;
+      }
+      try {
+        resolve(JSON.parse(xhr.responseText) as Deployment);
+      } catch (e) {
+        reject(new Error(`invalid response: ${e}`));
+      }
+    };
+    xhr.send(form);
+  });
+}
+
 export async function fetchDeployment(id: string): Promise<Deployment> {
   return (await authedJson(
     `/workspaces/me/deployments/${id}`,
