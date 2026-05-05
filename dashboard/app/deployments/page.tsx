@@ -97,24 +97,43 @@ export default function DeploymentsPage() {
         <div className="text-gray-400 text-sm">loading…</div>
       ) : rows.length === 0 ? (
         <div className="border border-dashed border-gray-200 rounded-lg p-10 text-center">
-          <div className="text-gray-700 font-medium mb-1">No deployments yet</div>
+          <div className="text-gray-700 font-medium mb-2">No deployments yet</div>
           <p className="text-sm text-gray-500 mb-4">
-            Drop a .zip on{" "}
-            <Link href="/agents/new" className="text-accent-600 hover:underline">
-              /agents/new
-            </Link>
-            , push to a registered agent path on{" "}
-            <Link href="/github" className="text-accent-600 hover:underline">
-              /github
-            </Link>
-            , or use the CLI: <code>lightsei deploy ./your-bot</code>.
+            A deployment is a snapshot of your bot&apos;s code (a zipped
+            directory with <code>bot.py</code> + <code>requirements.txt</code>)
+            running on the worker. Three ways to create one:
           </p>
-          <Link
-            href="/agents/new"
-            className="inline-block px-4 py-2 bg-accent-600 text-white rounded-md text-sm font-medium hover:bg-accent-700 no-underline"
-          >
-            + new deploy
-          </Link>
+          <ul className="text-sm text-gray-500 mb-5 inline-block text-left list-disc ml-5 space-y-1">
+            <li>
+              Drag-drop a .zip on{" "}
+              <Link href="/agents/new" className="text-accent-600 hover:underline">
+                /agents/new
+              </Link>
+            </li>
+            <li>
+              Push to a registered agent path on{" "}
+              <Link href="/github" className="text-accent-600 hover:underline">
+                /github
+              </Link>
+            </li>
+            <li>
+              CLI: <code>lightsei deploy ./your-bot</code>
+            </li>
+          </ul>
+          <div className="flex items-center justify-center gap-3">
+            <Link
+              href="/agents/new"
+              className="inline-block px-4 py-2 bg-accent-600 text-white rounded-md text-sm font-medium hover:bg-accent-700 no-underline"
+            >
+              + new deploy
+            </Link>
+            <Link
+              href="/getting-started"
+              className="inline-block px-4 py-2 border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 no-underline"
+            >
+              Read the guide
+            </Link>
+          </div>
         </div>
       ) : (
         <div className="rounded-lg border border-gray-200 overflow-hidden">

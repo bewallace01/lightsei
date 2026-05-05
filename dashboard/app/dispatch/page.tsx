@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -137,12 +138,28 @@ export default function DispatchPage() {
         <div className="text-gray-400 text-sm">loading…</div>
       ) : chains.length === 0 ? (
         <div className="border border-dashed border-gray-200 rounded-lg p-10 text-center">
-          <div className="text-gray-700 font-medium mb-1">No dispatch chains yet</div>
-          <p className="text-sm text-gray-500">
-            Push a commit, send a command from the dashboard, or wait for
-            Polaris's next tick. Anything that fans out into agent-to-agent
-            commands shows up here.
+          <div className="text-gray-700 font-medium mb-2">
+            No dispatch chains yet
+          </div>
+          <p className="text-sm text-gray-500 mb-4">
+            A &quot;chain&quot; is a cause-and-effect tree of commands —
+            e.g. a git push triggers Polaris, which dispatches Atlas,
+            which dispatches Hermes. Each row here is one chain.
           </p>
+          <p className="text-sm text-gray-500 mb-4">
+            Easiest way to make one: deploy Polaris + Atlas + Hermes (the
+            built-in trio) and push a commit to a registered{" "}
+            <Link href="/github" className="text-accent-600 hover:underline">
+              GitHub
+            </Link>{" "}
+            agent path.
+          </p>
+          <Link
+            href="/getting-started"
+            className="inline-block px-4 py-2 bg-accent-600 text-white rounded-md text-sm font-medium hover:bg-accent-700 no-underline"
+          >
+            Get started →
+          </Link>
         </div>
       ) : (
         <div className="rounded-lg border border-gray-200 overflow-hidden">

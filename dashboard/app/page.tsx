@@ -184,11 +184,26 @@ export default function Home() {
         <div className="text-gray-400 text-sm">loading…</div>
       ) : rows.length === 0 ? (
         <div className="border border-dashed border-gray-200 rounded-lg p-10 text-center">
-          <div className="text-gray-700 font-medium mb-1">No runs yet</div>
-          <p className="text-sm text-gray-500">
-            Make your first OpenAI or Anthropic call with the SDK initialized,
-            then come back here.
+          <div className="text-gray-700 font-medium mb-2">No runs yet</div>
+          <p className="text-sm text-gray-500 mb-4">
+            A &quot;run&quot; is a span of work your bot did — typically one
+            LLM call (OpenAI / Anthropic / Gemini) auto-instrumented by the
+            SDK. Deploy a bot first; runs land here as it works.
           </p>
+          <div className="flex items-center justify-center gap-3">
+            <Link
+              href="/getting-started"
+              className="px-4 py-2 bg-accent-600 text-white rounded-md text-sm font-medium hover:bg-accent-700 no-underline"
+            >
+              Get started →
+            </Link>
+            <Link
+              href="/agents/new"
+              className="px-4 py-2 border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 no-underline"
+            >
+              Deploy a bot
+            </Link>
+          </div>
         </div>
       ) : (
         <div className="rounded-lg border border-gray-200 overflow-hidden">
