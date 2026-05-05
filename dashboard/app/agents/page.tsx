@@ -7,6 +7,7 @@ import {
   Agent,
   ConstellationAgent,
   UnauthorizedError,
+  deleteAgent,
   fetchAgents,
   fetchConstellation,
 } from "../api";
@@ -73,6 +74,25 @@ export default function AgentsPage() {
   const [rows, setRows] = useState<AgentRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+
+  const onDelete = async (name: string) => {
+    if (
+      !confirm(
+        `Delete agent "${name}"?\n\n` +
+        "Past runs / events / commands stay visible on /runs and /dispatch " +
+        "as audit trail — only the agent row is removed. If a bot under this " +
+        "name emits an event later, the row gets re-created automatically.",
+      )
+    ) {
+      return;
+    }
+    try {
+      await deleteAgent(name);
+      await refresh();
+    } catch (e) {
+      setError(String(e instanceof Error ? e.message : e));
+    }
+  };
 
   const refresh = async () => {
     try {
@@ -224,6 +244,7 @@ export default function AgentsPage() {
                 <th className="px-4 py-3 font-medium">Runs (24h)</th>
                 <th className="px-4 py-3 font-medium">Cost (24h)</th>
                 <th className="px-4 py-3 font-medium">Last seen</th>
+                <th className="px-4 py-3 font-medium text-right"></th>
               </tr>
             </thead>
             <tbody>
@@ -303,6 +324,16 @@ export default function AgentsPage() {
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-500">
                     {fmtRelative(r.last_event_at)}
+                  </td>
+                  <td className="px-4 py-3 text-right">
+                    <button
+                      type="button"
+                      onClick={() => onDelete(r.name)}
+                      className="text-xs text-gray-400 hover:text-red-600 transition-colors"
+                      title={`Remove ${r.name} from the roster (history kept)`}
+                    >
+                      delete
+                    </button>
                   </td>
                 </tr>
               ))}

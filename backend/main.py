@@ -861,6 +861,33 @@ def patch_agent(
     return _serialize_agent(a)
 
 
+@app.delete("/agents/{agent_name}")
+def delete_agent(
+    agent_name: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, str]:
+    """Remove an agent row.
+
+    Historical events / runs / commands are NOT deleted — those keep
+    their string `agent_name` reference and stay visible on /runs and
+    /dispatch as audit trail. The `agents` row going away just means
+    the bot disappears from /agents and the constellation, future
+    `ensure_agent` calls won't re-create it (well, they will if a new
+    bot starts emitting under the same name — that's fine).
+
+    GitHub agent paths and any auto-approval rules referencing this
+    agent are left in place; the user can clean those up separately
+    if they really want a full purge.
+    """
+    a = session.get(Agent, (workspace_id, agent_name))
+    if a is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+    session.delete(a)
+    session.flush()
+    return {"status": "ok"}
+
+
 def _serialize_plan_event(
     row: Event, validations: list[dict[str, Any]] | None = None
 ) -> dict[str, Any]:

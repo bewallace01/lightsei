@@ -188,6 +188,38 @@ def test_patch_tick_interval_too_large_returns_422(client, alice):
     assert "86400" in r.json()["detail"]  # max bound
 
 
+def test_delete_agent_removes_row(client, alice):
+    h = auth_headers(alice["session_token"])
+    # Create one via PATCH (auto-creates).
+    client.patch(
+        "/agents/old-test-bot",
+        json={"description": "leftover"},
+        headers=h,
+    )
+    assert client.get("/agents/old-test-bot", headers=h).status_code == 200
+    r = client.delete("/agents/old-test-bot", headers=h)
+    assert r.status_code == 200
+    assert r.json()["status"] == "ok"
+    assert client.get("/agents/old-test-bot", headers=h).status_code == 404
+
+
+def test_delete_agent_404_when_unknown(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.delete("/agents/never-existed", headers=h)
+    assert r.status_code == 404
+
+
+def test_delete_agent_workspace_isolated(client, alice, bob):
+    """Bob can't delete alice's agent by guessing the name."""
+    h_a = auth_headers(alice["session_token"])
+    h_b = auth_headers(bob["session_token"])
+    client.patch("/agents/alice-bot", json={"description": "hers"}, headers=h_a)
+    r = client.delete("/agents/alice-bot", headers=h_b)
+    assert r.status_code == 404
+    # Still exists in alice's workspace.
+    assert client.get("/agents/alice-bot", headers=h_a).status_code == 200
+
+
 def test_patch_tick_interval_does_not_clear_other_fields(client, alice):
     h = auth_headers(alice["session_token"])
     client.patch(

@@ -528,6 +528,13 @@ export async function patchAgent(
   })) as Agent;
 }
 
+export async function deleteAgent(name: string): Promise<void> {
+  await authedJson(`/agents/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+}
+
+
 export async function fetchAgentManifest(agentName: string): Promise<AgentManifest> {
   return (await authedJson(
     `/agents/${encodeURIComponent(agentName)}/manifest`,
