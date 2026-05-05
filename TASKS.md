@@ -18,8 +18,36 @@ Why this is the leverage move for the audience: today, "deploy a bot" requires b
 - New `POST /workspaces/me/agents/generate` taking `{description, target_agents?, name_hint?}` and returning `{bot_py, requirements_txt, agent_name_suggestion, model_used, tokens_in, tokens_out}`. Calls Claude (Opus 4.7 by default; configurable per workspace later) with a curated system prompt.
 - The system prompt teaches the SDK surface: `@lightsei.on_command`, `lightsei.send_command(target, kind, payload, source_agent=...)`, `lightsei.emit`, `lightsei.get_secret`, the auto-instrumented OpenAI / Anthropic / Gemini patches (no manual instrumentation needed). One canonical "minimal bot" template + 2-3 worked examples (`hermes.post` style notifier; `atlas.run_tests` style executor; an LLM-calling planner).
 - Inject the user's existing constellation into the prompt so coordination Just Works: hit `/workspaces/me/agents` for the agent list, hit `/agents/{name}/manifest` for each agent's command kinds, render as a "the following agents already exist; dispatch to them rather than reinventing" block.
+- **Star-themed naming.** The agent name returned in `agent_name_suggestion` MUST be a star, constellation, or celestial body whose meaning thematically matches the bot's role (Polaris orchestrates / navigates, Atlas supports / runs heavy work, Hermes carries messages, etc.). Include the curated dictionary below in the system prompt so Claude has on-theme options to pick from rather than invent — and so we get consistent vibes across users' workspaces. Reject + retry once if the proposed name is already in use in the workspace, or if it isn't on the dictionary.
 - Cost guardrail: respect the workspace's existing daily cost cap (Phase 2.3 plumbing). Track generation calls via the same `add_run_cost_from_event` path as runtime LLM calls so they show up on the cost panel.
-- Tests: stubbed Anthropic client returns canned response; verify the prompt includes the workspace's agent list; verify the response shape; verify daily-cost-cap enforcement.
+- Tests: stubbed Anthropic client returns canned response; verify the prompt includes the workspace's agent list + the star dictionary; verify the response shape; verify daily-cost-cap enforcement; verify the agent_name_suggestion is in the dictionary.
+
+#### Star-naming dictionary (curated; injected into 12B.1's system prompt and reused by 12C.1)
+
+The bots Lightsei seeds with (`polaris`, `atlas`, `hermes`) set the convention. Generated bots follow it. This is the starter list — extend over time as new roles emerge:
+
+| name | theme / role |
+|---|---|
+| polaris | orchestration, navigation, the north star you align by |
+| atlas | bearing weight, running heavy or repeated work (tests, builds) |
+| hermes | messenger, posts notifications outbound (Slack, email, SMS) |
+| argus | the all-seeing giant — security scanning, secret detection, audit |
+| vega | sharp + bright — code review, PR scrutiny, structural critique |
+| sirius | the dog star, alerting / on-call, the one that pages you |
+| cassiopeia | storyteller in the sky — incident scribe, post-mortem writer |
+| lyra | harmony — coordination, cross-agent integration glue |
+| vela | the sails — deployment, shipping, release verification |
+| spica | wheat-ear, harvest — summarization, digest, weekly recap |
+| rigel | the foot — infrastructure watcher, bedrock health |
+| antares | heart of the scorpion — watching one critical thing closely |
+| altair | flying / fast — realtime streaming, low-latency reactions |
+| capella | the little she-goat herding her kids — fleet monitoring |
+| bellatrix | the warrior — defensive guards, intrusion / abuse detection |
+| procyon | "before the dog" — pre-commit hooks, pre-flight checks |
+| aldebaran | the follower — cleanup / sweep tasks downstream of others |
+| betelgeuse | red supergiant — long-running batch jobs, overnight work |
+| canopus | second-brightest in the sky — secondary backup, fallback agent |
+| arcturus | the herdsman — managing other bots' lifecycles |
 
 ### 12B.2 Dashboard generate page
 
@@ -74,6 +102,7 @@ Why this matters: the 12B v1 still requires the user to know what bots they want
   ```
 - LLM system prompt teaches the analysis step: read the project, identify recurring kinds of work (testing, security, deploy verification, PR review, oncall, doc maintenance, content moderation, ...), propose 3-7 bots with non-overlapping roles, wire the dispatch graph so each bot has at most one or two outgoing edges (avoid spaghetti).
 - The prompt also includes the curated SDK surface from 12B.1 so the proposed `command_kinds` are realistic, plus the workspace's existing constellation so the plan can incorporate (rather than duplicate) Polaris/Atlas/Hermes if they exist.
+- Each proposed bot's `name` MUST be from the star-naming dictionary in 12B.1, picked to thematically match the role. Names already in use in the workspace are off-limits; the prompt reserves them. The plan endpoint also rejects + retries if Claude returns a name not in the dictionary.
 - GitHub-repo input path reuses Phase 10.3's `github_api.fetch_directory_zip` (or a lighter "just fetch the README") so the user can paste a repo URL instead of copying README contents.
 
 ### 12C.2 Team review UI
