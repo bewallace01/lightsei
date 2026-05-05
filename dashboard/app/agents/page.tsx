@@ -4,12 +4,15 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import {
+  AGENT_PROVIDERS,
   Agent,
+  AgentProvider,
   ConstellationAgent,
   UnauthorizedError,
   deleteAgent,
   fetchAgents,
   fetchConstellation,
+  patchAgent,
 } from "../api";
 
 
@@ -174,25 +177,24 @@ export default function AgentsPage() {
 
   return (
     <main className="px-8 py-10 max-w-6xl mx-auto">
-      <div className="flex items-baseline justify-between mb-8">
-        <div>
+      <div className="flex items-start justify-between gap-6 mb-8">
+        <div className="min-w-0">
           <h1 className="text-2xl font-semibold tracking-tight">Agents</h1>
           <p className="text-sm text-gray-500 mt-1">
-            Every bot in this workspace. Click a name to open its detail
-            page where you can change the pinned model, set a tick
-            interval, edit the system prompt, or send a command.
+            Every bot in this workspace. Click a name for the full detail
+            page; edit the model directly from the rows below.
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 shrink-0">
           <Link
             href="/agents/generate"
-            className="px-4 py-2 bg-accent-600 text-white rounded-md text-sm font-medium hover:bg-accent-700 no-underline"
+            className="px-4 py-2 bg-accent-600 text-white rounded-md text-sm font-medium hover:bg-accent-700 no-underline whitespace-nowrap"
           >
             ✨ generate
           </Link>
           <Link
             href="/agents/new"
-            className="px-4 py-2 border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 no-underline"
+            className="px-4 py-2 border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 no-underline whitespace-nowrap"
           >
             + drop a zip
           </Link>
@@ -293,25 +295,14 @@ export default function AgentsPage() {
                     )}
                   </td>
                   <td className="px-4 py-3 font-mono text-xs">
-                    {r.pinned_model ? (
-                      <span title="pinned via the dashboard">
-                        <span className="text-gray-900">{r.pinned_model}</span>
-                        {r.pinned_provider && (
-                          <span className="text-gray-400">
-                            {" "}({r.pinned_provider})
-                          </span>
-                        )}
-                      </span>
-                    ) : r.recent_model ? (
-                      <span
-                        className="text-gray-500"
-                        title="auto-detected from recent llm_call_completed event; not pinned"
-                      >
-                        {r.recent_model}
-                      </span>
-                    ) : (
-                      <span className="text-gray-400">—</span>
-                    )}
+                    <ModelCell
+                      name={r.name}
+                      pinnedProvider={r.pinned_provider}
+                      pinnedModel={r.pinned_model}
+                      recentModel={r.recent_model}
+                      onSaved={refresh}
+                      onError={(msg) => setError(msg)}
+                    />
                   </td>
                   <td className="px-4 py-3 font-mono text-xs text-gray-700">
                     {fmtInterval(r.tick_interval_s)}
@@ -350,5 +341,145 @@ export default function AgentsPage() {
         event — purely informational.
       </p>
     </main>
+  );
+}
+
+// ---------- Inline model edit cell ---------- //
+
+function ModelCell({
+  name,
+  pinnedProvider,
+  pinnedModel,
+  recentModel,
+  onSaved,
+  onError,
+}: {
+  name: string;
+  pinnedProvider: string | null;
+  pinnedModel: string | null;
+  recentModel: string | null;
+  onSaved: () => void;
+  onError: (msg: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [provider, setProvider] = useState<AgentProvider | "">(
+    (pinnedProvider as AgentProvider) || "",
+  );
+  const [model, setModel] = useState(pinnedModel ?? "");
+  const [saving, setSaving] = useState(false);
+
+  // Sync from props when they change (e.g. after a successful save the
+  // parent refresh updates the pinned_* values).
+  useEffect(() => {
+    setProvider((pinnedProvider as AgentProvider) || "");
+    setModel(pinnedModel ?? "");
+  }, [pinnedProvider, pinnedModel]);
+
+  const onSave = async () => {
+    setSaving(true);
+    try {
+      // Both blank → clear pin. Otherwise both required (the inline cell
+      // doesn't support partial pins; the agent detail page does).
+      if (!provider && !model.trim()) {
+        await patchAgent(name, { provider: null, model: null });
+      } else if (!provider || !model.trim()) {
+        onError("set both provider and model, or clear both");
+        setSaving(false);
+        return;
+      } else {
+        await patchAgent(name, {
+          provider: provider as AgentProvider,
+          model: model.trim(),
+        });
+      }
+      setEditing(false);
+      onSaved();
+    } catch (e) {
+      onError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const onCancel = () => {
+    setProvider((pinnedProvider as AgentProvider) || "");
+    setModel(pinnedModel ?? "");
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <div className="flex items-center gap-1.5">
+        <select
+          value={provider}
+          onChange={(e) => setProvider(e.target.value as AgentProvider | "")}
+          disabled={saving}
+          className="px-1.5 py-0.5 text-xs border border-gray-300 rounded font-mono"
+        >
+          <option value="">— provider —</option>
+          {AGENT_PROVIDERS.map((p) => (
+            <option key={p} value={p}>{p}</option>
+          ))}
+        </select>
+        <input
+          type="text"
+          value={model}
+          onChange={(e) => setModel(e.target.value)}
+          disabled={saving}
+          placeholder="model id"
+          className="w-40 px-1.5 py-0.5 text-xs border border-gray-300 rounded font-mono"
+          autoFocus
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onSave();
+            if (e.key === "Escape") onCancel();
+          }}
+        />
+        <button
+          type="button"
+          onClick={onSave}
+          disabled={saving}
+          className="px-2 py-0.5 text-[11px] bg-accent-600 text-white rounded hover:bg-accent-700 disabled:opacity-50"
+        >
+          {saving ? "…" : "save"}
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={saving}
+          className="text-[11px] text-gray-400 hover:text-gray-700"
+        >
+          ×
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => setEditing(true)}
+      className="text-left group"
+      title="click to change pinned model"
+    >
+      {pinnedModel ? (
+        <span>
+          <span className="text-gray-900 group-hover:text-accent-600">
+            {pinnedModel}
+          </span>
+          {pinnedProvider && (
+            <span className="text-gray-400"> ({pinnedProvider})</span>
+          )}
+        </span>
+      ) : recentModel ? (
+        <span
+          className="text-gray-500 group-hover:text-accent-600"
+          title="auto-detected from recent llm_call_completed event; not pinned. Click to pin."
+        >
+          {recentModel}
+        </span>
+      ) : (
+        <span className="text-gray-400 group-hover:text-accent-600">— pin?</span>
+      )}
+    </button>
   );
 }
