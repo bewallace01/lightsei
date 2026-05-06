@@ -7,11 +7,30 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 12C.1: backend `/workspaces/me/teams/plan` endpoint (drop a README, propose a team)**
+> **Phase 12D.2: Polaris narrates cost analysis directly in its plan events**
 
-Phase 12B fully shipped + demo'd against prod 2026-05-04. See Done Log. Phase 12C builds on it: instead of one bot at a time, the user drops a README (or pastes one) and Lightsei proposes a tailored team rooted at Polaris — calling 12B's per-bot generator in a loop to flesh out each role. This is the leverage move for the non-engineer audience: 12B closed the "I don't know how to write Python" wall; 12C closes the "I don't know what bots I need" wall.
+Phase 12D.1 (read-only `/cost/insights` page) shipped 2026-05-05 — see Done Log. 12D.2 is the version of "Polaris is smart about spending" that surfaces the same analysis *during* the user's normal review flow rather than requiring a trip to a dedicated insights page.
 
-### 12C.1 detail
+### 12D.2 detail
+
+- Polaris's tick loop emits a new `polaris.cost_analysis` event in addition to `polaris.plan`. Same cadence (whatever `tick_interval_s` is set to) but only when there's something interesting to say — empty insight lists are suppressed so the home page doesn't get noisy.
+- Backend reuses the `cost_insights.all_insights()` module from 12D.1; no new analytics. Polaris bot.py fetches its own workspace's insights via a new `lightsei.get_cost_insights()` SDK helper (HTTP GET to `/workspaces/me/cost/insights`), filters out the always-on audit rows when their numbers are zero, and emits the rest as the event payload.
+- The home page hero + `/polaris` page render the latest `polaris.cost_analysis` next to the latest `polaris.plan` — if there's a fix-it recommendation, surface it in the same "wants your attention" pulse style that pending-approvals + failed-validations use today.
+- Event schema validates: payload is `{insights: [{kind, headline, detail, apply}, ...], generated_at, window_days}`. The validator pack on `polaris.cost_analysis` rejects empty insight lists (we skip the emit upstream rather than rely on the validator, but defense in depth).
+- The "12D.2 also calls Claude to summarize" branch from the original spec is dropped — running the heuristics from 12D.1 in pure code is cheaper, deterministic, and the 12D.1 page already shows the user every detail. A future "narrative summary" pass can be added behind an env flag if users want it.
+- SDK bump (0.1.5) for `get_cost_insights` — same release dance as 12.4 + 12B.1, follow the lessons-logged checklist.
+
+### Future (12D.3)
+
+Auto-optimization with explicit consent. Park until Phase 14 (continuous eval) gives us a quality signal to safely tune against. See the Phase 12D section below for the full spec.
+
+## Phase 12C: drop a README, get a team
+
+Natural extension of 12B that arrives once the per-bot generator is solid. Instead of "describe one bot, get one bot," the user drops their project's README (or a GitHub repo URL) and Lightsei proposes + generates a tailored constellation of bots wired up to maintain it. Calling 12B's per-bot generator in a loop is the implementation core; the new work is the project-analysis layer on top + the bulk-deploy + auto-approval-rule wiring.
+
+Why this matters: the 12B v1 still requires the user to know what bots they want. For most non-engineer users that's the harder cognitive step than writing the description. Watching a Lightsei-proposed team appear from a README does the framing work for them — they're reviewing a plan rather than authoring one.
+
+### 12C.1 Project analysis endpoint
 
 - New `POST /workspaces/me/teams/plan` taking `{readme_text?, github_repo?, github_branch?, freeform_description?}` and returning a roster of proposed bots:
   ```
@@ -36,16 +55,6 @@ Phase 12B fully shipped + demo'd against prod 2026-05-04. See Done Log. Phase 12
 - Each proposed bot's `name` MUST be from the star-naming dictionary (see `backend/agent_generator.py:STAR_DICTIONARY`), picked to thematically match the role. Names already in use in the workspace are off-limits; the prompt reserves them. The plan endpoint also rejects + retries if Claude returns a name not in the dictionary.
 - GitHub-repo input path reuses Phase 10.3's `github_api.fetch_directory_zip` (or a lighter "just fetch the README") so the user can paste a repo URL instead of copying README contents.
 - Tests mirror 12B.1's stubbed-Anthropic shape: canned response, prompt-content assertions, name-validation, retry path.
-
-## Phase 12C: drop a README, get a team
-
-Natural extension of 12B that arrives once the per-bot generator is solid. Instead of "describe one bot, get one bot," the user drops their project's README (or a GitHub repo URL) and Lightsei proposes + generates a tailored constellation of bots wired up to maintain it. Calling 12B's per-bot generator in a loop is the implementation core; the new work is the project-analysis layer on top + the bulk-deploy + auto-approval-rule wiring.
-
-Why this matters: the 12B v1 still requires the user to know what bots they want. For most non-engineer users that's the harder cognitive step than writing the description. Watching a Lightsei-proposed team appear from a README does the framing work for them — they're reviewing a plan rather than authoring one.
-
-### 12C.1 Project analysis endpoint
-
-See "12C.1 detail" under the NOW pointer above for the current spec.
 
 ### 12C.2 Team review UI
 
@@ -78,15 +87,9 @@ Goal: Lightsei stops being a passive cost-recorder and becomes an active cost-op
 
 Three layers, build in order:
 
-### 12D.1 — Spending audit (read-only insights)
+### 12D.1 — Spending audit (read-only insights) ✅ shipped 2026-05-05
 
-A new `/cost/insights` page (or section on `/cost`) that surfaces concrete waste signals computed from the existing `runs` + `events` + `model_pricing` tables. No code changes to any bot — pure analytics on data we already have.
-
-- **Cache-skip savings.** Polaris's Phase 6.2 hash cache already skips identical-doc ticks; the dashboard never showed how many tokens that saved. Compute: for each `polaris.tick_skipped` event, multiply the prior `polaris.plan` event's token count by the cache hit count. Surface as "your hash cache saved $X this month."
-- **Plan-volatility analysis.** For polaris specifically: hash each `polaris.plan` event's `summary` + `next_actions`. Identify N consecutive plans where the hash matches. Surface as "the last 5 plans were 90% identical — consider doubling your tick interval from 1h to 2h." One-click apply via the existing `/agents/[name]` Schedule section.
-- **Model-tier mismatch.** Compute per-agent `tokens_in / tokens_out` distribution. If an agent never crosses a complexity threshold the cheaper-tier model handles, surface as "Atlas spent $X on Opus this month; Haiku would have cost ~$0.07X based on observed token ranges." One-click apply via the model pin.
-- **Failed-call cost.** `llm_call_failed` events still cost tokens (anthropic charges for partial generations / refusals). Tally + surface as "failed calls this month: $X. Top reason: <error type>."
-- **Per-trigger ROI.** Rate of agent invocation × cost per invocation × % "useful" outcome. Useful = produced a non-skip plan, or dispatched a command, or emitted a structured event. Bots whose useful-rate is below ~10% are candidates for either a smarter trigger filter or retirement.
+See Done Log. Reference: `backend/cost_insights.py`, `dashboard/app/cost/insights/page.tsx`.
 
 ### 12D.2 — Polaris emits a periodic self-analysis
 
@@ -561,6 +564,22 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-05 — Phase 12D.1: cost insights page
+
+The first slice of "Polaris is smart about spending." A read-only audit of the last 30 days of runs + events that surfaces five concrete waste signals on a new `/cost/insights` page. Pure analytics on existing data — no LLM calls, no schema changes, no bot code touched.
+
+- [x] **Backend module `cost_insights.py`.** Pure functions, no I/O beyond the SQLAlchemy session. Each insight returns a homogeneous `{kind, headline, detail, apply}` shape so the dashboard's renderer is a generic map. Five insights:
+  - `cache_skip_savings` — `polaris.tick_skipped` count × median `polaris.plan` cost over 30d. Tells the user how much Polaris's hash cache saved them in real dollars.
+  - `plan_volatility` — hash the last 10 `polaris.plan` events' `summary + canonicalized next_actions` and count consecutive identical signatures starting from most-recent. Streak ≥3 surfaces a "consider doubling tick interval" recommendation with a link to the agent's schedule.
+  - `model_tier_mismatch` — per-agent: if MAX input over 30d is under 16k tokens AND the agent uses an "expensive" model with a known cheaper sibling (opus → sonnet → haiku, gpt-4 → gpt-4o → gpt-4o-mini, gemini-pro → gemini-flash), recommend the swap with projected savings. Conservative MAX-based filter (not p95) — even one tail call needing the bigger model suppresses the recommendation, since a wrong downgrade breaking a real workload is worse UX than a missed recommendation.
+  - `failed_call_cost` — sums input-token cost across `llm_call_failed` events grouped by error class (top 5).
+  - `per_trigger_roi` — per-agent (≥5 runs threshold for sample size): flag agents whose useful-run rate (events emitted other than `run_started/run_ended/llm_call_started/polaris.tick_skipped`) is below 25% over 7 days. Suggests a tighter trigger filter or longer tick interval.
+- [x] **`GET /workspaces/me/cost/insights`** wraps `all_insights()`. Workspace-scoped, no new auth surface, safe to poll on page load.
+- [x] **`/cost/insights` dashboard page.** Renders the homogeneous list with tone-coded chips (fix / audit / status). Model-tier-swap recommendations have a one-click "apply" button that PATCHes the agent's pinned model directly via `patchAgent`; other recommendations route to the relevant agent page for considered review. Linked from `/cost` (top-right "✨ insights" button) and the activity dropdown ("✨ cost insights").
+- [x] **13 new tests** covering each insight independently + endpoint shape + workspace isolation. Suite at 483/483.
+
+**What this leaves on the table for 12D.2:** Polaris narrating these insights in its plan event stream so the user sees them in their normal review flow. 12D.3 (auto-tune) stays parked behind Phase 14's eval signal.
 
 ### 2026-05-05 — Phase 12B aftercare: dashboard polish + missing surfaces
 
