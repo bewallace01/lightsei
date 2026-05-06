@@ -207,6 +207,75 @@ def _gh_get(client: httpx.Client, url: str, *, pat: str) -> dict:
     return r.json()
 
 
+def fetch_readme(
+    *,
+    repo_owner: str,
+    repo_name: str,
+    branch: Optional[str] = None,
+    pat: Optional[str] = None,
+) -> str:
+    """Phase 12C.1: fetch the repo's README via GitHub's
+    `/repos/{owner}/{name}/readme` endpoint. Returns the decoded text.
+
+    `pat` is optional: public repos work unauthenticated (subject to
+    the unauth rate limit, ~60 req/hr/IP). Private repos require a PAT
+    with `Contents: Read` on the target repo.
+
+    Raises GitHubAPIError with kind:
+      - `auth` on 401 (bad/missing token for private repo)
+      - `not_found` on 404 (repo doesn't exist OR no README at the path)
+      - `transport` for everything else
+    """
+    import base64
+
+    url = f"{GITHUB_API_BASE}/repos/{repo_owner}/{repo_name}/readme"
+    if branch:
+        url += f"?ref={branch}"
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if pat:
+        headers["Authorization"] = f"Bearer {pat}"
+
+    try:
+        with httpx.Client(timeout=INTERACTIVE_TIMEOUT_S) as client:
+            r = client.get(url, headers=headers)
+    except httpx.HTTPError as e:
+        raise GitHubAPIError(
+            f"network error reaching GitHub: {e}", kind="transport"
+        ) from e
+
+    if r.status_code == 401:
+        raise GitHubAPIError(
+            "GitHub auth failed (bad or missing PAT)", status=401, kind="auth"
+        )
+    if r.status_code == 404:
+        raise GitHubAPIError(
+            f"no README found at {repo_owner}/{repo_name}"
+            + (f"@{branch}" if branch else ""),
+            status=404, kind="not_found",
+        )
+    if r.status_code >= 400:
+        raise GitHubAPIError(
+            f"GitHub returned {r.status_code}: {r.text[:200]}",
+            status=r.status_code, kind="transport",
+        )
+
+    body = r.json()
+    if body.get("encoding") != "base64" or not isinstance(body.get("content"), str):
+        raise GitHubAPIError(
+            "GitHub readme response missing base64 content",
+            kind="transport",
+        )
+    try:
+        return base64.b64decode(body["content"]).decode("utf-8")
+    except Exception as e:
+        raise GitHubAPIError(
+            f"failed to decode README: {e}", kind="transport"
+        ) from e
+
+
 def fetch_directory_zip(
     *,
     repo_owner: str,

@@ -260,6 +260,21 @@ class AgentGenerateIn(BaseModel):
     previous_requirements_txt: Optional[str] = Field(default=None, max_length=20_000)
 
 
+class TeamPlanIn(BaseModel):
+    """Input to `POST /workspaces/me/teams/plan` (Phase 12C.1).
+
+    At least one of `readme_text`, `freeform_description`, or
+    `github_repo` must be set. When `github_repo` is set, the endpoint
+    fetches the README server-side via the workspace's GitHub
+    integration. `github_branch` defaults to the integration's default
+    branch (typically `main`).
+    """
+    readme_text: Optional[str] = Field(default=None, max_length=200_000)
+    freeform_description: Optional[str] = Field(default=None, max_length=10_000)
+    github_repo: Optional[str] = Field(default=None, max_length=200)
+    github_branch: Optional[str] = Field(default=None, max_length=200)
+
+
 class ThreadCreateIn(BaseModel):
     title: Optional[str] = None
 
@@ -4447,6 +4462,270 @@ def generate_agent(
                 cost_usd=Decimal(format(delta, ".6f")),
             )
             session.add(run_row)
+
+
+# ---------- Phase 12C.1: project-analysis endpoint ---------- #
+
+
+@app.post("/workspaces/me/teams/plan")
+def plan_team(
+    body: TeamPlanIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Take a README / freeform description / GitHub repo and return a
+    proposed team of 3-7 bots wired into a constellation. The plan
+    feeds Phase 12C.2's review UI; 12C.3 generates each bot via 12B.1
+    and 12C.4 deploys them.
+
+    Pure analysis: no agents are created. The endpoint returns the
+    plan; the user reviews and accepts (later phase) before anything
+    lands. Cost goes against the workspace budget cap and lands on
+    `lightsei.system` for accounting.
+    """
+    import anthropic
+
+    import team_planner
+
+    # 1. Input gate: at least one source of project info.
+    if not (body.readme_text or body.freeform_description or body.github_repo):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Provide at least one of `readme_text`, "
+                "`freeform_description`, or `github_repo`."
+            ),
+        )
+
+    # 2. Workspace's Anthropic key + budget gate (same shape as 12B.1).
+    secret_row = session.get(
+        WorkspaceSecret, (workspace_id, "ANTHROPIC_API_KEY")
+    )
+    if secret_row is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "ANTHROPIC_API_KEY not set on this workspace. Add it on "
+                "/account before using the team planner."
+            ),
+        )
+    try:
+        anthropic_key = secrets_crypto.decrypt(secret_row.encrypted_value)
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="failed to decrypt ANTHROPIC_API_KEY (server config issue)",
+        )
+
+    workspace = session.get(Workspace, workspace_id)
+    if workspace and workspace.budget_usd_monthly is not None:
+        cost = workspace_cost_mtd(session, workspace_id)
+        used = float(cost.get("total_usd") or 0)
+        cap = float(workspace.budget_usd_monthly)
+        if cap > 0 and used >= cap:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"workspace MTD spend ${used:.2f} ≥ budget ${cap:.2f}; "
+                    "bump the budget on /account to keep planning."
+                ),
+            )
+
+    # 3. Resolve README from GitHub if requested. `github_repo` accepts
+    # either `owner/name` or a full URL; we tolerate both.
+    readme_text = body.readme_text
+    if body.github_repo and not readme_text:
+        owner, name = _parse_github_repo(body.github_repo)
+        # If the workspace has a GitHub integration matching this repo,
+        # use its PAT (so private repos work). Otherwise fall back to
+        # unauth (works for public repos at the unauth rate limit).
+        pat: Optional[str] = None
+        integ = session.execute(
+            select(GitHubIntegration).where(
+                GitHubIntegration.workspace_id == workspace_id,
+                GitHubIntegration.repo_owner == owner,
+                GitHubIntegration.repo_name == name,
+            )
+        ).scalar_one_or_none()
+        if integ is not None and integ.encrypted_pat:
+            try:
+                pat = secrets_crypto.decrypt(integ.encrypted_pat)
+            except Exception:
+                pat = None
+        try:
+            readme_text = github_api.fetch_readme(
+                repo_owner=owner,
+                repo_name=name,
+                branch=body.github_branch,
+                pat=pat,
+            )
+        except github_api.GitHubAPIError as e:
+            raise HTTPException(
+                status_code=400 if e.kind in ("auth", "not_found") else 502,
+                detail=f"GitHub: {e.message}",
+            )
+
+    # 4. Snapshot the workspace's existing agents so the plan can wire
+    # to them rather than duplicate. Mirrors the agent_generator path.
+    agent_rows = session.execute(
+        select(Agent).where(Agent.workspace_id == workspace_id).order_by(Agent.name)
+    ).scalars().all()
+    existing_agents: list[dict[str, Any]] = []
+    reserved_names: set[str] = set()
+    for a in agent_rows:
+        # System agents (lightsei.*) are accounting buckets, not bots.
+        if a.name.startswith("lightsei."):
+            continue
+        reserved_names.add(a.name.strip().lower())
+        cmd_kinds: list[str] = []
+        for h in a.command_handlers or []:
+            kind = (h or {}).get("kind") if isinstance(h, dict) else None
+            if isinstance(kind, str):
+                cmd_kinds.append(kind)
+        existing_agents.append(
+            {
+                "name": a.name,
+                "role": a.role,
+                "command_kinds": cmd_kinds,
+            }
+        )
+
+    system_prompt = team_planner.build_system_prompt(
+        existing_agents=existing_agents,
+        reserved_names=reserved_names,
+    )
+    user_msg = team_planner.build_user_message(
+        readme_text=readme_text,
+        freeform_description=body.freeform_description,
+        github_repo=body.github_repo,
+    )
+
+    # 5. Call Claude with forced submit_team tool_choice. Track tokens
+    # across both attempts (initial + validation retry) so generation
+    # cost lands on `lightsei.system` even if the call ultimately fails.
+    client = anthropic.Anthropic(api_key=anthropic_key)
+    model = "claude-opus-4-7"
+    token_log: list[tuple[str, int, int]] = []
+
+    def _ask(extra_user_msg: Optional[str] = None) -> Any:
+        messages: list[dict[str, Any]] = [{"role": "user", "content": user_msg}]
+        if extra_user_msg:
+            messages.append({"role": "user", "content": extra_user_msg})
+        resp = client.messages.create(
+            model=model,
+            max_tokens=8000,
+            system=system_prompt,
+            tools=[team_planner.SUBMIT_TEAM_TOOL],
+            tool_choice={"type": "tool", "name": "submit_team"},
+            messages=messages,
+        )
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            token_log.append(
+                (
+                    getattr(resp, "model", None) or model,
+                    int(getattr(usage, "input_tokens", 0) or 0),
+                    int(getattr(usage, "output_tokens", 0) or 0),
+                )
+            )
+        return resp
+
+    def _extract(resp: Any) -> dict[str, Any]:
+        block = next(
+            (
+                b for b in resp.content
+                if getattr(b, "type", None) == "tool_use"
+                and getattr(b, "name", None) == "submit_team"
+            ),
+            None,
+        )
+        if block is None:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "model did not call submit_team "
+                    f"(stop_reason={getattr(resp, 'stop_reason', '?')})"
+                ),
+            )
+        return block.input
+
+    try:
+        try:
+            resp = _ask()
+            plan = _extract(resp)
+        except anthropic.APIError as e:
+            raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}")
+
+        # 6. Validate the plan. One retry with corrective feedback if
+        # there are problems; surface 422 with the remaining issues if
+        # the retry still fails.
+        problems = team_planner.validate_team_plan(plan, reserved_names)
+        if problems:
+            retry_msg = team_planner.build_validation_retry_message(problems)
+            try:
+                resp = _ask(extra_user_msg=retry_msg)
+                plan = _extract(resp)
+            except anthropic.APIError as e:
+                raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}")
+            remaining = team_planner.validate_team_plan(plan, reserved_names)
+            if remaining:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "team planner could not produce a valid plan after "
+                        "retry; remaining issues: " + " | ".join(remaining)
+                    ),
+                )
+
+        return {
+            "rationale": plan.get("rationale") or "",
+            "team": plan.get("team") or [],
+            "model_used": getattr(resp, "model", model),
+            "tokens_in": getattr(getattr(resp, "usage", None), "input_tokens", None),
+            "tokens_out": getattr(getattr(resp, "usage", None), "output_tokens", None),
+        }
+    finally:
+        # Phase 12D follow-up: server-side Anthropic spend lands on the
+        # `lightsei.system` agent so /cost reflects it. Same pattern as
+        # `generate_agent`. Runs even on error paths.
+        if token_log:
+            now_ts = utcnow()
+            ensure_agent(session, workspace_id, "lightsei.system", now_ts)
+            total_in = sum(t[1] for t in token_log)
+            total_out = sum(t[2] for t in token_log)
+            cost_model = token_log[0][0]
+            delta = compute_cost_usd(cost_model, total_in, total_out)
+            run_row = Run(
+                id=str(uuid.uuid4()),
+                workspace_id=workspace_id,
+                agent_name="lightsei.system",
+                started_at=now_ts,
+                ended_at=now_ts,
+                cost_usd=Decimal(format(delta, ".6f")),
+            )
+            session.add(run_row)
+
+
+def _parse_github_repo(s: str) -> tuple[str, str]:
+    """Accept `owner/name` or a full GitHub URL and return `(owner, name)`."""
+    raw = s.strip()
+    # Tolerate trailing `.git` (common for clone URLs).
+    if raw.endswith(".git"):
+        raw = raw[:-4]
+    # https://github.com/owner/name or git@github.com:owner/name
+    for prefix in ("https://github.com/", "http://github.com/"):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):]
+            break
+    if raw.startswith("git@github.com:"):
+        raw = raw[len("git@github.com:"):]
+    parts = raw.strip("/").split("/")
+    if len(parts) < 2:
+        raise HTTPException(
+            status_code=400,
+            detail=f"github_repo must be `owner/name` or a GitHub URL (got {s!r})",
+        )
+    return parts[0], parts[1]
 
 
 def _serialize_instance(i: AgentInstance, now: datetime) -> dict[str, Any]:
