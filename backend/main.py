@@ -26,6 +26,7 @@ from cost import (
 )
 from pricing import compute_cost_usd
 from db import ensure_agent, get_session, session_scope
+from validator_defaults import seed_default_validators
 from limits import (
     BodySizeLimitMiddleware,
     limit_login_attempt,
@@ -1053,6 +1054,36 @@ def list_agent_plans(
     }
 
 
+@app.get("/agents/{agent_name}/latest-cost-analysis")
+def latest_cost_analysis(
+    agent_name: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 12D.2: most recent `polaris.cost_analysis` event for the
+    given agent, scoped to the calling workspace. 404 when the agent
+    has not emitted one yet (which is the common case for a fresh
+    workspace — the home page treats 404 as "no insights to surface").
+    """
+    row = session.execute(
+        select(Event)
+        .where(
+            Event.workspace_id == workspace_id,
+            Event.agent_name == agent_name,
+            Event.kind == "polaris.cost_analysis",
+        )
+        .order_by(Event.timestamp.desc(), Event.id.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="no cost_analysis yet")
+    return {
+        "event_id": row.id,
+        "timestamp": row.timestamp.isoformat(),
+        "payload": row.payload or {},
+    }
+
+
 @app.get("/events/{event_id}/validations")
 def get_event_validations(
     event_id: int,
@@ -1087,6 +1118,7 @@ def create_workspace(
     ws = Workspace(id=str(uuid.uuid4()), name=body.name, created_at=now)
     session.add(ws)
     session.flush()
+    seed_default_validators(session, ws.id, now)
 
     plaintext = generate_key()
     api_key_row = ApiKey(
@@ -3340,6 +3372,7 @@ def signup(
     ws = Workspace(id=str(uuid.uuid4()), name=body.workspace_name, created_at=now)
     session.add(ws)
     session.flush()
+    seed_default_validators(session, ws.id, now)
 
     user = User(
         id=str(uuid.uuid4()),

@@ -13,6 +13,7 @@ import {
   ValidationStatus,
   worstValidationStatus,
 } from "../api";
+import PolarisCostAnalysisPanel from "../PolarisCostAnalysisPanel";
 
 const AGENT_NAME = "polaris";
 const POLL_MS = 30000;
@@ -653,6 +654,12 @@ export default function PolarisPage() {
       </section>
 
       <div className="max-w-6xl mx-auto px-8 py-10">
+        {/* Phase 12D.2: Polaris narrates the cost audit alongside the
+            plan stream. Renders nothing when there's no event yet or
+            no actionable insights, so the page reads the same as before
+            on a quiet workspace. */}
+        <PolarisCostAnalysisPanel />
+
         {error && (
           <div className="mb-6 p-3 border border-red-200 bg-red-50 text-red-700 text-sm rounded-md">
             {error}

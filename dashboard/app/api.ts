@@ -895,6 +895,34 @@ export async function fetchLatestPolarisPlan(
   return (await r.json()) as PolarisPlan;
 }
 
+
+// Phase 12D.2: Polaris narrates the same insight stream rendered on
+// /cost/insights. `CostInsight` / `CostInsightApply` are defined later
+// in this file (the /cost/insights page also imports them); the
+// payload shape here mirrors the event Polaris emits on tick.
+export type PolarisCostAnalysis = {
+  event_id: number;
+  timestamp: string;
+  payload: {
+    insights: CostInsight[];
+    generated_at: string;
+    window_days: number;
+  };
+};
+
+export async function fetchLatestPolarisCostAnalysis(
+  agentName: string,
+): Promise<PolarisCostAnalysis | null> {
+  const r = await fetch(
+    `${API_URL}/agents/${encodeURIComponent(agentName)}/latest-cost-analysis`,
+    { cache: "no-store", headers: authHeaders() },
+  );
+  if (r.status === 401) throw new UnauthorizedError();
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`/latest-cost-analysis returned ${r.status}`);
+  return (await r.json()) as PolarisCostAnalysis;
+}
+
 export async function fetchPolarisPlans(
   agentName: string,
   limit = 20,

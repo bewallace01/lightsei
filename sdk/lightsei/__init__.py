@@ -22,6 +22,7 @@ from ._commands import (
     send_command as _impl_send_command,
 )
 from ._context import get_run_id
+from ._cost_insights import get_cost_insights as _impl_get_cost_insights
 from ._instance import TooManyInstancesError
 from ._secrets import get_secret as _impl_get_secret
 from ._track import track
@@ -54,6 +55,7 @@ __all__ = [
     "flush",
     "shutdown",
     "check_policy",
+    "get_cost_insights",
     "get_run_id",
     "get_secret",
     "on_command",
@@ -211,6 +213,22 @@ def get_agent_config(name: str) -> dict[str, Any]:
         # null when unset; bot reads its env default in that case.
         "tick_interval_s": body.get("tick_interval_s"),
     }
+
+
+def get_cost_insights() -> list[dict[str, Any]]:
+    """Fetch this workspace's cost insights (Phase 12D).
+
+    Returns the homogeneous list of insight dicts (`kind`, `headline`,
+    `detail`, `apply`) the dashboard's `/cost/insights` page renders.
+    Cron-style bots like Polaris call this on each tick and emit a
+    `polaris.cost_analysis` event so the home page can surface the
+    audit alongside the latest plan.
+
+    Fails *open*: returns `[]` on any error (unreachable backend,
+    non-200, malformed body). Cost insights are enrichment, not
+    essential — the bot's tick should never block on this.
+    """
+    return _impl_get_cost_insights(_client)
 
 
 def send_command(

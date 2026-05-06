@@ -26,6 +26,8 @@ def fake_backend(
     secrets: dict[str, str] | None = None,
     reject_kinds: dict[str, dict] | None = None,
     heartbeat_409_detail: str | None = None,
+    cost_insights: list[dict] | None = None,
+    cost_insights_status: int = 200,
 ) -> Iterator[str]:
     """Fake Lightsei backend.
 
@@ -39,7 +41,18 @@ def fake_backend(
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
-            if self.path.startswith("/workspaces/me/secrets/"):
+            if self.path == "/workspaces/me/cost/insights":
+                if cost_insights_status != 200:
+                    self.send_error(cost_insights_status)
+                    return
+                items = cost_insights if cost_insights is not None else []
+                body = json.dumps({"insights": items}).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif self.path.startswith("/workspaces/me/secrets/"):
                 name = self.path.rsplit("/", 1)[-1]
                 if name in secrets:
                     body = json.dumps({"name": name, "value": secrets[name]}).encode()
@@ -244,6 +257,37 @@ def test_get_secret_404_raises_clear_error():
         with pytest.raises(lightsei.LightseiError) as exc:
             lightsei.get_secret("MISSING")
         assert "not set" in str(exc.value)
+
+
+def test_get_cost_insights_returns_list():
+    """Phase 12D.2: SDK helper unwraps the `{insights: [...]}` envelope
+    and returns the homogeneous list Polaris emits as `polaris.cost_analysis`."""
+    items = [
+        {"kind": "model_tier_mismatch", "headline": "swap atlas to haiku",
+         "detail": {"agent": "atlas"}, "apply": None},
+        {"kind": "cache_skip_savings", "headline": "saved $1.23 via hash cache",
+         "detail": {"saved_usd": 1.23}, "apply": None},
+    ]
+    with fake_backend([], cost_insights=items) as url:
+        lightsei.init(api_key="k", agent_name="demo", base_url=url)
+        got = lightsei.get_cost_insights()
+        assert got == items
+
+
+def test_get_cost_insights_fails_open_on_404():
+    """Hard-rule-#4 territory: the helper returns [] on any non-200 so a
+    flapping insights endpoint can't break Polaris's tick."""
+    with fake_backend([], cost_insights_status=404) as url:
+        lightsei.init(api_key="k", agent_name="demo", base_url=url)
+        assert lightsei.get_cost_insights() == []
+
+
+def test_get_cost_insights_empty_when_uninitialized():
+    """Without a prior init() the helper still returns []. Bot-side code
+    can call this unconditionally without guarding on initialized state."""
+    # Note: the autouse fixture resets the client after each test, so by
+    # the time this test starts, _client is uninitialized.
+    assert lightsei.get_cost_insights() == []
 
 
 def test_get_secret_before_init_raises():

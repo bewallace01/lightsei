@@ -72,6 +72,18 @@ def _register(client, headers, event_kind, validator_name, config):
     return r
 
 
+def _list_user_validators(client, headers):
+    """Return validators excluding the auto-seeded defaults
+    (`polaris.cost_analysis` schema_strict, etc.). Tests in this file
+    exercise hand-registered configs; the seeded baseline is covered
+    in test_cost_analysis_event.py."""
+    body = client.get("/workspaces/me/validators", headers=headers).json()
+    return [
+        v for v in body["validators"]
+        if v["event_kind"] != "polaris.cost_analysis"
+    ]
+
+
 # ---------- endpoint CRUD ---------- #
 
 
@@ -84,9 +96,9 @@ def test_put_creates_then_lists_validator_config(client, alice):
     assert body["validator_name"] == "schema_strict"
     assert body["config"]["schema"]["required"] == ["summary", "next_actions"]
 
-    listed = client.get("/workspaces/me/validators", headers=h).json()
-    assert len(listed["validators"]) == 1
-    assert listed["validators"][0]["validator_name"] == "schema_strict"
+    listed = _list_user_validators(client, h)
+    assert len(listed) == 1
+    assert listed[0]["validator_name"] == "schema_strict"
 
 
 def test_put_is_idempotent_and_updates_config(client, alice):
@@ -95,9 +107,9 @@ def test_put_is_idempotent_and_updates_config(client, alice):
     new_schema = dict(_PLAN_SCHEMA, required=["summary"])  # narrower
     r = _register(client, h, "polaris.plan", "schema_strict", {"schema": new_schema})
     assert r.status_code == 200
-    listed = client.get("/workspaces/me/validators", headers=h).json()
-    assert len(listed["validators"]) == 1
-    assert listed["validators"][0]["config"]["schema"]["required"] == ["summary"]
+    listed = _list_user_validators(client, h)
+    assert len(listed) == 1
+    assert listed[0]["config"]["schema"]["required"] == ["summary"]
 
 
 def test_put_rejects_unknown_validator_name(client, alice):
@@ -137,9 +149,7 @@ def test_delete_removes_config(client, alice):
         "/workspaces/me/validators/polaris.plan/schema_strict", headers=h
     )
     assert r.status_code == 200
-    assert client.get("/workspaces/me/validators", headers=h).json() == {
-        "validators": []
-    }
+    assert _list_user_validators(client, h) == []
 
 
 def test_delete_404_when_not_registered(client, alice):
@@ -156,9 +166,7 @@ def test_validators_workspace_isolation(client, alice, bob):
     _register(client, ha, "polaris.plan", "schema_strict", {"schema": _PLAN_SCHEMA})
 
     # Bob doesn't see alice's registration.
-    assert client.get("/workspaces/me/validators", headers=hb).json() == {
-        "validators": []
-    }
+    assert _list_user_validators(client, hb) == []
     # Bob can't delete it either.
     r = client.delete(
         "/workspaces/me/validators/polaris.plan/schema_strict", headers=hb
@@ -166,10 +174,7 @@ def test_validators_workspace_isolation(client, alice, bob):
     assert r.status_code == 404
 
     # Alice still sees her config intact.
-    assert (
-        len(client.get("/workspaces/me/validators", headers=ha).json()["validators"])
-        == 1
-    )
+    assert len(_list_user_validators(client, ha)) == 1
 
 
 def test_unauthorized(client):
@@ -430,9 +435,9 @@ def test_put_can_promote_existing_advisory_to_blocking(client, alice):
         client, h, "polaris.plan", "schema_strict",
         {"schema": _PLAN_SCHEMA}, "blocking",
     )
-    listed = client.get("/workspaces/me/validators", headers=h).json()
-    assert len(listed["validators"]) == 1
-    assert listed["validators"][0]["mode"] == "blocking"
+    listed = _list_user_validators(client, h)
+    assert len(listed) == 1
+    assert listed[0]["mode"] == "blocking"
 
 
 # ---------- Phase 8.2: blocking pipeline ---------- #

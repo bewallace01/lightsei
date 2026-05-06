@@ -62,6 +62,7 @@ import os
 import sys
 import time
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -619,6 +620,65 @@ def tick() -> None:
 
     lightsei.emit("polaris.plan", payload)
     _last_hashes = docs["hashes"]
+    _emit_cost_analysis()
+
+
+# ---------- Phase 12D.2: cost-analysis narration ---------- #
+#
+# After each plan emit, fetch the workspace's cost insights via the
+# SDK helper (added in 0.1.6) and emit `polaris.cost_analysis` so the
+# home page can surface the audit alongside the latest plan. Empty or
+# all-noise lists are suppressed upstream so the home page doesn't get
+# noisy. Defense in depth: the schema_strict validator on the event
+# kind also rejects empty insight lists.
+#
+# Filter rule: drop the always-on audit rows when they're zero — those
+# are useful as informational chips on /cost/insights but not worth
+# emitting on every tick if they have no signal. Variable-list insights
+# (model_tier_mismatch, per_trigger_roi) are naturally empty when there
+# is nothing actionable.
+
+def _is_interesting_insight(item: dict) -> bool:
+    kind = item.get("kind")
+    detail = item.get("detail") or {}
+    if kind == "cache_skip_savings":
+        return float(detail.get("estimated_saved_usd") or 0) > 0
+    if kind == "failed_call_cost":
+        return int(detail.get("failed_call_count") or 0) > 0
+    if kind == "plan_volatility":
+        # The backend only attaches a fix-it `apply` when the streak is
+        # actionable (≥3 identical plans). Use that as the gate so we
+        # don't emit a status row that just says "schedule looks healthy."
+        return item.get("apply") is not None
+    # Anything else (model_tier_mismatch, per_trigger_roi, future kinds)
+    # only appears when the insight had content; pass through.
+    return True
+
+
+def _emit_cost_analysis() -> None:
+    try:
+        raw = lightsei.get_cost_insights()
+    except Exception as exc:
+        # SDK helper already fails-open, but belt-and-suspenders so a
+        # programming error here can't crash the tick.
+        print(f"cost insights fetch raised: {exc}", flush=True)
+        return
+
+    items = [i for i in raw if _is_interesting_insight(i)]
+    if not items:
+        return
+
+    payload = {
+        "insights": items,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "window_days": 30,
+    }
+    print(
+        f"cost_analysis: emitting {len(items)} insight(s) "
+        f"({len(raw) - len(items)} filtered as noise)",
+        flush=True,
+    )
+    lightsei.emit("polaris.cost_analysis", payload)
 
 
 # ---------- Phase 11.5: react to push events ---------- #

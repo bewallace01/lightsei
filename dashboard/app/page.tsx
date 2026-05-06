@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 import { fetchRunSummaries, RunSummary, UnauthorizedError } from "./api";
 import Constellation from "./Constellation";
 import CostPanel from "./CostPanel";
+import PolarisCostAnalysisPanel from "./PolarisCostAnalysisPanel";
 import Hero from "./Hero";
 
 function fmtTime(iso: string): string {
@@ -166,6 +167,12 @@ export default function Home() {
       <section className="mb-10">
         <CostPanel compact />
       </section>
+
+      {/* Phase 12D.2: Polaris narrates the cost-insights audit during
+          its normal tick stream. The component renders nothing when
+          there's no recent `polaris.cost_analysis` event or when the
+          insight list is empty, so a quiet workspace stays scannable. */}
+      <PolarisCostAnalysisPanel compact />
 
       <div className="flex items-baseline justify-between mb-8">
         <div>
