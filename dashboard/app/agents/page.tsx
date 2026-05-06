@@ -182,7 +182,8 @@ export default function AgentsPage() {
           <h1 className="text-2xl font-semibold tracking-tight">Agents</h1>
           <p className="text-sm text-gray-500 mt-1">
             Every bot in this workspace. Click a name for the full detail
-            page; edit the model directly from the rows below.
+            page; edit the model or tick interval directly from the rows
+            below.
           </p>
         </div>
         <div className="flex items-center gap-3 shrink-0">
@@ -305,7 +306,12 @@ export default function AgentsPage() {
                     />
                   </td>
                   <td className="px-4 py-3 font-mono text-xs text-gray-700">
-                    {fmtInterval(r.tick_interval_s)}
+                    <TickCell
+                      name={r.name}
+                      tickIntervalS={r.tick_interval_s}
+                      onSaved={refresh}
+                      onError={(msg) => setError(msg)}
+                    />
                   </td>
                   <td className="px-4 py-3 text-gray-700 tabular-nums">
                     {r.runs_24h}
@@ -479,6 +485,147 @@ function ModelCell({
         </span>
       ) : (
         <span className="text-gray-400 group-hover:text-accent-600">— pin?</span>
+      )}
+    </button>
+  );
+}
+
+// ---------- Inline tick-interval edit cell ---------- //
+
+// Same six options as the per-agent detail page's ScheduleSelector, in
+// the same order, so the two surfaces feel like one knob viewed from two
+// places. Hints intentionally short — the detail page has the longer
+// guidance.
+const TICK_PRESETS: { seconds: number; label: string }[] = [
+  { seconds: 60, label: "1m" },
+  { seconds: 300, label: "5m" },
+  { seconds: 900, label: "15m" },
+  { seconds: 3600, label: "1h" },
+  { seconds: 14400, label: "4h" },
+  { seconds: 86400, label: "daily" },
+];
+
+function TickCell({
+  name,
+  tickIntervalS,
+  onSaved,
+  onError,
+}: {
+  name: string;
+  tickIntervalS: number | null;
+  onSaved: () => void;
+  onError: (msg: string) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [custom, setCustom] = useState<string>("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setCustom(tickIntervalS != null ? String(tickIntervalS) : "");
+  }, [tickIntervalS]);
+
+  const apply = async (next: number | null) => {
+    setSaving(true);
+    try {
+      await patchAgent(name, { tick_interval_s: next });
+      setEditing(false);
+      onSaved();
+    } catch (e) {
+      onError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const onApplyCustom = () => {
+    const n = parseInt(custom, 10);
+    if (Number.isNaN(n) || n < 60 || n > 86400) {
+      onError("custom interval must be between 60 and 86400 seconds");
+      return;
+    }
+    apply(n);
+  };
+
+  const onCancel = () => {
+    setCustom(tickIntervalS != null ? String(tickIntervalS) : "");
+    setEditing(false);
+  };
+
+  if (editing) {
+    return (
+      <div className="flex flex-wrap items-center gap-1">
+        {TICK_PRESETS.map((p) => (
+          <button
+            key={p.seconds}
+            type="button"
+            disabled={saving}
+            onClick={() => apply(p.seconds)}
+            className={
+              "px-2 py-0.5 text-[11px] rounded-full border transition-colors " +
+              (tickIntervalS === p.seconds
+                ? "bg-accent-600 text-white border-accent-600"
+                : "bg-white text-gray-700 border-gray-300 hover:border-gray-400")
+            }
+          >
+            {p.label}
+          </button>
+        ))}
+        <input
+          type="number"
+          min={60}
+          max={86400}
+          value={custom}
+          onChange={(e) => setCustom(e.target.value)}
+          disabled={saving}
+          placeholder="sec"
+          className="w-16 px-1.5 py-0.5 text-[11px] border border-gray-300 rounded font-mono"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") onApplyCustom();
+            if (e.key === "Escape") onCancel();
+          }}
+        />
+        <button
+          type="button"
+          onClick={onApplyCustom}
+          disabled={saving || !custom.trim()}
+          className="px-2 py-0.5 text-[11px] bg-accent-600 text-white rounded hover:bg-accent-700 disabled:opacity-50"
+        >
+          {saving ? "…" : "save"}
+        </button>
+        <button
+          type="button"
+          onClick={() => apply(null)}
+          disabled={saving || tickIntervalS == null}
+          className="px-2 py-0.5 text-[11px] text-gray-500 hover:text-gray-900 disabled:opacity-40"
+          title="clear override; bot uses its built-in default"
+        >
+          clear
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          disabled={saving}
+          className="text-[11px] text-gray-400 hover:text-gray-700"
+        >
+          ×
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => setEditing(true)}
+      className="text-left group"
+      title="click to change tick interval"
+    >
+      {tickIntervalS != null ? (
+        <span className="text-gray-900 group-hover:text-accent-600">
+          {fmtInterval(tickIntervalS)}
+        </span>
+      ) : (
+        <span className="text-gray-400 group-hover:text-accent-600">—</span>
       )}
     </button>
   );
