@@ -107,9 +107,22 @@ def _summarize_response(resp: Any) -> dict[str, Any]:
         if usage is not None:
             out["input_tokens"] = getattr(usage, "input_tokens", None)
             out["output_tokens"] = getattr(usage, "output_tokens", None)
+            # Prompt-caching fields (Anthropic returns these whenever a
+            # cache_control breakpoint is in scope; absent on uncached
+            # calls). Cache reads bill at 10%, cache writes at 125% — so
+            # capturing them lets the dashboard match Anthropic's invoice
+            # instead of pricing every prompt at the full rate.
+            cache_creation = getattr(usage, "cache_creation_input_tokens", None)
+            cache_read = getattr(usage, "cache_read_input_tokens", None)
+            if cache_creation is not None:
+                out["cache_creation_input_tokens"] = cache_creation
+            if cache_read is not None:
+                out["cache_read_input_tokens"] = cache_read
             in_t = out.get("input_tokens") or 0
             out_t = out.get("output_tokens") or 0
-            out["total_tokens"] = in_t + out_t
+            cc_t = cache_creation or 0
+            cr_t = cache_read or 0
+            out["total_tokens"] = in_t + out_t + cc_t + cr_t
     except Exception:
         pass
     if _client.capture_content:
@@ -198,6 +211,8 @@ def _make_stream_observers(req, started, run_id, is_implicit):
         "model": req.get("model"),
         "input_tokens": None,
         "output_tokens": None,
+        "cache_creation_input_tokens": None,
+        "cache_read_input_tokens": None,
         "output_chunks": 0,
         "content_parts": [],
     }
@@ -219,6 +234,12 @@ def _make_stream_observers(req, started, run_id, is_implicit):
                         out_t = getattr(usage, "output_tokens", None)
                         if out_t is not None:
                             state["output_tokens"] = out_t
+                        cc_t = getattr(usage, "cache_creation_input_tokens", None)
+                        if cc_t is not None:
+                            state["cache_creation_input_tokens"] = cc_t
+                        cr_t = getattr(usage, "cache_read_input_tokens", None)
+                        if cr_t is not None:
+                            state["cache_read_input_tokens"] = cr_t
             elif etype == "message_delta":
                 usage = getattr(event, "usage", None)
                 if usage is not None:
@@ -248,6 +269,12 @@ def _make_stream_observers(req, started, run_id, is_implicit):
             payload["input_tokens"] = state["input_tokens"]
         if state["output_tokens"] is not None:
             payload["output_tokens"] = state["output_tokens"]
+        if state["cache_creation_input_tokens"] is not None:
+            payload["cache_creation_input_tokens"] = state[
+                "cache_creation_input_tokens"
+            ]
+        if state["cache_read_input_tokens"] is not None:
+            payload["cache_read_input_tokens"] = state["cache_read_input_tokens"]
         if _client.capture_content and state["content_parts"]:
             payload["response_content"] = "".join(state["content_parts"])
         _client.emit("llm_call_completed", payload, run_id=run_id)

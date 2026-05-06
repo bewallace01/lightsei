@@ -93,6 +93,40 @@ def test_event_ingest_increments_run_cost(client, alice):
         assert abs(float(run.cost_usd) - expected_second) < 1e-6
 
 
+def test_failed_llm_call_attributes_input_token_cost(client, alice):
+    """Phase 12D follow-up: `llm_call_failed` events bill input tokens
+    only (no output yet) but the workspace was still charged — so the
+    helper that runs on `llm_call_completed` must also run on the
+    `_failed` kind."""
+    h = auth_headers(alice["api_key"]["plaintext"])
+
+    # 5000 input tokens at claude-opus-4-7 ($15/M in, $75/M out) with
+    # zero output -> 0.075 USD on the failed event alone.
+    payload = {
+        "model": "claude-opus-4-7",
+        "input_tokens": 5000,
+        "output_tokens": 0,
+        "error_class": "rate_limit",
+    }
+    expected = (5000 * 15.00 + 0 * 75.00) / 1_000_000
+    r = client.post(
+        "/events",
+        json={
+            "kind": "llm_call_failed",
+            "run_id": "run-failed-1",
+            "agent_name": "polaris",
+            "payload": payload,
+        },
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+
+    with session_scope() as s:
+        run = s.get(Run, "run-failed-1")
+        assert run is not None
+        assert abs(float(run.cost_usd) - expected) < 1e-6
+
+
 def test_unknown_model_contributes_zero(client, alice):
     """Unknown models in `llm_call_completed` payloads must not crash
     the ingest path and must contribute 0 to cost_usd — matches

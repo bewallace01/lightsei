@@ -401,10 +401,17 @@ def _call_anthropic(system_prompt: str, docs: dict, model: str) -> dict:
     `strict: true` + `tool_choice` to a specific tool guarantees the
     response contains exactly one tool_use block whose `input` matches
     the schema. No JSON parsing, no retry-on-parse-error path.
+
+    Prompt caching: the system prompt and the workspace docs (MEMORY.md +
+    TASKS.md, etc.) are large and stable across ticks. We mark them with
+    `cache_control: ephemeral` so Anthropic bills cache reads at 10% of
+    the normal input rate. The cache lives ~5 min, which spans several
+    ticks for a 60s interval. Only kicks in when the cached block is at
+    least the model's minimum (~2048 tokens for Opus); below that the
+    breakpoint is a no-op and we pay full rate, which is fine.
     """
     import anthropic
 
-    user_msg = _build_user_msg(docs)
     client = anthropic.Anthropic()
     # Note: adaptive thinking is incompatible with `tool_choice` forcing a
     # specific tool (Opus 4.7 returns 400). For Polaris we want the
@@ -416,10 +423,27 @@ def _call_anthropic(system_prompt: str, docs: dict, model: str) -> dict:
         model=model,
         max_tokens=4000,
         output_config={"effort": "high"},
-        system=system_prompt,
+        system=[
+            {
+                "type": "text",
+                "text": system_prompt,
+                "cache_control": {"type": "ephemeral"},
+            }
+        ],
         tools=[SUBMIT_PLAN_TOOL],
         tool_choice={"type": "tool", "name": "submit_plan"},
-        messages=[{"role": "user", "content": user_msg}],
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": _build_user_msg(docs),
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ],
+            }
+        ],
     )
 
     tool_block = next(

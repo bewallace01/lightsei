@@ -24,6 +24,7 @@ from cost import (
     utc_day_start,
     workspace_cost_mtd,
 )
+from pricing import compute_cost_usd
 from db import ensure_agent, get_session, session_scope
 from limits import (
     BodySizeLimitMiddleware,
@@ -78,6 +79,15 @@ COMMAND_TTL = timedelta(hours=24)
 # An instance is "active" if we heard from it within this window. Tuned for a
 # default 30s SDK heartbeat with two missed beats of slack.
 INSTANCE_ACTIVE_WINDOW = timedelta(seconds=90)
+# Cap on concurrently-active instances of the same agent from a single
+# hostname. Stops the runaway-process pattern where someone leaves
+# `python polaris/bot.py` running in 25 detached terminal tabs and each
+# one independently bills Anthropic. The 26th refuses to register and
+# the SDK exits with a clear message rather than silently overlapping.
+# Override per-deployment with LIGHTSEI_MAX_INSTANCES_PER_HOSTNAME.
+MAX_INSTANCES_PER_HOSTNAME = int(
+    os.getenv("LIGHTSEI_MAX_INSTANCES_PER_HOSTNAME", "3")
+)
 # A worker that hasn't heartbeated for this long loses its claim — any other
 # worker can re-claim the deployment. Tuned for a 30s worker heartbeat.
 WORKER_CLAIM_TTL = timedelta(seconds=120)
@@ -620,7 +630,12 @@ def post_event(
     # Phase 11B.1: incrementally roll up per-run cost. We need a flushed
     # run row before add_run_cost_from_event can session.get(Run, ...),
     # so flush here for the freshly-added case.
-    if event.kind == "llm_call_completed":
+    #
+    # Phase 12D follow-up: failed calls bill input tokens at almost every
+    # provider (the model loaded the prompt before the failure / refusal),
+    # so they're real money that produced no output. Run them through the
+    # same cost path — the helper already handles output_tokens=0 cleanly.
+    if event.kind in ("llm_call_completed", "llm_call_failed"):
         session.flush()
         add_run_cost_from_event(session, event.run_id, event.payload or {})
 
@@ -777,8 +792,15 @@ def list_agents(
     session: Session = Depends(get_session),
     workspace_id: str = Depends(get_workspace_id),
 ) -> dict[str, Any]:
+    # `lightsei.*` is reserved for synthetic platform agents (e.g. the
+    # `lightsei.system` row that absorbs cost from server-side generator
+    # calls). They have Run rows for cost accounting but aren't user bots,
+    # so keep them off the agents list.
     rows = session.execute(
-        select(Agent).where(Agent.workspace_id == workspace_id).order_by(Agent.name)
+        select(Agent)
+        .where(Agent.workspace_id == workspace_id)
+        .where(~Agent.name.like("lightsei.%"))
+        .order_by(Agent.name)
     ).scalars().all()
     return {"agents": [_serialize_agent(a) for a in rows]}
 
@@ -1374,6 +1396,7 @@ def get_workspace_constellation(
                 ) AS recent_model
             FROM agents a
             WHERE a.workspace_id = :wsid
+              AND a.name NOT LIKE 'lightsei.%'
             ORDER BY a.name
             """
         ),
@@ -4217,6 +4240,13 @@ def generate_agent(
     client = anthropic.Anthropic(api_key=anthropic_key)
     model = "claude-opus-4-7"
 
+    # Phase 12D follow-up: server-side calls to Anthropic don't go through
+    # the SDK auto-patch, so they bypass the `llm_call_completed` event +
+    # `add_run_cost_from_event` that ordinarily lights up the cost rollup.
+    # Track tokens across every attempt (including retries) and commit a
+    # single Run row at the end so generation calls show up on /cost.
+    token_log: list[tuple[str, int, int]] = []  # (model, in, out) per call
+
     def _ask(extra_user_msg: Optional[str] = None) -> Any:
         messages: list[dict[str, Any]] = [{"role": "user", "content": user_msg}]
         if iteration_turn:
@@ -4225,7 +4255,7 @@ def generate_agent(
             # Retry pass: append corrective feedback. Same conversation;
             # Claude has its prior attempt(s) in scope.
             messages.append({"role": "user", "content": extra_user_msg})
-        return client.messages.create(
+        resp = client.messages.create(
             model=model,
             max_tokens=8000,
             system=system_prompt,
@@ -4233,6 +4263,16 @@ def generate_agent(
             tool_choice={"type": "tool", "name": "submit_bot"},
             messages=messages,
         )
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            token_log.append(
+                (
+                    getattr(resp, "model", None) or model,
+                    int(getattr(usage, "input_tokens", 0) or 0),
+                    int(getattr(usage, "output_tokens", 0) or 0),
+                )
+            )
+        return resp
 
     def _extract(resp: Any) -> dict[str, Any]:
         block = next(
@@ -4254,96 +4294,126 @@ def generate_agent(
         return block.input
 
     try:
-        resp = _ask()
-        out = _extract(resp)
-    except anthropic.APIError as e:
-        raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}")
-
-    # 4. Validate name. If the LLM picked off-dictionary or already-in-use,
-    # retry once with a corrective hint; if still bad, surface a 422 with
-    # the chosen name so the dashboard can show the user what happened.
-    suggested = (out.get("agent_name") or "").strip().lower()
-    if not agent_generator.is_valid_star_name(suggested) or suggested in reserved_names:
-        retry_msg = (
-            f"The name `{suggested}` you proposed is "
-            + (
-                "already taken in this workspace"
-                if suggested in reserved_names
-                else "not in the star-naming dictionary"
-            )
-            + ". Pick a different name from the dictionary in the system prompt "
-            "and call submit_bot again with the same bot_py/requirements_txt."
-        )
         try:
-            resp = _ask(extra_user_msg=retry_msg)
-            out = _extract(resp)
-            suggested = (out.get("agent_name") or "").strip().lower()
-        except anthropic.APIError as e:
-            raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}")
-
-        if (
-            not agent_generator.is_valid_star_name(suggested)
-            or suggested in reserved_names
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"generator could not pick a valid star name "
-                    f"(got {suggested!r}); try editing the description or pass "
-                    "a name_hint."
-                ),
-            )
-
-    # 5. Phase 12B.4 validation gate: compile bot.py, check imports vs
-    # requirements.txt, ensure main() exists. If anything fails, retry
-    # once with the problems appended as a corrective turn. After two
-    # tries we surface the failures rather than ship broken code into
-    # the user's deploy pipeline.
-    bot_py = out.get("bot_py") or ""
-    requirements_txt = out.get("requirements_txt") or ""
-    problems = agent_generator.validate_generated_bot(bot_py, requirements_txt)
-    if problems:
-        retry_msg = agent_generator.build_validation_retry_message(problems)
-        try:
-            resp = _ask(extra_user_msg=retry_msg)
+            resp = _ask()
             out = _extract(resp)
         except anthropic.APIError as e:
             raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}")
-        # Re-validate the name (Claude might have changed it during the
-        # retry) and the code.
+
+        # 4. Validate name. If the LLM picked off-dictionary or already-in-use,
+        # retry once with a corrective hint; if still bad, surface a 422 with
+        # the chosen name so the dashboard can show the user what happened.
         suggested = (out.get("agent_name") or "").strip().lower()
-        if (
-            not agent_generator.is_valid_star_name(suggested)
-            or suggested in reserved_names
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"validation retry produced an invalid name "
-                    f"(got {suggested!r})"
-                ),
+        if not agent_generator.is_valid_star_name(suggested) or suggested in reserved_names:
+            retry_msg = (
+                f"The name `{suggested}` you proposed is "
+                + (
+                    "already taken in this workspace"
+                    if suggested in reserved_names
+                    else "not in the star-naming dictionary"
+                )
+                + ". Pick a different name from the dictionary in the system prompt "
+                "and call submit_bot again with the same bot_py/requirements_txt."
             )
+            try:
+                resp = _ask(extra_user_msg=retry_msg)
+                out = _extract(resp)
+                suggested = (out.get("agent_name") or "").strip().lower()
+            except anthropic.APIError as e:
+                raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}")
+
+            if (
+                not agent_generator.is_valid_star_name(suggested)
+                or suggested in reserved_names
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"generator could not pick a valid star name "
+                        f"(got {suggested!r}); try editing the description or pass "
+                        "a name_hint."
+                    ),
+                )
+
+        # 5. Phase 12B.4 validation gate: compile bot.py, check imports vs
+        # requirements.txt, ensure main() exists. If anything fails, retry
+        # once with the problems appended as a corrective turn. After two
+        # tries we surface the failures rather than ship broken code into
+        # the user's deploy pipeline.
         bot_py = out.get("bot_py") or ""
         requirements_txt = out.get("requirements_txt") or ""
-        remaining = agent_generator.validate_generated_bot(bot_py, requirements_txt)
-        if remaining:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    "generator could not produce a valid bot after retry; "
-                    "remaining issues: " + " | ".join(remaining)
-                ),
-            )
+        problems = agent_generator.validate_generated_bot(bot_py, requirements_txt)
+        if problems:
+            retry_msg = agent_generator.build_validation_retry_message(problems)
+            try:
+                resp = _ask(extra_user_msg=retry_msg)
+                out = _extract(resp)
+            except anthropic.APIError as e:
+                raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}")
+            # Re-validate the name (Claude might have changed it during the
+            # retry) and the code.
+            suggested = (out.get("agent_name") or "").strip().lower()
+            if (
+                not agent_generator.is_valid_star_name(suggested)
+                or suggested in reserved_names
+            ):
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"validation retry produced an invalid name "
+                        f"(got {suggested!r})"
+                    ),
+                )
+            bot_py = out.get("bot_py") or ""
+            requirements_txt = out.get("requirements_txt") or ""
+            remaining = agent_generator.validate_generated_bot(bot_py, requirements_txt)
+            if remaining:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "generator could not produce a valid bot after retry; "
+                        "remaining issues: " + " | ".join(remaining)
+                    ),
+                )
 
-    return {
-        "agent_name_suggestion": suggested,
-        "rationale": out.get("rationale") or "",
-        "bot_py": bot_py,
-        "requirements_txt": requirements_txt,
-        "model_used": getattr(resp, "model", model),
-        "tokens_in": getattr(getattr(resp, "usage", None), "input_tokens", None),
-        "tokens_out": getattr(getattr(resp, "usage", None), "output_tokens", None),
-    }
+        return {
+            "agent_name_suggestion": suggested,
+            "rationale": out.get("rationale") or "",
+            "bot_py": bot_py,
+            "requirements_txt": requirements_txt,
+            "model_used": getattr(resp, "model", model),
+            "tokens_in": getattr(getattr(resp, "usage", None), "input_tokens", None),
+            "tokens_out": getattr(getattr(resp, "usage", None), "output_tokens", None),
+        }
+    finally:
+        # Phase 12D follow-up (#1): record generation API spend on a Run
+        # row so /cost reflects it. We attribute to a synthetic
+        # `lightsei.system` agent — these aren't user bots, but the
+        # workspace did pay for the tokens. Filtered out of the agents
+        # list + constellation map below; surfaces in the cost rollup's
+        # by_agent breakdown so the user can see what generation cost
+        # them. Runs even on the error paths (HTTPException, APIError)
+        # because the API call already happened — Anthropic billed for
+        # whatever tokens loaded before the failure.
+        if token_log:
+            now_ts = utcnow()
+            ensure_agent(session, workspace_id, "lightsei.system", now_ts)
+            total_in = sum(t[1] for t in token_log)
+            total_out = sum(t[2] for t in token_log)
+            # All attempts use the same model; first entry's model is
+            # canonical (server may echo a more specific id like
+            # `claude-opus-4-7-20260101`, but the rate is the same).
+            cost_model = token_log[0][0]
+            delta = compute_cost_usd(cost_model, total_in, total_out)
+            run_row = Run(
+                id=str(uuid.uuid4()),
+                workspace_id=workspace_id,
+                agent_name="lightsei.system",
+                started_at=now_ts,
+                ended_at=now_ts,
+                cost_usd=Decimal(format(delta, ".6f")),
+            )
+            session.add(run_row)
 
 
 def _serialize_instance(i: AgentInstance, now: datetime) -> dict[str, Any]:
@@ -4375,6 +4445,33 @@ def instance_heartbeat(
     ensure_agent(session, workspace_id, agent_name, now)
     inst = session.get(AgentInstance, body.instance_id)
     if inst is None:
+        # Hostname-scoped concurrency cap: only enforced on new
+        # registrations (existing instances refreshing their own
+        # heartbeat are not subject to it — they were registered
+        # under a previous-or-current cap). Stale rows from
+        # crashed processes don't count because the window filter
+        # excludes them.
+        if body.hostname:
+            cutoff = now - INSTANCE_ACTIVE_WINDOW
+            active_count = session.execute(
+                select(func.count(AgentInstance.id))
+                .where(AgentInstance.workspace_id == workspace_id)
+                .where(AgentInstance.agent_name == agent_name)
+                .where(AgentInstance.hostname == body.hostname)
+                .where(AgentInstance.last_heartbeat_at >= cutoff)
+            ).scalar_one()
+            if active_count >= MAX_INSTANCES_PER_HOSTNAME:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"refused: {active_count} active instance(s) of "
+                        f"'{agent_name}' already running on '{body.hostname}' "
+                        f"(cap = {MAX_INSTANCES_PER_HOSTNAME}). Kill the "
+                        "older processes (e.g. `pkill -f bot.py`) before "
+                        "starting another, or raise the cap via "
+                        "LIGHTSEI_MAX_INSTANCES_PER_HOSTNAME."
+                    ),
+                )
         inst = AgentInstance(
             id=body.instance_id,
             workspace_id=workspace_id,

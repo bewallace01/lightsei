@@ -6,7 +6,11 @@ a timer so the dashboard can show "live now" status.
 
 Graceful degradation: every backend call is best-effort. If the network
 flaps, we keep heartbeating; the next successful call refreshes status.
-A failure never crashes the user's bot.
+A failure never crashes the user's bot — *except* when the backend
+explicitly refuses to register because too many concurrent instances
+of the same agent are already running on this host. In that case we
+raise so the runaway-process pattern fails loudly instead of silently
+overlapping LLM bills.
 """
 import logging
 import os
@@ -18,6 +22,12 @@ from datetime import datetime, timezone
 from typing import Optional
 
 logger = logging.getLogger("lightsei.instance")
+
+
+class TooManyInstancesError(RuntimeError):
+    """Backend refused this process because the per-host concurrency
+    cap is already reached for this agent. Raised from `init()` so the
+    user notices instead of unknowingly running N copies in parallel."""
 
 
 def _hostname() -> str:
@@ -51,7 +61,11 @@ class _HeartbeatPoster:
             return
         # Fire one heartbeat synchronously on start so the dashboard sees the
         # instance immediately rather than waiting for the first tick.
-        self._post_once()
+        # `raise_on_refusal=True`: a 409 from the backend means the host's
+        # per-agent concurrency cap is hit. Bubble that up as an exception
+        # from init() so the user sees it instead of silently launching
+        # yet another copy.
+        self._post_once(raise_on_refusal=True)
         self._stop.clear()
         self._thread = threading.Thread(
             target=self._loop, name="lightsei-instance", daemon=True,
@@ -73,11 +87,11 @@ class _HeartbeatPoster:
             except Exception as e:
                 logger.warning("lightsei heartbeat error: %s", e)
 
-    def _post_once(self) -> None:
+    def _post_once(self, raise_on_refusal: bool = False) -> None:
         if self._client._http is None or not self._client.agent_name:
             return
         try:
-            self._client._http.post(
+            r = self._client._http.post(
                 f"/agents/{self._client.agent_name}/instances/heartbeat",
                 json={
                     "instance_id": self._instance_id,
@@ -90,3 +104,20 @@ class _HeartbeatPoster:
             )
         except Exception as e:
             logger.debug("lightsei heartbeat post failed: %s", e)
+            return
+        # 409 on the very first heartbeat means the per-host cap is hit
+        # (see backend MAX_INSTANCES_PER_HOSTNAME). Surface this loudly
+        # only on the synchronous startup call — for background heartbeats
+        # we keep it as a debug log so a config change while a process
+        # is alive doesn't kill it mid-run.
+        if r.status_code == 409 and raise_on_refusal:
+            try:
+                detail = r.json().get("detail")
+            except Exception:
+                detail = r.text
+            raise TooManyInstancesError(detail or "instance registration refused")
+        elif r.status_code >= 400:
+            logger.debug(
+                "lightsei heartbeat non-2xx: %s %s",
+                r.status_code, r.text[:200],
+            )

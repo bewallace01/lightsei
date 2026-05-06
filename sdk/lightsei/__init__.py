@@ -22,6 +22,7 @@ from ._commands import (
     send_command as _impl_send_command,
 )
 from ._context import get_run_id
+from ._instance import TooManyInstancesError
 from ._secrets import get_secret as _impl_get_secret
 from ._track import track
 from .errors import LightseiError, LightseiPolicyError
@@ -63,6 +64,7 @@ __all__ = [
     "current_dispatch_chain_id",
     "LightseiError",
     "LightseiPolicyError",
+    "TooManyInstancesError",
 ]
 
 

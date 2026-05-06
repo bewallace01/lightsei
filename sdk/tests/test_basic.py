@@ -25,6 +25,7 @@ def fake_backend(
     *,
     secrets: dict[str, str] | None = None,
     reject_kinds: dict[str, dict] | None = None,
+    heartbeat_409_detail: str | None = None,
 ) -> Iterator[str]:
     """Fake Lightsei backend.
 
@@ -82,6 +83,14 @@ def fake_backend(
                 self.wfile.write(b'{"allow":true}')
             elif self.path.endswith("/instances/heartbeat"):
                 received.append({"_path": self.path, **data})
+                if heartbeat_409_detail is not None:
+                    payload = json.dumps({"detail": heartbeat_409_detail}).encode()
+                    self.send_response(409)
+                    self.send_header("content-type", "application/json")
+                    self.send_header("content-length", str(len(payload)))
+                    self.end_headers()
+                    self.wfile.write(payload)
+                    return
                 self.send_response(200)
                 self.send_header("content-type", "application/json")
                 self.end_headers()
@@ -186,6 +195,25 @@ def test_heartbeat_registers_on_init():
     assert h["pid"]
     assert h["hostname"]
     assert h["_path"] == "/agents/demo/instances/heartbeat"
+
+
+def test_init_raises_when_backend_refuses_heartbeat_with_409():
+    """Backend's per-host concurrency cap returns 409 on the first
+    heartbeat. The SDK must surface that as TooManyInstancesError so
+    the user notices the runaway-process pattern instead of silently
+    starting a 26th polaris."""
+    received: list[dict] = []
+    detail = "refused: 3 active instance(s) of 'polaris' on 'mac' (cap = 3)."
+    with fake_backend(received, heartbeat_409_detail=detail) as url:
+        with pytest.raises(lightsei.TooManyInstancesError) as exc:
+            lightsei.init(
+                api_key="k",
+                agent_name="polaris",
+                base_url=url,
+                heartbeat_interval=10.0,
+            )
+        assert "polaris" in str(exc.value)
+        assert "cap" in str(exc.value)
 
 
 def test_get_secret_fetches_and_caches():

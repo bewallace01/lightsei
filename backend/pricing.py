@@ -77,8 +77,18 @@ def compute_cost_usd(
     model: Optional[str],
     input_tokens: Optional[int],
     output_tokens: Optional[int],
+    cache_creation_input_tokens: Optional[int] = None,
+    cache_read_input_tokens: Optional[int] = None,
 ) -> float:
-    """Cost in USD for one LLM call. Missing fields are treated as 0."""
+    """Cost in USD for one LLM call. Missing fields are treated as 0.
+
+    Anthropic prompt-caching rates (when the call uses cache_control):
+      cache write (creation): 1.25 × normal input rate
+      cache read:             0.10 × normal input rate
+    Other providers don't surface separate cache fields today, so the
+    extra args are no-ops for them — `input_tokens` covers their full
+    billable input.
+    """
     if not model:
         return 0.0
     prices = PRICING.get(model)
@@ -87,7 +97,14 @@ def compute_cost_usd(
     in_per_m, out_per_m = prices
     in_tok = input_tokens or 0
     out_tok = output_tokens or 0
-    return (in_tok * in_per_m + out_tok * out_per_m) / 1_000_000.0
+    cc_tok = cache_creation_input_tokens or 0
+    cr_tok = cache_read_input_tokens or 0
+    return (
+        in_tok * in_per_m
+        + cc_tok * in_per_m * 1.25
+        + cr_tok * in_per_m * 0.10
+        + out_tok * out_per_m
+    ) / 1_000_000.0
 
 
 def seed_model_pricing(session: Session) -> None:

@@ -505,3 +505,43 @@ def test_generate_iteration_alone_without_previous_ignored(client, alice, monkey
     assert r.status_code == 200
     # Only the framing message; no iteration turn.
     assert len(captured["messages"]) == 1
+
+
+def test_generate_records_cost_on_lightsei_system_run(client, alice, monkeypatch):
+    """Phase 12D follow-up #1: server-side Anthropic calls bypass the
+    SDK auto-patch, so the endpoint must commit a Run row itself or
+    the spend never lands on /cost. The synthetic agent name is
+    `lightsei.system` and is filtered out of /agents."""
+    api_key = alice["api_key"]["plaintext"]
+    _set_anthropic_secret(client, api_key)
+
+    fake = _FakeClient()
+    # _fake_response uses usage=(123, 456). claude-opus-4-7 is
+    # ($15/M in, $75/M out).
+    fake.messages.create = lambda **kw: _fake_response(agent_name="vega")
+    monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
+
+    r = client.post(
+        "/workspaces/me/agents/generate",
+        headers=auth_headers(api_key),
+        json={"description": "Build a code review bot."},
+    )
+    assert r.status_code == 200, r.text
+
+    expected = (123 * 15.00 + 456 * 75.00) / 1_000_000
+
+    cost = client.get(
+        "/workspaces/me/cost", headers=auth_headers(api_key)
+    ).json()
+    by_agent = {a["agent_name"]: a for a in cost["by_agent"]}
+    assert "lightsei.system" in by_agent, (
+        f"generation cost not attributed; saw {by_agent.keys()}"
+    )
+    assert abs(by_agent["lightsei.system"]["mtd_usd"] - expected) < 1e-6
+    assert abs(cost["mtd_usd"] - expected) < 1e-6
+
+    # And the synthetic agent must not appear on /agents — it's not a
+    # user bot, just an accounting bucket.
+    listed = client.get("/agents", headers=auth_headers(api_key)).json()
+    names = [a["name"] for a in listed["agents"]]
+    assert "lightsei.system" not in names

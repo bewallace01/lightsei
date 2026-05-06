@@ -149,12 +149,18 @@ class _Client:
             # Heartbeat: register an instance and refresh on a timer so the
             # dashboard can show this process as alive.
             try:
-                from ._instance import _HeartbeatPoster
+                from ._instance import _HeartbeatPoster, TooManyInstancesError
                 if self.agent_name:
                     self._heartbeat = _HeartbeatPoster(
                         self, self.heartbeat_interval,
                     )
                     self._heartbeat.start()
+            except TooManyInstancesError:
+                # Backend explicitly refused this process via the per-host
+                # concurrency cap. Don't swallow it — surface it so the
+                # user notices the runaway-process pattern instead of
+                # silently launching yet another copy that bills LLMs.
+                raise
             except Exception as e:  # pragma: no cover
                 logger.warning("lightsei heartbeat failed to start: %s", e)
 

@@ -29,7 +29,11 @@ def agent_cost_since(
             SELECT
                 payload ->> 'model' AS model,
                 COALESCE((payload ->> 'input_tokens')::int, 0) AS input_tokens,
-                COALESCE((payload ->> 'output_tokens')::int, 0) AS output_tokens
+                COALESCE((payload ->> 'output_tokens')::int, 0) AS output_tokens,
+                COALESCE((payload ->> 'cache_creation_input_tokens')::int, 0)
+                  AS cache_creation_tokens,
+                COALESCE((payload ->> 'cache_read_input_tokens')::int, 0)
+                  AS cache_read_tokens
             FROM events
             WHERE workspace_id = :wsid
               AND agent_name = :agent_name
@@ -49,8 +53,16 @@ def agent_cost_since(
         model = r.model or "unknown"
         input_tokens = r.input_tokens or 0
         output_tokens = r.output_tokens or 0
+        cache_creation = r.cache_creation_tokens or 0
+        cache_read = r.cache_read_tokens or 0
         priced_model = model if model != "unknown" else None
-        cost = compute_cost_usd(priced_model, input_tokens, output_tokens)
+        cost = compute_cost_usd(
+            priced_model,
+            input_tokens,
+            output_tokens,
+            cache_creation,
+            cache_read,
+        )
         bucket = by_model.setdefault(
             model,
             {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cost_usd": 0.0},
@@ -180,6 +192,9 @@ def workspace_cost_mtd(
     # since the migration's backfill already used the same pricing the
     # rollup uses, so the by_agent total and the by_model total agree to
     # within rounding.
+    # Cache-aware cost: cache writes bill at 1.25× input rate, cache
+    # reads at 0.10×. Mirrors `compute_cost_usd` so this rollup and
+    # `runs.cost_usd` agree to within rounding.
     model_rows = session.execute(
         text(
             """
@@ -191,6 +206,12 @@ def workspace_cost_mtd(
                 SUM(
                     COALESCE((payload->>'input_tokens')::numeric, 0)
                       * COALESCE(mp.input_per_million_usd, 0) / 1000000.0
+                    +
+                    COALESCE((payload->>'cache_creation_input_tokens')::numeric, 0)
+                      * COALESCE(mp.input_per_million_usd, 0) * 1.25 / 1000000.0
+                    +
+                    COALESCE((payload->>'cache_read_input_tokens')::numeric, 0)
+                      * COALESCE(mp.input_per_million_usd, 0) * 0.10 / 1000000.0
                     +
                     COALESCE((payload->>'output_tokens')::numeric, 0)
                       * COALESCE(mp.output_per_million_usd, 0) / 1000000.0
@@ -247,7 +268,9 @@ def add_run_cost_from_event(
     model = payload.get("model")
     in_tok = payload.get("input_tokens")
     out_tok = payload.get("output_tokens")
-    delta = compute_cost_usd(model, in_tok, out_tok)
+    cc_tok = payload.get("cache_creation_input_tokens")
+    cr_tok = payload.get("cache_read_input_tokens")
+    delta = compute_cost_usd(model, in_tok, out_tok, cc_tok, cr_tok)
     if delta <= 0:
         return 0.0
     run = session.get(Run, run_id)
