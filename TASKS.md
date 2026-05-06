@@ -7,22 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 12D.2: Polaris narrates cost analysis directly in its plan events**
+> **Phase 12C.1: project-analysis endpoint — drop a README, get a team**
 
-Phase 12D.1 (read-only `/cost/insights` page) shipped 2026-05-05 — see Done Log. 12D.2 is the version of "Polaris is smart about spending" that surfaces the same analysis *during* the user's normal review flow rather than requiring a trip to a dedicated insights page.
+Phase 12D shipped end-to-end (12D.1 read-only audit on 2026-05-05, 12D.2 Polaris narration on 2026-05-06; 12D.3 auto-tune is parked behind Phase 14's eval signal). Pivoting to 12C, the natural extension of 12B: instead of "describe one bot, get one bot," the user drops a README (or repo URL) and Lightsei proposes + generates a constellation. See the **Phase 12C** section below for the full spec.
 
-### 12D.2 detail
-
-- Polaris's tick loop emits a new `polaris.cost_analysis` event in addition to `polaris.plan`. Same cadence (whatever `tick_interval_s` is set to) but only when there's something interesting to say — empty insight lists are suppressed so the home page doesn't get noisy.
-- Backend reuses the `cost_insights.all_insights()` module from 12D.1; no new analytics. Polaris bot.py fetches its own workspace's insights via a new `lightsei.get_cost_insights()` SDK helper (HTTP GET to `/workspaces/me/cost/insights`), filters out the always-on audit rows when their numbers are zero, and emits the rest as the event payload.
-- The home page hero + `/polaris` page render the latest `polaris.cost_analysis` next to the latest `polaris.plan` — if there's a fix-it recommendation, surface it in the same "wants your attention" pulse style that pending-approvals + failed-validations use today.
-- Event schema validates: payload is `{insights: [{kind, headline, detail, apply}, ...], generated_at, window_days}`. The validator pack on `polaris.cost_analysis` rejects empty insight lists (we skip the emit upstream rather than rely on the validator, but defense in depth).
-- The "12D.2 also calls Claude to summarize" branch from the original spec is dropped — running the heuristics from 12D.1 in pure code is cheaper, deterministic, and the 12D.1 page already shows the user every detail. A future "narrative summary" pass can be added behind an env flag if users want it.
-- SDK bump (0.1.6) for `get_cost_insights` — same release dance as 12.4 + 12B.1, follow the lessons-logged checklist. (0.1.5 already shipped 2026-05-06 with `TooManyInstancesError` + Anthropic cache-token capture; see Done Log.)
-
-### Future (12D.3)
-
-Auto-optimization with explicit consent. Park until Phase 14 (continuous eval) gives us a quality signal to safely tune against. See the Phase 12D section below for the full spec.
+12C.1 is the analysis layer — backend endpoint that takes a README / repo / freeform description and returns a roster of proposed bots with rationale, role, command kinds, and dispatch wiring. 12C.2-12C.4 (review UI, bulk generate, bulk deploy + rules) build on top of it.
 
 ## Phase 12C: drop a README, get a team
 
@@ -564,6 +553,26 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-06 — Phase 12D.2: Polaris narrates cost analysis in plan stream
+
+Polaris now emits a `polaris.cost_analysis` event after each plan emit, so the cost-insights audit shipped in 12D.1 surfaces during the user's normal review flow instead of requiring a dedicated page visit. Closes Phase 12D except for 12D.3 (auto-tune), which stays parked until Phase 14 (continuous eval) lands. End-to-end shipped same day as the 12D follow-up cost-accuracy work.
+
+- [x] **SDK 0.1.6: `lightsei.get_cost_insights()`.** New `_cost_insights.py` module fronts a GET against `/workspaces/me/cost/insights` and unwraps the `{insights: [...]}` envelope. Fails *open* (returns `[]` on transport error / 4xx / malformed body) — cost insights are enrichment, not essential, so a flapping endpoint can't block Polaris's tick. Three SDK tests: happy path, fail-open on 404, fail-open when uninitialized. Re-exported from `lightsei.__init__` and added to `__all__`.
+- [x] **Polaris emits `polaris.cost_analysis` after each plan.** Tick loop calls the new helper, filters out audit rows that have zero signal (`cache_skip_savings` with `estimated_saved_usd == 0`, `failed_call_cost` with `failed_call_count == 0`, `plan_volatility` without an actionable streak), and emits only when at least one insight survives. Quiet workspace stays quiet. Variable-list insights (`model_tier_mismatch`, `per_trigger_roi`) pass through unchanged — they're already empty when there's nothing to say. Wrapped the whole thing in try/except so a programming error in the filter can't crash the tick.
+- [x] **Backend `latest-cost-analysis` endpoint.** `GET /agents/{name}/latest-cost-analysis` mirrors `/latest-plan` so the dashboard can poll one event cheaply on the home + `/polaris` pages. 404 when the agent has not emitted one yet, which the dashboard treats as "render nothing" (so the section is absent rather than empty on quiet workspaces).
+- [x] **Default validators on workspace creation.** New `validator_defaults.py` module exporting `seed_default_validators(session, workspace_id, now)`. Called from both `signup` and `POST /workspaces`. Default pack ships a `schema_strict` row on `polaris.cost_analysis` with `minItems: 1` on the `insights` array. Defense in depth: Polaris filters before emit, this stops a buggy bot from spamming. Sets the precedent for future per-event-kind defaults to land in the same module without scattering inline INSERTs.
+- [x] **Migration 0024.** Seeds the same row for every existing workspace via a single INSERT … SELECT … FROM workspaces … ON CONFLICT DO NOTHING. Idempotent — re-runs of `upgrade_to_head()` (which fires on every backend boot) are no-ops once a row exists.
+- [x] **Dashboard `<PolarisCostAnalysisPanel>`.** New shared component (`dashboard/app/PolarisCostAnalysisPanel.tsx`) that polls the latest event every 30s and renders insights as tone-coded chips ("fix" amber, "audit" gray, "status" emerald), sort fix-ables first, with the existing `apply.href` button when present. Mounted on the home page (`compact` prop, between the cost panel and recent runs) and on `/polaris` (full size, between the hero and the past-readings sidebar). Returns `null` when there's no event or no insights, so empty workspaces aren't disturbed.
+- [x] **`PolarisCostAnalysis` type in `dashboard/app/api.ts`** + `fetchLatestPolarisCostAnalysis` helper. Reuses the existing `CostInsight` / `CostInsightApply` types from the `/cost/insights` page rather than duplicating, so the two surfaces evolve together.
+- [x] **Test fix-up.** Existing `test_validation_pipeline.py` assumed a fresh workspace had zero validators; the new auto-seed broke 5 of those tests. Added a `_list_user_validators(client, headers)` helper that filters out the auto-seeded `polaris.cost_analysis` row, kept tests focused on the validators they actually exercise. The seeded baseline is its own test in the new `test_cost_analysis_event.py` (4 tests: seed exists with `minItems: 1`, valid event passes, empty insights rejected with 422, missing required field rejected).
+
+**Tests:** 7 new (3 SDK, 4 backend). Full suite: 474 backend + 16 SDK pass. SDK 0.1.6 published to PyPI.
+
+**What this leaves on the table:**
+
+- 12D.3 (auto-tune model + tick interval with revert-on-regression). Parked behind Phase 14 (continuous eval) so we have a quality signal to safely tune against.
+- Optional polish: the home page's "wants your attention" pulse counter currently covers pending-approvals + failed-validations; could include a count of `tone === "fix"` insights so the chip pulses in the same vocabulary. Skipped for now — the dedicated section is loud enough on its own and the pulse counter is precious real estate.
 
 ### 2026-05-06 — Phase 12D follow-up: cost accuracy + runaway-instance cap
 
