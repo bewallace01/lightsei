@@ -7,11 +7,9 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 12C.1: project-analysis endpoint — drop a README, get a team**
+> **Phase 12C.2: team-review UI — drop zone + visual constellation preview**
 
-Phase 12D shipped end-to-end (12D.1 read-only audit on 2026-05-05, 12D.2 Polaris narration on 2026-05-06; 12D.3 auto-tune is parked behind Phase 14's eval signal). Pivoting to 12C, the natural extension of 12B: instead of "describe one bot, get one bot," the user drops a README (or repo URL) and Lightsei proposes + generates a constellation. See the **Phase 12C** section below for the full spec.
-
-12C.1 is the analysis layer — backend endpoint that takes a README / repo / freeform description and returns a roster of proposed bots with rationale, role, command kinds, and dispatch wiring. 12C.2-12C.4 (review UI, bulk generate, bulk deploy + rules) build on top of it.
+12C.1 shipped 2026-05-06 (see Done Log). 12C.2 is the dashboard page that consumes the plan: drop a README or paste freeform context, render the proposed team as a constellation preview, allow inline edits (rename / remove / add a bot, edit description), then hand off to 12C.3 (bulk generate) on user confirm. See the **Phase 12C** section below for the full 12C.2-12C.4 spec.
 
 ## Phase 12C: drop a README, get a team
 
@@ -553,6 +551,24 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-06 — Phase 12C.1: project-analysis endpoint (drop a README, get a team)
+
+The first slice of Phase 12C. Server-side endpoint takes a project description (README text, freeform paragraph, or GitHub repo URL) and returns a 3-7-bot roster wired into a constellation. Pure analysis — no agents are created. 12C.2-12C.4 (review UI, bulk generate, bulk deploy + auto-approval rules) build on top of this. Shipped same day as 12D.2; same release cadence.
+
+- [x] **`team_planner.py` module.** Pure functions: `SUBMIT_TEAM_TOOL` schema (forced tool_choice → guaranteed JSON, role enum {orchestrator | specialist | messenger}, dispatch graph capped at 2 outgoing edges per bot), `build_system_prompt()` teaching the team-design step (work buckets, dispatch graph rules, "reuse existing agents instead of duplicating"), `validate_team_plan()` catching off-dictionary names, duplicate names within team, names already in the workspace, dangling dispatch edges, multi-orchestrator, size violations (3 ≤ N ≤ 7), `build_validation_retry_message()` for the corrective retry turn.
+- [x] **`POST /workspaces/me/teams/plan` endpoint.** Mirrors 12B.1's shape exactly: workspace `ANTHROPIC_API_KEY` + budget-cap gate, snapshot existing constellation (filtering out `lightsei.*` system agents so the planner doesn't see accounting buckets as real bots), build prompts, force `submit_team` tool, validate, retry once with corrective feedback if invalid, 422 if retry still fails. Tracks tokens across both attempts and commits one Run on `lightsei.system` in a finally block — matches the Phase 12D follow-up cost-attribution pattern so generation spend lands on `/cost`.
+- [x] **`github_api.fetch_readme(...)` helper.** Lighter than `fetch_directory_zip` — calls `/repos/{owner}/{name}/readme` and base64-decodes. Public repos work unauthenticated (subject to the unauth rate limit, ~60 req/hr/IP); if the workspace has a `GitHubIntegration` row matching the requested repo, its decrypted PAT is used so private repos work. URL parsing tolerates `owner/name`, `https://github.com/owner/name`, `git@github.com:owner/name`, and trailing `.git`.
+- [x] **21 new tests (`test_team_planner.py`).** Module unit: schema required fields, role enum + dispatch maxItems, prompt includes existing agents and filters reserved names from the star table, user-message handles missing inputs, validate accepts clean / rejects each failure mode (off-dictionary name, reserved name, duplicate-within-team, dangling dispatch edge, multi-orchestrator, size out of bounds), accepts existing-agent dispatch target. Endpoint with stubbed Anthropic: happy path, no-inputs 400, missing-secret 400, retry-on-bad-name path, 422 after exhausted retry, cost recording on `lightsei.system`, workspace isolation, unauthenticated, `lightsei.*` filtered from prompt context. Full suite at 495/495 backend.
+
+**SDK release:** none. The analysis runs server-side via the workspace's own Anthropic key (same as 12B.1) — bots don't need new surface for 12C.1. 12C.3's bulk-generate path will reuse 12B.1's existing `/agents/generate` endpoint, so no SDK bump there either.
+
+**What this leaves on the table for 12C.2-12C.4:**
+
+- 12C.2: drop zone + textarea + repo-URL field, visual constellation preview of the proposed team (reuse the home page's star-and-edge aesthetic against proposed bots instead of deployed ones), inline edit (rename / remove / add bot, edit description), "generate and deploy" button.
+- 12C.3: per-bot loop calling `POST /workspaces/me/agents/generate` with `description = bot.draft_description + "Coordinate with: ..."`, validation gate per-bot, code preview before final deploy.
+- 12C.4: bulk `uploadDeploymentBundle`, install auto-approval rules from the dispatch graph via the existing PUT, surface missing workspace-secrets checklist on the success page.
+- 12C.5: demo run with the Lightsei project's own README.
 
 ### 2026-05-06 — Phase 12D.2: Polaris narrates cost analysis in plan stream
 
