@@ -7,9 +7,9 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 12C.2: team-review UI — drop zone + visual constellation preview**
+> **Phase 12C.3: bulk generate — loop through the approved team and call /agents/generate**
 
-12C.1 shipped 2026-05-06 (see Done Log). 12C.2 is the dashboard page that consumes the plan: drop a README or paste freeform context, render the proposed team as a constellation preview, allow inline edits (rename / remove / add a bot, edit description), then hand off to 12C.3 (bulk generate) on user confirm. See the **Phase 12C** section below for the full 12C.2-12C.4 spec.
+12C.1 + 12C.2 shipped 2026-05-06 (see Done Log). 12C.3 is the per-bot loop: for each member of the approved plan, call `POST /workspaces/me/agents/generate` with `description = bot.draft_description + "Coordinate with: ..."`. Show progress per-bot. Validation gate from 12B.4 runs per-bot; if any fails after retries, surface the failure and let the user choose: skip, retry, or edit description and retry. Per-bot generated code shown in the same preview shape as 12B.2 — user reviews + edits each one before final deploy in 12C.4. See **Phase 12C** below for the full spec.
 
 ## Phase 12C: drop a README, get a team
 
@@ -551,6 +551,27 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-06 — Phase 12C.2: team-review UI
+
+The dashboard surface that consumes 12C.1's plan endpoint. New `/agents/team-from-readme` route. Frontend-only — backend already exists from 12C.1.
+
+- [x] **Input card.** Drop zone for `.md` / `.txt` files (drag-drop OR click-to-pick, 1MB cap), textarea for pasted README, separate textarea for freeform context, optional GitHub repo URL field (accepts `owner/name` or full URLs, including the `git@` form). Submit posts to `/workspaces/me/teams/plan`. At least one of the three inputs required, validated client-side before the round-trip.
+- [x] **Constellation preview.** SVG canvas matching the home page's dark-celestial aesthetic (slate-950 → indigo-950 gradient, sparkle stars sized by role, dashed dispatch edges). Orchestrator at center; specialists/messengers ringed around it with a deterministic angle layout (no force-directed jitter between renders). Ghost stubs along the right edge represent existing workspace agents the team dispatches into, so a `vega → polaris` edge in the plan reads visually instead of disappearing into the void. Reuses `tintForAgent()` + `sparklePath()` from `stars.ts` — atlas is the same violet sparkle here as on the home page.
+- [x] **Member detail / edit panel.** Click a star to open a side card showing role, summary, command kinds, dispatches-to checklist, required workspace secrets, and the `draft_description` that will feed 12C.3's per-bot generator. Inline edits: rename (dropdown of unreserved star-dictionary names), change role (orchestrator | specialist | messenger), toggle dispatch targets (capped at 2 with a clear alert on the 3rd — steers users toward linear chains rather than fanouts), edit description (textarea with save/cancel), remove from team (also strips dispatch edges pointing at the removed name).
+- [x] **"+ add bot"** picks the first free dictionary name as a sensible default and seeds a specialist stub for the user to customize. Refuses if all 20 names are taken.
+- [x] **"Generate & deploy" button** rendered but disabled with a tooltip indicating it ships in 12C.3. The plan stays in component state until the user navigates away — no auto-save, no half-deployed bots.
+- [x] **`STAR_DICTIONARY` mirrored client-side** in `dashboard/app/agents/team-from-readme/star_dictionary.ts`. 20 entries, kept in sync by hand (the backend's submit_team validator is the authoritative gate; this list just powers the inline rename dropdown).
+- [x] **`TeamPlan` / `TeamMember` / `TeamPlanInput` types + `fetchTeamPlan(input)`** helper in `dashboard/app/api.ts`.
+- [x] **Header nav: "✨ propose a team from README"** added to the `agents ▾` dropdown so the page is discoverable.
+
+**Verification:** type-check clean (`tsc --noEmit` exit 0). Manual browser-side QA pending — sub-component visuals (drop zone hover state, constellation layout under wide/narrow viewports, side-panel scroll on long descriptions) want a human eye.
+
+**What this leaves on the table for 12C.3:**
+
+- For-each-member loop calling `POST /workspaces/me/agents/generate` with the draft description + a "coordinate with: …" suffix listing the team. Render progress per-bot.
+- Per-bot 12B.4 validation gate; on failure surface a "skip / retry / edit description and retry" choice.
+- Per-bot code preview in the 12B.2 shape — user reviews + edits each before the final deploy in 12C.4.
 
 ### 2026-05-06 — Phase 12C.1: project-analysis endpoint (drop a README, get a team)
 
