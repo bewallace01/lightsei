@@ -41,6 +41,11 @@ const NAV: NavItem[] = [
         hint: "Describe a bot, Lightsei generates one",
       },
       {
+        href: "/agents/team-from-readme",
+        label: "✨ propose a team from README",
+        hint: "Drop a README, get a constellation",
+      },
+      {
         href: "/agents/new",
         label: "drop a zip",
         hint: "Upload a pre-zipped bot directory",

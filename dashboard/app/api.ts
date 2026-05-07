@@ -1153,6 +1153,49 @@ export async function fetchAgents(): Promise<Agent[]> {
   return body.agents;
 }
 
+
+// ---------- Team planner (Phase 12C.1) ---------- //
+//
+// `POST /workspaces/me/teams/plan` takes a project description and
+// returns 3-7 proposed bots wired into a constellation. The dashboard's
+// `/agents/team-from-readme` page (12C.2) consumes this; 12C.3 will
+// loop through the team and call `/agents/generate` per member.
+
+export type TeamMemberRole = "orchestrator" | "specialist" | "messenger";
+
+export type TeamMember = {
+  name: string;
+  role: TeamMemberRole;
+  summary: string;
+  command_kinds: string[];
+  dispatches_to: string[];
+  needs_workspace_secrets: string[];
+  draft_description: string;
+};
+
+export type TeamPlan = {
+  rationale: string;
+  team: TeamMember[];
+  model_used: string | null;
+  tokens_in: number | null;
+  tokens_out: number | null;
+};
+
+export type TeamPlanInput = {
+  readme_text?: string;
+  freeform_description?: string;
+  github_repo?: string;
+  github_branch?: string;
+};
+
+export async function fetchTeamPlan(input: TeamPlanInput): Promise<TeamPlan> {
+  return (await authedJson("/workspaces/me/teams/plan", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  })) as TeamPlan;
+}
+
 // ---------- Constellation map (Phase 11B.3) ---------- //
 //
 // Drives the home-page constellation widget. agents are nodes; edges are
