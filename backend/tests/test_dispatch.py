@@ -284,6 +284,31 @@ def test_claim_returns_approved_commands(client, alice):
     assert r.json()["command"]["id"] == cmd_id
 
 
+def test_complete_cannot_bypass_pending_approval(client, alice):
+    h = auth_headers(alice["api_key"]["plaintext"])
+    r = client.post(
+        "/agents/atlas/commands",
+        json={
+            "kind": "atlas.run_tests",
+            "payload": {"branch": "feature"},
+            "source_agent": "polaris",
+        },
+        headers=h,
+    )
+    assert r.status_code == 200, r.text
+    cmd = r.json()
+    assert cmd["approval_state"] == "pending"
+
+    r = client.post(
+        f"/commands/{cmd['id']}/complete",
+        json={"result": {"skipped": True}},
+        headers=h,
+    )
+
+    assert r.status_code == 400
+    assert "claimed" in r.json()["detail"]
+
+
 # ---------- approval endpoints ---------- #
 
 
