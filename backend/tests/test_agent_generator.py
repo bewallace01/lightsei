@@ -424,6 +424,36 @@ def test_generate_422_when_validation_retry_also_fails(client, alice, monkeypatc
     assert "valid bot" in r.json()["detail"].lower()
 
 
+def test_generate_records_cost_when_validation_retry_fails(client, alice, monkeypatch):
+    api_key = alice["api_key"]["plaintext"]
+    _set_anthropic_secret(client, api_key)
+
+    bad_bot = "import lightsei\n# no main() defined\n"
+    fake = _FakeClient()
+    fake.messages.create = lambda **kw: _fake_response(
+        agent_name="vega", bot_py=bad_bot
+    )
+    monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
+
+    r = client.post(
+        "/workspaces/me/agents/generate",
+        headers=auth_headers(api_key),
+        json={"description": "Build a code review bot."},
+    )
+    assert r.status_code == 422
+
+    expected_per_attempt = (123 * 15.00 + 456 * 75.00) / 1_000_000
+    cost = client.get(
+        "/workspaces/me/cost", headers=auth_headers(api_key)
+    ).json()
+    by_agent = {a["agent_name"]: a for a in cost["by_agent"]}
+    assert "lightsei.system" in by_agent
+    assert (
+        abs(by_agent["lightsei.system"]["mtd_usd"] - (expected_per_attempt * 2))
+        < 1e-6
+    )
+
+
 # ---------- Phase 12B.3: iteration loop ---------- #
 
 
