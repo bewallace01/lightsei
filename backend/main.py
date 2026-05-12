@@ -4222,7 +4222,7 @@ def generate_agent(
     workspace = session.get(Workspace, workspace_id)
     if workspace and workspace.budget_usd_monthly is not None:
         cost = workspace_cost_mtd(session, workspace_id)
-        used = float(cost.get("total_usd") or 0)
+        used = float(cost.get("mtd_usd") or 0)
         cap = float(workspace.budget_usd_monthly)
         if cap > 0 and used >= cap:
             raise HTTPException(
@@ -4520,7 +4520,7 @@ def plan_team(
     workspace = session.get(Workspace, workspace_id)
     if workspace and workspace.budget_usd_monthly is not None:
         cost = workspace_cost_mtd(session, workspace_id)
-        used = float(cost.get("total_usd") or 0)
+        used = float(cost.get("mtd_usd") or 0)
         cap = float(workspace.budget_usd_monthly)
         if cap > 0 and used >= cap:
             raise HTTPException(

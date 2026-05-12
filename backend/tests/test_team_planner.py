@@ -414,6 +414,46 @@ def test_plan_records_cost_on_lightsei_system(client, alice, monkeypatch):
     assert abs(by_agent["lightsei.system"]["mtd_usd"] - expected) < 1e-6
 
 
+def test_plan_respects_workspace_monthly_budget(client, alice, monkeypatch):
+    api_key = alice["api_key"]["plaintext"]
+    headers = auth_headers(api_key)
+    _set_anthropic_secret(client, api_key)
+
+    r = client.patch(
+        "/workspaces/me",
+        headers=headers,
+        json={"budget_usd_monthly": 0.01},
+    )
+    assert r.status_code == 200, r.text
+
+    calls = {"n": 0}
+
+    def fake_create(**kw):
+        calls["n"] += 1
+        return _fake_response(plan=_good_plan())
+
+    fake = _FakeClient()
+    fake.messages.create = fake_create
+    monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
+
+    r = client.post(
+        "/workspaces/me/teams/plan",
+        headers=headers,
+        json={"readme_text": "small backend"},
+    )
+    assert r.status_code == 200, r.text
+    assert calls["n"] == 1
+
+    r = client.post(
+        "/workspaces/me/teams/plan",
+        headers=headers,
+        json={"readme_text": "another backend"},
+    )
+    assert r.status_code == 429
+    assert "budget" in r.json()["detail"].lower()
+    assert calls["n"] == 1
+
+
 def test_plan_workspace_isolation(client, alice, bob, monkeypatch):
     """Bob calling /teams/plan without his own ANTHROPIC_API_KEY 400s
     even if alice has hers set — secrets are workspace-scoped."""
