@@ -7,9 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 12C.4: bulk deploy + auto-approval rules**
+> **Phase 12C.5: demo — drop the Lightsei README, watch the team appear**
 
-12C.1-12C.3 shipped (see Done Log). 12C.4 turns the per-bot reviewed code from 12C.3 into actual deployments + installs the dispatch graph's auto-approval rules. For each approved bot: zip `bot.py` + `requirements.txt` in-browser (reuse the 12B.2 JSZip path) and POST to `/agents/{name}/deployments` (the existing browser-native upload). Show per-bot deploy progress. After all are queued, PUT the auto-approval rules from the plan's dispatch graph via the existing `/workspaces/me/auto-approval-rules` endpoint. If the plan called for workspace secrets the user hasn't set, surface a checklist on the success page rather than letting bots crash on first run. See **Phase 12C** below for the full spec.
+12C.1-12C.4 shipped (see Done Log). 12C.5 is the demo: drop the Lightsei project's own README on `/agents/team-from-readme`, generate, expect Claude to propose something like a documentation maintainer + a PR reviewer + a security scanner + a build watcher (the LLM picks — that's the surprise). Edit the team: rename one, remove one, add a "weekly digest" bot. Generate. Review one bot's code. Deploy. Watch them show up on the constellation. Push a commit. See the chain fan out across the new team.
+
+This step is user-driven — it exercises every layer end-to-end (LLM, validators, generator, worker, dispatch, auto-approval rules) and is the proof that 12C closes the loop on "describe a project, get a team."
 
 ## Phase 12C: drop a README, get a team
 
@@ -551,6 +553,19 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-12 — Phase 12C.4: bulk deploy + auto-approval rules + missing-secrets checklist
+
+Closes the team-from-README flow structurally. The "Deploy team → (12C.4)" stub from 12C.3 is now a live button that turns the per-bot reviewed code into actual deployments, installs the plan's dispatch graph as auto-approval rules, and surfaces a checklist of workspace secrets the user still needs to set. Single-file change; reuses every backend endpoint that already existed (no schema work).
+
+- [x] **Per-bot zip + POST.** For each approved bot (status `success` in 12C.3's review, not skipped), build a `.zip` in-browser via JSZip with two root files (`bot.py`, `requirements.txt`), wrap in a `File`, POST to `/workspaces/me/deployments` via the existing `uploadDeploymentBundle()` helper. Parallel across the team — backend's existing worker claim logic handles queue ordering. Per-bot status pills (`pending` / `zipping` / `deploying` / `deployed` / `failed`) update as requests resolve; each deployed row links to its `/deployments/{id}` page.
+- [x] **Confirmation gate on failed bots.** If 12C.3 left any bots in `failed` state when the user clicks Deploy, a `confirm()` asks whether to deploy the rest or cancel and retry first. No silent drop-on-failure.
+- [x] **Auto-approval rules from the dispatch graph.** After deploys settle, walk the plan's edges: for each `source → target` where both are in this team and both deployed cleanly, look up `target.command_kinds` and PUT one rule per kind via `upsertAutoApprovalRule({source_agent, target_agent, command_kind, mode: "auto_approve"})`. Cross-team edges (team → existing agent) are intentionally skipped here — the plan doesn't carry their command_kinds; the user can wire those on the agent page if they want. Rule install is best-effort: failures surface in the success view as per-rule error rows but don't roll back the deploy.
+- [x] **Missing-secrets checklist.** Union of every approved bot's `needs_workspace_secrets` minus what `fetchSecrets()` returns from the workspace. Rendered as an amber-tinted callout on the success view with a link to `/account` so the user sets them before bots crash on first run.
+- [x] **Success view.** Header counter (`N deployed · M failed`), per-bot rows with deployment links, auto-approval rule summary (installed + failures separately), missing-secrets section if non-empty, CTAs back to `/` and `/agents`. `back to plan` link preserved for last-minute regrets.
+- [x] **Best-effort description forwarding.** Each deployed bot's roster row gets `description = rationale` from the LLM via `patchAgent()` — same pattern 12B.2 uses. Errors here are swallowed; the deploy is what matters.
+
+**Verification:** `tsc --noEmit` clean, route compiles + serves in <1s. Real end-to-end run lands in 12C.5.
 
 ### 2026-05-12 — Phase 12C.3: bulk-generate the approved team
 
