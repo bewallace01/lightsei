@@ -5,15 +5,49 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Agent,
+  AgentGenerateOutput,
   TeamMember,
   TeamMemberRole,
   TeamPlan,
   UnauthorizedError,
   fetchAgents,
   fetchTeamPlan,
+  generateAgent,
 } from "../../api";
 import { sparklePath, tintForAgent } from "../../stars";
 import { STAR_DICTIONARY, isStarName } from "./star_dictionary";
+
+
+// ---------- Generation state (12C.3) ---------- //
+
+type GenStatus = "pending" | "generating" | "success" | "failed" | "skipped";
+
+type GenResult = {
+  status: GenStatus;
+  // Description sent to /agents/generate. Kept on the row so retry/edit
+  // can mutate it without losing the original team draft_description.
+  description: string;
+  output?: AgentGenerateOutput;
+  error?: string;
+};
+
+type Phase = "plan" | "generating" | "review";
+
+/** Build the per-bot description fed to /agents/generate: the team
+ *  member's draft_description + an explicit "coordinate with" footer
+ *  listing the other team members (so the generator wires send_command
+ *  calls to its teammates rather than re-implementing). */
+function descriptionFor(member: TeamMember, team: TeamMember[]): string {
+  const others = team
+    .filter((m) => m.name !== member.name)
+    .map((m) => `${m.name} (${m.summary})`);
+  if (others.length === 0) return member.draft_description;
+  return (
+    member.draft_description.trim() +
+    "\n\nCoordinate with these other agents in this team:\n" +
+    others.map((o) => `- ${o}`).join("\n")
+  );
+}
 
 
 // ---------- Page ---------- //
@@ -33,6 +67,10 @@ export default function TeamFromReadmePage() {
   // targets in the same canvas.
   const [existingAgents, setExistingAgents] = useState<string[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
+
+  // Phase 12C.3 bulk-generation state.
+  const [phase, setPhase] = useState<Phase>("plan");
+  const [genResults, setGenResults] = useState<Record<string, GenResult>>({});
 
   useEffect(() => {
     let alive = true;
@@ -142,6 +180,98 @@ export default function TeamFromReadmePage() {
     return team.find((m) => m.name === selectedName) ?? null;
   }, [selectedName, team]);
 
+  // ---------- Bulk generation ---------- //
+
+  // Single-bot call. Updates genResults as the request resolves; safe
+  // to call standalone (for retry) or in parallel from onGenerate.
+  const runOneGenerate = async (member: TeamMember, description: string) => {
+    setGenResults((cur) => ({
+      ...cur,
+      [member.name]: {
+        status: "generating",
+        description,
+        output: cur[member.name]?.output,
+      },
+    }));
+    try {
+      const output = await generateAgent({
+        description,
+        // Suggest existing-agent dispatch targets so the generator
+        // wires send_command to them rather than to non-existent peers.
+        target_agents: Array.from(
+          new Set([
+            ...team.filter((m) => m.name !== member.name).map((m) => m.name),
+            ...member.dispatches_to,
+          ]),
+        ),
+        name_hint: member.name,
+      });
+      setGenResults((cur) => ({
+        ...cur,
+        [member.name]: { status: "success", description, output },
+      }));
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setGenResults((cur) => ({
+        ...cur,
+        [member.name]: { status: "failed", description, error: msg },
+      }));
+    }
+  };
+
+  const onGenerate = async () => {
+    if (team.length === 0) return;
+    setPhase("generating");
+    // Seed every member to `generating` so the progress UI lights up
+    // immediately — runOneGenerate will overwrite each as they resolve.
+    const initial: Record<string, GenResult> = {};
+    for (const m of team) {
+      initial[m.name] = {
+        status: "generating",
+        description: descriptionFor(m, team),
+      };
+    }
+    setGenResults(initial);
+
+    // Parallel — Anthropic supports concurrent requests; backend
+    // serializes per-workspace-budget on its side. Promise.allSettled
+    // so a single failure doesn't short-circuit the rest.
+    await Promise.allSettled(
+      team.map((m) => runOneGenerate(m, descriptionFor(m, team))),
+    );
+    setPhase("review");
+  };
+
+  const onRetry = async (memberName: string, descriptionOverride?: string) => {
+    const member = team.find((m) => m.name === memberName);
+    if (!member) return;
+    const desc =
+      descriptionOverride ??
+      genResults[memberName]?.description ??
+      descriptionFor(member, team);
+    await runOneGenerate(member, desc);
+  };
+
+  const onSkip = (memberName: string) => {
+    setGenResults((cur) => ({
+      ...cur,
+      [memberName]: {
+        ...cur[memberName],
+        status: "skipped",
+      },
+    }));
+  };
+
+  const onBackToPlan = () => {
+    setPhase("plan");
+    // Keep genResults around so re-generating doesn't lose successful
+    // bots' code — if the user only tweaked one description, the rest
+    // can stay as-is. (Re-running onGenerate would overwrite them, but
+    // we let the user decide when to do that.)
+  };
+
+  const planEditable = phase === "plan";
+
   return (
     <main className="px-8 py-10 max-w-6xl mx-auto">
       <div className="mb-2">
@@ -190,13 +320,15 @@ export default function TeamFromReadmePage() {
                 {plan.rationale}
               </p>
             </div>
-            <button
-              type="button"
-              onClick={onAddMember}
-              className="text-xs text-accent-600 hover:text-accent-700 font-medium whitespace-nowrap"
-            >
-              + add bot
-            </button>
+            {planEditable && (
+              <button
+                type="button"
+                onClick={onAddMember}
+                className="text-xs text-accent-600 hover:text-accent-700 font-medium whitespace-nowrap"
+              >
+                + add bot
+              </button>
+            )}
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-[1fr_320px] gap-6">
@@ -206,30 +338,57 @@ export default function TeamFromReadmePage() {
               selectedName={selectedName}
               onSelect={setSelectedName}
             />
-            <MemberPanel
-              member={selected}
-              reservedNames={reservedNames}
-              teammates={team.filter((m) => m.name !== selected?.name).map((m) => m.name)}
-              existingAgents={existingAgents}
-              onUpdate={onUpdateMember}
-              onRemove={onRemoveMember}
-            />
+            {planEditable ? (
+              <MemberPanel
+                member={selected}
+                reservedNames={reservedNames}
+                teammates={team.filter((m) => m.name !== selected?.name).map((m) => m.name)}
+                existingAgents={existingAgents}
+                onUpdate={onUpdateMember}
+                onRemove={onRemoveMember}
+              />
+            ) : (
+              <aside className="rounded-lg border border-gray-200 bg-gray-50 p-5 text-sm text-gray-500">
+                Plan is locked while generation runs. Hit{" "}
+                <button
+                  type="button"
+                  onClick={onBackToPlan}
+                  className="text-accent-600 hover:text-accent-700 underline"
+                >
+                  back to plan
+                </button>{" "}
+                to edit further.
+              </aside>
+            )}
           </div>
 
-          <div className="mt-8 border-t border-gray-100 pt-6 flex items-center justify-between gap-4">
-            <p className="text-xs text-gray-500">
-              Click any star above to inspect or edit. Add or remove bots
-              freely — nothing is deployed yet.
-            </p>
-            <button
-              type="button"
-              disabled
-              className="px-5 py-2 bg-accent-600 text-white rounded-md text-sm font-medium opacity-50 cursor-not-allowed"
-              title="Bulk-generate ships in Phase 12C.3."
-            >
-              Generate &amp; deploy → (12C.3)
-            </button>
-          </div>
+          {phase === "plan" && (
+            <div className="mt-8 border-t border-gray-100 pt-6 flex items-center justify-between gap-4">
+              <p className="text-xs text-gray-500">
+                Click any star above to inspect or edit. Add or remove bots
+                freely — nothing is deployed yet.
+              </p>
+              <button
+                type="button"
+                onClick={onGenerate}
+                disabled={team.length === 0}
+                className="px-5 py-2 bg-accent-600 text-white rounded-md text-sm font-medium hover:bg-accent-700 disabled:opacity-50"
+              >
+                ✨ Generate code →
+              </button>
+            </div>
+          )}
+
+          {phase !== "plan" && (
+            <GenerationSection
+              team={team}
+              genResults={genResults}
+              phase={phase}
+              onRetry={onRetry}
+              onSkip={onSkip}
+              onBackToPlan={onBackToPlan}
+            />
+          )}
         </section>
       )}
     </main>
@@ -820,5 +979,274 @@ function MemberPanel({
         </button>
       </div>
     </aside>
+  );
+}
+
+
+// ---------- Generation progress + review (12C.3) ---------- //
+
+function statusChipClass(s: GenStatus): string {
+  switch (s) {
+    case "success":
+      return "bg-emerald-100 text-emerald-800";
+    case "failed":
+      return "bg-red-100 text-red-800";
+    case "generating":
+      return "bg-indigo-100 text-indigo-800 animate-pulse";
+    case "skipped":
+      return "bg-gray-100 text-gray-500";
+    default:
+      return "bg-gray-100 text-gray-700";
+  }
+}
+
+function GenerationSection({
+  team,
+  genResults,
+  phase,
+  onRetry,
+  onSkip,
+  onBackToPlan,
+}: {
+  team: TeamMember[];
+  genResults: Record<string, GenResult>;
+  phase: Phase;
+  onRetry: (name: string, descriptionOverride?: string) => void;
+  onSkip: (name: string) => void;
+  onBackToPlan: () => void;
+}) {
+  const successCount = team.filter(
+    (m) => genResults[m.name]?.status === "success",
+  ).length;
+  const failedCount = team.filter(
+    (m) => genResults[m.name]?.status === "failed",
+  ).length;
+  const skippedCount = team.filter(
+    (m) => genResults[m.name]?.status === "skipped",
+  ).length;
+  const generatingCount = team.filter(
+    (m) => genResults[m.name]?.status === "generating",
+  ).length;
+
+  const allDone = phase === "review";
+  const deployableCount = successCount;
+
+  return (
+    <div className="mt-8 border-t border-gray-100 pt-6">
+      <div className="flex items-baseline justify-between mb-4">
+        <h3 className="text-lg font-semibold tracking-tight">
+          {phase === "generating"
+            ? "Generating code…"
+            : "Review generated code"}
+        </h3>
+        <div className="text-xs text-gray-500 space-x-3 tabular-nums">
+          <span className="text-emerald-700">{successCount} ok</span>
+          {generatingCount > 0 && (
+            <span className="text-indigo-700">{generatingCount} running</span>
+          )}
+          {failedCount > 0 && (
+            <span className="text-red-700">{failedCount} failed</span>
+          )}
+          {skippedCount > 0 && (
+            <span className="text-gray-500">{skippedCount} skipped</span>
+          )}
+        </div>
+      </div>
+
+      <ul className="space-y-3">
+        {team.map((m) => {
+          const r = genResults[m.name];
+          if (!r) return null;
+          return (
+            <GenerationRow
+              key={m.name}
+              member={m}
+              result={r}
+              onRetry={onRetry}
+              onSkip={onSkip}
+            />
+          );
+        })}
+      </ul>
+
+      {allDone && (
+        <div className="mt-8 flex items-center justify-between gap-4 border-t border-gray-100 pt-6">
+          <div className="flex items-center gap-3 text-xs text-gray-500">
+            <button
+              type="button"
+              onClick={onBackToPlan}
+              className="text-accent-600 hover:text-accent-700"
+            >
+              ← back to plan
+            </button>
+            <span className="text-gray-300">·</span>
+            <span>
+              {deployableCount} of {team.length} bot
+              {team.length === 1 ? "" : "s"} ready to deploy
+              {failedCount > 0 && ` (${failedCount} need attention)`}
+            </span>
+          </div>
+          <button
+            type="button"
+            disabled
+            className="px-5 py-2 bg-accent-600 text-white rounded-md text-sm font-medium opacity-50 cursor-not-allowed"
+            title="Bulk deploy + auto-approval rules ship in Phase 12C.4."
+          >
+            Deploy team → (12C.4)
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GenerationRow({
+  member,
+  result,
+  onRetry,
+  onSkip,
+}: {
+  member: TeamMember;
+  result: GenResult;
+  onRetry: (name: string, descriptionOverride?: string) => void;
+  onSkip: (name: string) => void;
+}) {
+  const [showCode, setShowCode] = useState(false);
+  const [editingDesc, setEditingDesc] = useState(false);
+  const [draft, setDraft] = useState(result.description);
+
+  // Keep the textarea draft in sync if the description gets rewritten
+  // externally (e.g. by a fresh onGenerate from "back to plan").
+  useEffect(() => {
+    setDraft(result.description);
+    setEditingDesc(false);
+  }, [result.description, result.status]);
+
+  return (
+    <li className="rounded-lg border border-gray-200 bg-white px-5 py-4">
+      <div className="flex items-baseline justify-between gap-4">
+        <div className="flex items-baseline gap-3 min-w-0">
+          <span className="font-mono text-sm text-gray-900">{member.name}</span>
+          <span
+            className={
+              "text-[10px] uppercase tracking-wider font-medium px-2 py-0.5 rounded-full " +
+              statusChipClass(result.status)
+            }
+          >
+            {result.status}
+          </span>
+          {result.output?.model_used && (
+            <span className="text-[11px] text-gray-400 font-mono truncate">
+              {result.output.model_used}
+            </span>
+          )}
+        </div>
+        <div className="flex items-center gap-3 text-xs shrink-0">
+          {result.status === "success" && (
+            <button
+              type="button"
+              onClick={() => setShowCode((s) => !s)}
+              className="text-accent-600 hover:text-accent-700"
+            >
+              {showCode ? "hide code" : "show code"}
+            </button>
+          )}
+          {result.status === "failed" && (
+            <>
+              <button
+                type="button"
+                onClick={() => onRetry(member.name)}
+                className="text-accent-600 hover:text-accent-700"
+              >
+                retry
+              </button>
+              <button
+                type="button"
+                onClick={() => setEditingDesc(true)}
+                className="text-accent-600 hover:text-accent-700"
+              >
+                edit &amp; retry
+              </button>
+              <button
+                type="button"
+                onClick={() => onSkip(member.name)}
+                className="text-gray-400 hover:text-red-600"
+              >
+                skip
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {result.status === "failed" && result.error && (
+        <p className="mt-2 text-xs text-red-700 break-words">
+          {result.error}
+        </p>
+      )}
+
+      {editingDesc && (
+        <div className="mt-3 space-y-2">
+          <textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            className="w-full h-32 px-2 py-1 border border-gray-300 rounded text-xs font-mono"
+          />
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                onRetry(member.name, draft);
+                setEditingDesc(false);
+              }}
+              className="px-2 py-0.5 text-xs bg-accent-600 text-white rounded hover:bg-accent-700"
+            >
+              retry with new description
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setDraft(result.description);
+                setEditingDesc(false);
+              }}
+              className="text-xs text-gray-500 hover:text-gray-900"
+            >
+              cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {showCode && result.output && (
+        <div className="mt-3 space-y-3">
+          {result.output.rationale && (
+            <div>
+              <div className="text-[11px] uppercase tracking-wider text-gray-500 mb-1">
+                Rationale
+              </div>
+              <p className="text-xs text-gray-700">
+                {result.output.rationale}
+              </p>
+            </div>
+          )}
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-gray-500 mb-1">
+              bot.py
+            </div>
+            <pre className="bg-gray-50 border border-gray-100 rounded p-3 text-[11px] font-mono text-gray-800 overflow-x-auto max-h-96">
+              {result.output.bot_py}
+            </pre>
+          </div>
+          <div>
+            <div className="text-[11px] uppercase tracking-wider text-gray-500 mb-1">
+              requirements.txt
+            </div>
+            <pre className="bg-gray-50 border border-gray-100 rounded p-3 text-[11px] font-mono text-gray-800 overflow-x-auto">
+              {result.output.requirements_txt}
+            </pre>
+          </div>
+        </div>
+      )}
+    </li>
   );
 }
