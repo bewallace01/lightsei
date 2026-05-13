@@ -99,6 +99,7 @@ export default function TeamFromReadmePage() {
   >({});
   const [rulesResult, setRulesResult] = useState<RulesResult | null>(null);
   const [missingSecrets, setMissingSecrets] = useState<string[]>([]);
+  const deployInFlightRef = useRef(false);
 
   useEffect(() => {
     let alive = true;
@@ -159,11 +160,35 @@ export default function TeamFromReadmePage() {
   }, [existingAgents, team]);
 
   const onUpdateMember = (origName: string, patch: Partial<TeamMember>) => {
+    const newName = patch.name;
     setTeam((cur) =>
-      cur.map((m) => (m.name === origName ? { ...m, ...patch } : m)),
+      cur.map((m) => {
+        const updated = m.name === origName ? { ...m, ...patch } : m;
+        if (!newName || newName === origName) return updated;
+        return {
+          ...updated,
+          dispatches_to: updated.dispatches_to.map((target) =>
+            target === origName ? newName : target,
+          ),
+        };
+      }),
     );
-    if (patch.name && selectedName === origName) {
-      setSelectedName(patch.name);
+    if (newName && newName !== origName) {
+      setGenResults((cur) => {
+        const moved = cur[origName];
+        if (!moved) return cur;
+        const { [origName]: _old, ...rest } = cur;
+        return { ...rest, [newName]: moved };
+      });
+      setDeployResults((cur) => {
+        const moved = cur[origName];
+        if (!moved) return cur;
+        const { [origName]: _old, ...rest } = cur;
+        return { ...rest, [newName]: moved };
+      });
+    }
+    if (newName && selectedName === origName) {
+      setSelectedName(newName);
     }
   };
 
@@ -322,7 +347,9 @@ export default function TeamFromReadmePage() {
    *  existing (out-of-team) agents are skipped here because we don't
    *  know their command kinds from the plan — the user can wire those
    *  on the agent's auto-approval page if they want. */
-  const installRules = async (): Promise<RulesResult> => {
+  const installRules = async (
+    deployOutcomes: Record<string, DeployResult>,
+  ): Promise<RulesResult> => {
     const teamByName = new Map(team.map((m) => [m.name, m]));
     const installed: RulesResult["installed"] = [];
     const failed: RulesResult["failed"] = [];
@@ -330,11 +357,11 @@ export default function TeamFromReadmePage() {
     const promises: Promise<void>[] = [];
     for (const src of team) {
       // Only wire rules for bots that actually got deployed.
-      if (deployResults[src.name]?.status !== "deployed") continue;
+      if (deployOutcomes[src.name]?.status !== "deployed") continue;
       for (const targetName of src.dispatches_to) {
         const targetMember = teamByName.get(targetName);
         if (!targetMember) continue; // existing-agent edge; skip
-        if (deployResults[targetName]?.status !== "deployed") continue;
+        if (deployOutcomes[targetName]?.status !== "deployed") continue;
         for (const kind of targetMember.command_kinds) {
           const rule = {
             source_agent: src.name,
@@ -368,6 +395,7 @@ export default function TeamFromReadmePage() {
   };
 
   const onDeploy = async () => {
+    if (deployInFlightRef.current) return;
     // Approved bots = those with a successful generation that the user
     // didn't skip. Failed-and-not-skipped rows get an alert so the user
     // can decide explicitly rather than silently dropping them.
@@ -393,89 +421,97 @@ export default function TeamFromReadmePage() {
       if (!ok) return;
     }
 
-    setPhase("deploying");
-    setError(null);
-    setRulesResult(null);
-    setMissingSecrets([]);
+    deployInFlightRef.current = true;
+    try {
+      setPhase("deploying");
+      setError(null);
+      setRulesResult(null);
+      setMissingSecrets([]);
 
-    // Seed every approved row to `pending` so the progress UI lights
-    // up immediately.
-    const initial: Record<string, DeployResult> = {};
-    for (const m of approved) initial[m.name] = { status: "pending" };
-    setDeployResults(initial);
+      // Seed every approved row to `pending` so the progress UI lights
+      // up immediately.
+      const initial: Record<string, DeployResult> = {};
+      for (const m of approved) initial[m.name] = { status: "pending" };
+      const finalDeployResults: Record<string, DeployResult> = { ...initial };
+      setDeployResults(initial);
 
-    await Promise.allSettled(
-      approved.map(async (m) => {
-        const out = genResults[m.name]?.output;
-        if (!out) return;
+      const setDeployOutcome = (name: string, result: DeployResult) => {
+        finalDeployResults[name] = result;
         setDeployResults((cur) => ({
           ...cur,
-          [m.name]: { status: "zipping" },
+          [name]: result,
         }));
-        try {
-          const dep = await zipAndDeploy(m.name, out.bot_py, out.requirements_txt);
-          setDeployResults((cur) => ({
-            ...cur,
-            [m.name]: { status: "deployed", deploymentId: dep.id },
-          }));
-          // Best-effort: carry the LLM rationale as the agent's
-          // description so /agents has something to show. Don't block
-          // on failure — the bot is deployed and that's what counts.
-          if (out.rationale) {
-            patchAgent(m.name, { description: out.rationale }).catch(
-              () => undefined,
-            );
-          }
-        } catch (e) {
-          if (e instanceof UnauthorizedError) {
-            router.replace("/login");
-            return;
-          }
-          setDeployResults((cur) => ({
-            ...cur,
-            [m.name]: {
+      };
+
+      await Promise.allSettled(
+        approved.map(async (m) => {
+          const out = genResults[m.name]?.output;
+          if (!out) return;
+          setDeployOutcome(m.name, { status: "zipping" });
+          try {
+            const dep = await zipAndDeploy(m.name, out.bot_py, out.requirements_txt);
+            setDeployOutcome(m.name, {
+              status: "deployed",
+              deploymentId: dep.id,
+            });
+            // Best-effort: carry the LLM rationale as the agent's
+            // description so /agents has something to show. Don't block
+            // on failure, the bot is deployed and that's what counts.
+            if (out.rationale) {
+              patchAgent(m.name, { description: out.rationale }).catch(
+                () => undefined,
+              );
+            }
+          } catch (e) {
+            if (e instanceof UnauthorizedError) {
+              router.replace("/login");
+              return;
+            }
+            setDeployOutcome(m.name, {
               status: "failed",
               error: e instanceof Error ? e.message : String(e),
+            });
+          }
+        }),
+      );
+
+      // Rules + secrets after deploys settle. Both are best-effort,
+      // failures here surface in the success view but don't roll back
+      // the deploy.
+      try {
+        const r = await installRules(finalDeployResults);
+        setRulesResult(r);
+      } catch (e) {
+        setRulesResult({
+          installed: [],
+          failed: [
+            {
+              source: "?",
+              target: "?",
+              kind: "?",
+              error: e instanceof Error ? e.message : String(e),
             },
-          }));
-        }
-      }),
-    );
-
-    // Rules + secrets after deploys settle. Both are best-effort —
-    // failures here surface in the success view but don't roll back
-    // the deploy.
-    try {
-      const r = await installRules();
-      setRulesResult(r);
-    } catch (e) {
-      setRulesResult({
-        installed: [],
-        failed: [
-          {
-            source: "?",
-            target: "?",
-            kind: "?",
-            error: e instanceof Error ? e.message : String(e),
-          },
-        ],
-      });
-    }
-
-    try {
-      const have = new Set((await fetchSecrets()).map((s) => s.name));
-      const wanted = new Set<string>();
-      for (const m of approved) {
-        for (const s of m.needs_workspace_secrets || []) wanted.add(s);
+          ],
+        });
       }
-      const missing = Array.from(wanted).filter((n) => !have.has(n));
-      setMissingSecrets(missing);
-    } catch {
-      // Couldn't list secrets — don't gate the success view on it.
-      setMissingSecrets([]);
-    }
 
-    setPhase("success");
+      try {
+        const have = new Set((await fetchSecrets()).map((s) => s.name));
+        const wanted = new Set<string>();
+        for (const m of approved) {
+          for (const s of m.needs_workspace_secrets || []) wanted.add(s);
+        }
+        const missing = Array.from(wanted).filter((n) => !have.has(n));
+        setMissingSecrets(missing);
+      } catch {
+        // Couldn't list secrets, don't gate the success view on it.
+        setMissingSecrets([]);
+      }
+
+      setPhase("success");
+    } finally {
+      deployInFlightRef.current = false;
+    }
   };
 
   return (
