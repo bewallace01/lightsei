@@ -7,9 +7,9 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 12C.3: bulk generate — loop through the approved team and call /agents/generate**
+> **Phase 12C.4: bulk deploy + auto-approval rules**
 
-12C.1 + 12C.2 shipped 2026-05-06 (see Done Log). 12C.3 is the per-bot loop: for each member of the approved plan, call `POST /workspaces/me/agents/generate` with `description = bot.draft_description + "Coordinate with: ..."`. Show progress per-bot. Validation gate from 12B.4 runs per-bot; if any fails after retries, surface the failure and let the user choose: skip, retry, or edit description and retry. Per-bot generated code shown in the same preview shape as 12B.2 — user reviews + edits each one before final deploy in 12C.4. See **Phase 12C** below for the full spec.
+12C.1-12C.3 shipped (see Done Log). 12C.4 turns the per-bot reviewed code from 12C.3 into actual deployments + installs the dispatch graph's auto-approval rules. For each approved bot: zip `bot.py` + `requirements.txt` in-browser (reuse the 12B.2 JSZip path) and POST to `/agents/{name}/deployments` (the existing browser-native upload). Show per-bot deploy progress. After all are queued, PUT the auto-approval rules from the plan's dispatch graph via the existing `/workspaces/me/auto-approval-rules` endpoint. If the plan called for workspace secrets the user hasn't set, surface a checklist on the success page rather than letting bots crash on first run. See **Phase 12C** below for the full spec.
 
 ## Phase 12C: drop a README, get a team
 
@@ -551,6 +551,27 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-12 — Phase 12C.3: bulk-generate the approved team
+
+The per-bot loop that turns the approved plan from 12C.2 into actual `bot.py` + `requirements.txt` previews. The "Generate & deploy → (12C.3)" stub on `/agents/team-from-readme` is now a live "✨ Generate code" button. Single-file change; reused the existing `/agents/generate` endpoint without backend changes.
+
+- [x] **Parallel per-bot calls.** Clicking Generate fires one `generateAgent({description, target_agents, name_hint})` request per team member through `Promise.allSettled` so one failure doesn't short-circuit the rest. Backend serializes its own concurrency on the workspace's budget cap; the dashboard just kicks off everything at once.
+- [x] **Per-bot description = `draft_description + "Coordinate with: ..."`.** Each request's description appends a bullet list of teammates with their summaries so the generator wires `send_command` to teammates rather than re-implementing their work. `target_agents` also seeds the dispatch targets the user picked in the plan, so existing-agent edges survive into the generated code.
+- [x] **Three-phase page state.** `phase: "plan" | "generating" | "review"` drives which controls render. Plan edits (rename / role / dispatches / description / remove / add) are disabled outside `plan` — the member panel becomes a read-only message with a `back to plan` link. The constellation preview stays visible throughout so the user keeps spatial context.
+- [x] **Per-bot status chips + counters.** During `generating`, each row's status pulses on the indigo "generating" chip; the header counter shows live `N ok · M running · K failed · S skipped`. After all settle, the page flips to `review`.
+- [x] **On-failure controls.** Failed rows get three actions: `retry` (re-run the same description), `edit & retry` (textarea seeded with the current description, save to re-run with the edit), `skip` (mark as skipped so the final deploy count excludes it). All three are wired through a shared `runOneGenerate(member, description)` helper that overwrites the row's status as the request resolves.
+- [x] **Code preview.** Successful rows have a `show code` toggle that reveals the rationale + `bot.py` + `requirements.txt` in scrollable `<pre>` blocks — same shape as 12B.2's preview. Collapsed by default so a six-bot review fits on one screen.
+- [x] **`Deploy team → (12C.4)`** rendered but disabled with a tooltip indicating bulk deploy + auto-approval rules ship in the next phase. `back to plan` button preserves `genResults` so re-generating after a small tweak doesn't blow away the rest of the work.
+
+**Verification:** `tsc --noEmit` clean; dev server compiles + serves the route in <1s. Real generation flow not yet exercised against prod — the demo + sanity-check on a real workspace happens once Vercel redeploys.
+
+**What this leaves on the table for 12C.4:**
+
+- For-each-approved-bot loop: zip `bot.py` + `requirements.txt` in-browser (reuse the 12B.2 JSZip helper), POST to `/agents/{name}/deployments`, surface per-bot deploy progress.
+- After all deploys queued: PUT the auto-approval rules from the plan's dispatch graph via the existing `/workspaces/me/auto-approval-rules` endpoint.
+- Missing-secrets checklist on the success page — bots that listed `needs_workspace_secrets` the workspace hasn't set get a "set this on /account" prompt rather than crashing on first run.
+- 12C.5: demo run with the Lightsei project's own README.
 
 ### 2026-05-06 — Phase 12C.2: team-review UI
 
