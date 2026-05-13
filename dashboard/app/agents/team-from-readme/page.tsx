@@ -1,5 +1,6 @@
 "use client";
 
+import JSZip from "jszip";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -11,8 +12,12 @@ import {
   TeamPlan,
   UnauthorizedError,
   fetchAgents,
+  fetchSecrets,
   fetchTeamPlan,
   generateAgent,
+  patchAgent,
+  uploadDeploymentBundle,
+  upsertAutoApprovalRule,
 } from "../../api";
 import { sparklePath, tintForAgent } from "../../stars";
 import { STAR_DICTIONARY, isStarName } from "./star_dictionary";
@@ -31,7 +36,20 @@ type GenResult = {
   error?: string;
 };
 
-type Phase = "plan" | "generating" | "review";
+type Phase = "plan" | "generating" | "review" | "deploying" | "success";
+
+type DeployStatus = "pending" | "zipping" | "deploying" | "deployed" | "failed";
+
+type DeployResult = {
+  status: DeployStatus;
+  deploymentId?: string;
+  error?: string;
+};
+
+type RulesResult = {
+  installed: { source: string; target: string; kind: string }[];
+  failed: { source: string; target: string; kind: string; error: string }[];
+};
 
 /** Build the per-bot description fed to /agents/generate: the team
  *  member's draft_description + an explicit "coordinate with" footer
@@ -71,6 +89,16 @@ export default function TeamFromReadmePage() {
   // Phase 12C.3 bulk-generation state.
   const [phase, setPhase] = useState<Phase>("plan");
   const [genResults, setGenResults] = useState<Record<string, GenResult>>({});
+
+  // Phase 12C.4 bulk-deploy state. Each approved bot lands here as the
+  // zip/upload completes. `rulesResult` is the auto-approval install
+  // outcome (only attempted once all deploys finish); `missingSecrets`
+  // is the checklist rendered on the success page.
+  const [deployResults, setDeployResults] = useState<
+    Record<string, DeployResult>
+  >({});
+  const [rulesResult, setRulesResult] = useState<RulesResult | null>(null);
+  const [missingSecrets, setMissingSecrets] = useState<string[]>([]);
 
   useEffect(() => {
     let alive = true;
@@ -272,6 +300,184 @@ export default function TeamFromReadmePage() {
 
   const planEditable = phase === "plan";
 
+  // ---------- Bulk deploy + rule wiring (12C.4) ---------- //
+
+  /** Build a one-bot deployment zip in-browser and POST it. Mirrors
+   *  the 12B.2 path; returns the resolved Deployment row or throws. */
+  const zipAndDeploy = async (
+    name: string,
+    botPy: string,
+    requirementsTxt: string,
+  ): Promise<{ id: string }> => {
+    const zip = new JSZip();
+    zip.file("bot.py", botPy);
+    zip.file("requirements.txt", requirementsTxt || "lightsei>=0.1.6\n");
+    const blob = await zip.generateAsync({ type: "blob" });
+    const file = new File([blob], `${name}.zip`, { type: "application/zip" });
+    return await uploadDeploymentBundle(name, file);
+  };
+
+  /** Install auto-approval rules from the plan's dispatch graph. Edges
+   *  to team-members get rules per kind the target handles; edges to
+   *  existing (out-of-team) agents are skipped here because we don't
+   *  know their command kinds from the plan — the user can wire those
+   *  on the agent's auto-approval page if they want. */
+  const installRules = async (): Promise<RulesResult> => {
+    const teamByName = new Map(team.map((m) => [m.name, m]));
+    const installed: RulesResult["installed"] = [];
+    const failed: RulesResult["failed"] = [];
+
+    const promises: Promise<void>[] = [];
+    for (const src of team) {
+      // Only wire rules for bots that actually got deployed.
+      if (deployResults[src.name]?.status !== "deployed") continue;
+      for (const targetName of src.dispatches_to) {
+        const targetMember = teamByName.get(targetName);
+        if (!targetMember) continue; // existing-agent edge; skip
+        if (deployResults[targetName]?.status !== "deployed") continue;
+        for (const kind of targetMember.command_kinds) {
+          const rule = {
+            source_agent: src.name,
+            target_agent: targetName,
+            command_kind: kind,
+            mode: "auto_approve" as const,
+          };
+          promises.push(
+            upsertAutoApprovalRule(rule)
+              .then(() => {
+                installed.push({
+                  source: src.name,
+                  target: targetName,
+                  kind,
+                });
+              })
+              .catch((e) => {
+                failed.push({
+                  source: src.name,
+                  target: targetName,
+                  kind,
+                  error: e instanceof Error ? e.message : String(e),
+                });
+              }),
+          );
+        }
+      }
+    }
+    await Promise.allSettled(promises);
+    return { installed, failed };
+  };
+
+  const onDeploy = async () => {
+    // Approved bots = those with a successful generation that the user
+    // didn't skip. Failed-and-not-skipped rows get an alert so the user
+    // can decide explicitly rather than silently dropping them.
+    const approved = team.filter(
+      (m) =>
+        genResults[m.name]?.status === "success" && genResults[m.name]?.output,
+    );
+    const stillFailed = team.filter(
+      (m) => genResults[m.name]?.status === "failed",
+    );
+    if (approved.length === 0) {
+      setError(
+        "No bots are ready to deploy. Generate code or unskip at least one bot.",
+      );
+      return;
+    }
+    if (stillFailed.length > 0) {
+      const ok = confirm(
+        `${stillFailed.length} bot(s) still show "failed" and will be excluded ` +
+        `from the deploy. Skip them and continue, or cancel to retry first?\n\n` +
+        "OK = deploy the rest, Cancel = stay on review.",
+      );
+      if (!ok) return;
+    }
+
+    setPhase("deploying");
+    setError(null);
+    setRulesResult(null);
+    setMissingSecrets([]);
+
+    // Seed every approved row to `pending` so the progress UI lights
+    // up immediately.
+    const initial: Record<string, DeployResult> = {};
+    for (const m of approved) initial[m.name] = { status: "pending" };
+    setDeployResults(initial);
+
+    await Promise.allSettled(
+      approved.map(async (m) => {
+        const out = genResults[m.name]?.output;
+        if (!out) return;
+        setDeployResults((cur) => ({
+          ...cur,
+          [m.name]: { status: "zipping" },
+        }));
+        try {
+          const dep = await zipAndDeploy(m.name, out.bot_py, out.requirements_txt);
+          setDeployResults((cur) => ({
+            ...cur,
+            [m.name]: { status: "deployed", deploymentId: dep.id },
+          }));
+          // Best-effort: carry the LLM rationale as the agent's
+          // description so /agents has something to show. Don't block
+          // on failure — the bot is deployed and that's what counts.
+          if (out.rationale) {
+            patchAgent(m.name, { description: out.rationale }).catch(
+              () => undefined,
+            );
+          }
+        } catch (e) {
+          if (e instanceof UnauthorizedError) {
+            router.replace("/login");
+            return;
+          }
+          setDeployResults((cur) => ({
+            ...cur,
+            [m.name]: {
+              status: "failed",
+              error: e instanceof Error ? e.message : String(e),
+            },
+          }));
+        }
+      }),
+    );
+
+    // Rules + secrets after deploys settle. Both are best-effort —
+    // failures here surface in the success view but don't roll back
+    // the deploy.
+    try {
+      const r = await installRules();
+      setRulesResult(r);
+    } catch (e) {
+      setRulesResult({
+        installed: [],
+        failed: [
+          {
+            source: "?",
+            target: "?",
+            kind: "?",
+            error: e instanceof Error ? e.message : String(e),
+          },
+        ],
+      });
+    }
+
+    try {
+      const have = new Set((await fetchSecrets()).map((s) => s.name));
+      const wanted = new Set<string>();
+      for (const m of approved) {
+        for (const s of m.needs_workspace_secrets || []) wanted.add(s);
+      }
+      const missing = Array.from(wanted).filter((n) => !have.has(n));
+      setMissingSecrets(missing);
+    } catch {
+      // Couldn't list secrets — don't gate the success view on it.
+      setMissingSecrets([]);
+    }
+
+    setPhase("success");
+  };
+
   return (
     <main className="px-8 py-10 max-w-6xl mx-auto">
       <div className="mb-2">
@@ -379,7 +585,7 @@ export default function TeamFromReadmePage() {
             </div>
           )}
 
-          {phase !== "plan" && (
+          {(phase === "generating" || phase === "review") && (
             <GenerationSection
               team={team}
               genResults={genResults}
@@ -387,6 +593,18 @@ export default function TeamFromReadmePage() {
               onRetry={onRetry}
               onSkip={onSkip}
               onBackToPlan={onBackToPlan}
+              onDeploy={onDeploy}
+            />
+          )}
+
+          {(phase === "deploying" || phase === "success") && (
+            <DeploySection
+              team={team}
+              genResults={genResults}
+              deployResults={deployResults}
+              rulesResult={rulesResult}
+              missingSecrets={missingSecrets}
+              phase={phase}
             />
           )}
         </section>
@@ -1007,6 +1225,7 @@ function GenerationSection({
   onRetry,
   onSkip,
   onBackToPlan,
+  onDeploy,
 }: {
   team: TeamMember[];
   genResults: Record<string, GenResult>;
@@ -1014,6 +1233,7 @@ function GenerationSection({
   onRetry: (name: string, descriptionOverride?: string) => void;
   onSkip: (name: string) => void;
   onBackToPlan: () => void;
+  onDeploy: () => void;
 }) {
   const successCount = team.filter(
     (m) => genResults[m.name]?.status === "success",
@@ -1088,11 +1308,11 @@ function GenerationSection({
           </div>
           <button
             type="button"
-            disabled
-            className="px-5 py-2 bg-accent-600 text-white rounded-md text-sm font-medium opacity-50 cursor-not-allowed"
-            title="Bulk deploy + auto-approval rules ship in Phase 12C.4."
+            onClick={onDeploy}
+            disabled={deployableCount === 0}
+            className="px-5 py-2 bg-accent-600 text-white rounded-md text-sm font-medium hover:bg-accent-700 disabled:opacity-50 disabled:cursor-not-allowed"
           >
-            Deploy team → (12C.4)
+            Deploy team →
           </button>
         </div>
       )}
@@ -1248,5 +1468,216 @@ function GenerationRow({
         </div>
       )}
     </li>
+  );
+}
+
+
+// ---------- Deploy + rule wiring + success view (12C.4) ---------- //
+
+function deployStatusChipClass(s: DeployStatus): string {
+  switch (s) {
+    case "deployed":
+      return "bg-emerald-100 text-emerald-800";
+    case "failed":
+      return "bg-red-100 text-red-800";
+    case "deploying":
+    case "zipping":
+      return "bg-indigo-100 text-indigo-800 animate-pulse";
+    default:
+      return "bg-gray-100 text-gray-700";
+  }
+}
+
+function DeploySection({
+  team,
+  genResults,
+  deployResults,
+  rulesResult,
+  missingSecrets,
+  phase,
+}: {
+  team: TeamMember[];
+  genResults: Record<string, GenResult>;
+  deployResults: Record<string, DeployResult>;
+  rulesResult: RulesResult | null;
+  missingSecrets: string[];
+  phase: Phase;
+}) {
+  // Approved (non-skipped, generated) bots only — the rest never
+  // entered the deploy pipeline.
+  const approved = team.filter(
+    (m) => genResults[m.name]?.status === "success",
+  );
+
+  const deployed = approved.filter(
+    (m) => deployResults[m.name]?.status === "deployed",
+  );
+  const failed = approved.filter(
+    (m) => deployResults[m.name]?.status === "failed",
+  );
+  const inFlight = approved.filter((m) => {
+    const s = deployResults[m.name]?.status;
+    return s === "pending" || s === "zipping" || s === "deploying";
+  });
+
+  return (
+    <div className="mt-8 border-t border-gray-100 pt-6">
+      <div className="flex items-baseline justify-between mb-4">
+        <h3 className="text-lg font-semibold tracking-tight">
+          {phase === "deploying" ? "Deploying team…" : "Team deployed"}
+        </h3>
+        <div className="text-xs text-gray-500 space-x-3 tabular-nums">
+          <span className="text-emerald-700">{deployed.length} deployed</span>
+          {inFlight.length > 0 && (
+            <span className="text-indigo-700">{inFlight.length} running</span>
+          )}
+          {failed.length > 0 && (
+            <span className="text-red-700">{failed.length} failed</span>
+          )}
+        </div>
+      </div>
+
+      {/* Per-bot deploy rows. */}
+      <ul className="space-y-2 mb-6">
+        {approved.map((m) => {
+          const r = deployResults[m.name] ?? { status: "pending" as const };
+          return (
+            <li
+              key={m.name}
+              className="rounded-md border border-gray-200 bg-white px-4 py-3 flex items-center justify-between gap-4"
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <span className="font-mono text-sm text-gray-900">
+                  {m.name}
+                </span>
+                <span
+                  className={
+                    "text-[10px] uppercase tracking-wider font-medium px-2 py-0.5 rounded-full " +
+                    deployStatusChipClass(r.status)
+                  }
+                >
+                  {r.status}
+                </span>
+                {r.error && (
+                  <span className="text-xs text-red-700 truncate">
+                    {r.error}
+                  </span>
+                )}
+              </div>
+              {r.status === "deployed" && r.deploymentId && (
+                <Link
+                  href={`/deployments/${r.deploymentId}`}
+                  className="text-xs text-accent-600 hover:text-accent-700 whitespace-nowrap"
+                >
+                  view deployment →
+                </Link>
+              )}
+            </li>
+          );
+        })}
+      </ul>
+
+      {/* Success-only panels. */}
+      {phase === "success" && (
+        <div className="space-y-6">
+          {/* Auto-approval rule summary. */}
+          {rulesResult && (rulesResult.installed.length > 0 || rulesResult.failed.length > 0) && (
+            <div className="rounded-md border border-gray-200 bg-white p-4">
+              <h4 className="text-sm font-semibold tracking-tight mb-2">
+                Auto-approval rules
+              </h4>
+              {rulesResult.installed.length > 0 && (
+                <ul className="text-xs text-gray-700 space-y-1 mb-2">
+                  {rulesResult.installed.map((r, i) => (
+                    <li key={i}>
+                      <code className="font-mono">{r.source}</code> →{" "}
+                      <code className="font-mono">{r.target}</code> for{" "}
+                      <code className="font-mono">{r.kind}</code>
+                      <span className="text-emerald-700 ml-2">installed</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {rulesResult.failed.length > 0 && (
+                <ul className="text-xs text-red-700 space-y-1">
+                  {rulesResult.failed.map((r, i) => (
+                    <li key={i}>
+                      <code className="font-mono">{r.source}</code> →{" "}
+                      <code className="font-mono">{r.target}</code> for{" "}
+                      <code className="font-mono">{r.kind}</code>:{" "}
+                      {r.error}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <p className="text-[11px] text-gray-400 mt-2">
+                Rules govern the dispatch graph: when{" "}
+                <code className="font-mono">source</code> sends to{" "}
+                <code className="font-mono">target</code> with this kind,
+                the command auto-runs instead of waiting for human approval.
+                Edit on the agent page or{" "}
+                <Link
+                  href="/dispatch"
+                  className="text-accent-600 hover:text-accent-700"
+                >
+                  dispatch chains
+                </Link>
+                .
+              </p>
+            </div>
+          )}
+
+          {/* Missing-secrets checklist. */}
+          {missingSecrets.length > 0 && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 p-4">
+              <h4 className="text-sm font-semibold tracking-tight text-amber-900 mb-2">
+                ⚠ Set these workspace secrets before the bots run
+              </h4>
+              <p className="text-xs text-amber-900 mb-3">
+                The proposed team needs the following secrets you
+                haven&apos;t set yet. Without them, the relevant bots
+                will crash on first run.
+              </p>
+              <ul className="space-y-1">
+                {missingSecrets.map((name) => (
+                  <li key={name} className="text-sm text-amber-900">
+                    <code className="font-mono">{name}</code>
+                  </li>
+                ))}
+              </ul>
+              <Link
+                href="/account"
+                className="inline-block mt-3 text-xs text-accent-600 hover:text-accent-700 font-medium"
+              >
+                set secrets on /account →
+              </Link>
+            </div>
+          )}
+
+          {/* CTAs */}
+          <div className="flex items-center justify-between gap-4 border-t border-gray-100 pt-4">
+            <span className="text-xs text-gray-500">
+              {deployed.length} of {approved.length} bot
+              {approved.length === 1 ? "" : "s"} deployed
+              {failed.length > 0 && ` · ${failed.length} failed (see above)`}
+            </span>
+            <div className="flex items-center gap-3">
+              <Link
+                href="/"
+                className="text-xs text-gray-500 hover:text-gray-900"
+              >
+                home
+              </Link>
+              <Link
+                href="/agents"
+                className="px-4 py-2 bg-accent-600 text-white rounded-md text-sm font-medium hover:bg-accent-700 no-underline"
+              >
+                See the roster →
+              </Link>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
