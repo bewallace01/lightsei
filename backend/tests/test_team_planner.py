@@ -33,8 +33,17 @@ def test_submit_team_schema_has_required_fields():
     schema = SUBMIT_TEAM_TOOL["input_schema"]
     assert set(schema["required"]) == {"rationale", "team"}
     team = schema["properties"]["team"]
-    assert team["minItems"] == MIN_TEAM_SIZE
-    assert team["maxItems"] == MAX_TEAM_SIZE
+    # Anthropic's strict mode rejects array `minItems`/`maxItems` values
+    # other than 0 or 1 — we used to declare them on the schema but had
+    # to relax them. The bounds are still enforced by validate_team_plan
+    # (with a corrective retry turn); the description text tells Claude
+    # the target range up front so violations are rare.
+    assert "minItems" not in team
+    assert "maxItems" not in team
+    assert str(MIN_TEAM_SIZE) in team["description"]
+    assert str(MAX_TEAM_SIZE) in team["description"]
+    # Per-bot tool description also surfaces the dispatch cap to the LLM.
+    assert str(MAX_DISPATCHES_PER_BOT) in SUBMIT_TEAM_TOOL["description"]
     member = team["items"]
     assert set(member["required"]) == {
         "name", "role", "summary", "command_kinds",
@@ -44,10 +53,12 @@ def test_submit_team_schema_has_required_fields():
     assert set(member["properties"]["role"]["enum"]) == {
         "orchestrator", "specialist", "messenger",
     }
-    # dispatch edges capped to avoid spaghetti
+    # Dispatch cap is described in prose (validator enforces; tool
+    # schema can't carry `maxItems > 1` in strict mode).
+    assert "maxItems" not in member["properties"]["dispatches_to"]
     assert (
-        member["properties"]["dispatches_to"]["maxItems"]
-        == MAX_DISPATCHES_PER_BOT
+        str(MAX_DISPATCHES_PER_BOT)
+        in member["properties"]["dispatches_to"]["description"]
     )
 
 

@@ -37,11 +37,12 @@ MAX_DISPATCHES_PER_BOT = 2
 SUBMIT_TEAM_TOOL: dict[str, Any] = {
     "name": "submit_team",
     "description": (
-        "Submit a roster of 3-7 Lightsei bots that together would maintain "
-        "the project the user described. Each member's name MUST come from "
-        "the star-naming dictionary in the system prompt; each member's role "
-        "must not overlap with the others; the dispatch graph must be "
-        "bounded (at most two outgoing edges per bot, prefer one)."
+        f"Submit a roster of {MIN_TEAM_SIZE}-{MAX_TEAM_SIZE} Lightsei bots "
+        "that together would maintain the project the user described. Each "
+        "member's name MUST come from the star-naming dictionary in the "
+        "system prompt; each member's role must not overlap with the "
+        f"others; the dispatch graph must be bounded (at most "
+        f"{MAX_DISPATCHES_PER_BOT} outgoing edges per bot, prefer one)."
     ),
     "strict": True,
     "input_schema": {
@@ -55,10 +56,18 @@ SUBMIT_TEAM_TOOL: dict[str, Any] = {
                     "edges tie it together. Written for the user to skim."
                 ),
             },
+            # Anthropic's strict mode rejects `minItems`/`maxItems` values
+            # other than 0 or 1, so we encode the bounds in the description
+            # text instead. `validate_team_plan()` enforces them on the
+            # response, with a corrective retry turn when the model bursts
+            # the cap — same loop we already had for bad names.
             "team": {
                 "type": "array",
-                "minItems": MIN_TEAM_SIZE,
-                "maxItems": MAX_TEAM_SIZE,
+                "description": (
+                    f"Between {MIN_TEAM_SIZE} and {MAX_TEAM_SIZE} bots, "
+                    "inclusive. The endpoint rejects + retries if you go "
+                    "outside this range."
+                ),
                 "items": {
                     "type": "object",
                     "properties": {
@@ -106,15 +115,17 @@ SUBMIT_TEAM_TOOL: dict[str, Any] = {
                         "dispatches_to": {
                             "type": "array",
                             "items": {"type": "string"},
-                            "maxItems": MAX_DISPATCHES_PER_BOT,
                             "description": (
                                 "Names (from this team or the existing "
                                 "constellation) this bot dispatches commands "
-                                "to. Prefer 0 or 1 outgoing edges; 2 only "
-                                "when both targets serve genuinely different "
-                                "purposes. Avoid spaghetti graphs — a "
-                                "linear chain is more debuggable than a "
-                                "fanout."
+                                f"to. At most {MAX_DISPATCHES_PER_BOT} "
+                                "entries — prefer 0 or 1 outgoing edges; "
+                                f"{MAX_DISPATCHES_PER_BOT} only when both "
+                                "targets serve genuinely different purposes. "
+                                "Avoid spaghetti graphs — a linear chain "
+                                "is more debuggable than a fanout. The "
+                                "endpoint rejects + retries if you exceed "
+                                "the cap."
                             ),
                         },
                         "needs_workspace_secrets": {
