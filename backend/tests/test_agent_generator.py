@@ -257,6 +257,29 @@ def test_generate_422_when_retry_also_off_dictionary(client, alice, monkeypatch)
     assert "valid star name" in r.json()["detail"].lower()
 
 
+def test_generate_422_still_records_cost_on_lightsei_system(client, alice, monkeypatch):
+    api_key = alice["api_key"]["plaintext"]
+    _set_anthropic_secret(client, api_key)
+
+    fake = _FakeClient()
+    fake.messages.create = lambda **kw: _fake_response(agent_name="invented-name")
+    monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
+
+    r = client.post(
+        "/workspaces/me/agents/generate",
+        headers=auth_headers(api_key),
+        json={"description": "Build a hello-world bot."},
+    )
+    assert r.status_code == 422
+
+    expected = 2 * ((123 * 15.00 + 456 * 75.00) / 1_000_000)
+    cost = client.get(
+        "/workspaces/me/cost", headers=auth_headers(api_key)
+    ).json()
+    by_agent = {a["agent_name"]: a for a in cost["by_agent"]}
+    assert abs(by_agent["lightsei.system"]["mtd_usd"] - expected) < 1e-6
+
+
 def test_generate_retries_when_name_already_taken(client, alice, monkeypatch):
     api_key = alice["api_key"]["plaintext"]
     _set_anthropic_secret(client, api_key)
