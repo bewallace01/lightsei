@@ -742,8 +742,14 @@ function InputCard({
 
 // ---------- Constellation preview ---------- //
 
-const VB_W = 720;
-const VB_H = 360;
+// Near-square viewBox keeps stars from clustering toward the top of a
+// tall column. The SVG fills its container (which stretches to match
+// the side panel's height), so we want the intrinsic shape to look
+// good at portrait-ish aspects too. `preserveAspectRatio` defaults to
+// `xMidYMid meet` so the contents stay centered when the container is
+// wider or taller than the viewBox.
+const VB_W = 600;
+const VB_H = 520;
 
 function positionFor(
   i: number,
@@ -756,12 +762,15 @@ function positionFor(
   if (role === "orchestrator") {
     return { x: VB_W / 2, y: VB_H / 2 };
   }
-  const radius = role === "messenger" ? 130 : 100;
-  const total_non_orch = total; // approximate; clipping is fine for previews
-  const angle = (i / Math.max(1, total_non_orch)) * Math.PI * 2 - Math.PI / 2;
+  // Big radii so the team uses the canvas. Specialists sit at ~75% of
+  // the half-canvas; messengers push a little further out so their
+  // edge length implies "downstream / leaf".
+  const radius = role === "messenger" ? 220 : 180;
+  const angle =
+    (i / Math.max(1, total)) * Math.PI * 2 - Math.PI / 2;
   return {
     x: VB_W / 2 + Math.cos(angle) * radius,
-    y: VB_H / 2 + Math.sin(angle) * radius * 0.7, // slight squash so the canvas reads wider than tall
+    y: VB_H / 2 + Math.sin(angle) * radius,
   };
 }
 
@@ -802,8 +811,10 @@ function TeamConstellation({
     }
     Array.from(referenced).forEach((nm, i) => {
       const total = referenced.size;
-      const y = VB_H * (0.2 + (0.6 * i) / Math.max(1, total - 1 || 1));
-      m.set(nm, { x: VB_W - 50, y });
+      // Spread ghost stubs along the right edge but keep them away
+      // from the top/bottom corners so labels don't clip.
+      const y = VB_H * (0.18 + (0.64 * i) / Math.max(1, total - 1 || 1));
+      m.set(nm, { x: VB_W - 60, y });
     });
     return m;
   }, [team, existingAgents]);
@@ -820,10 +831,11 @@ function TeamConstellation({
   }, [team, existingAgents]);
 
   return (
-    <div className="rounded-lg border border-indigo-900/30 bg-gradient-to-br from-slate-950 via-indigo-950 to-slate-900 overflow-hidden">
+    <div className="rounded-lg border border-indigo-900/30 bg-gradient-to-br from-slate-950 via-indigo-950 to-slate-900 overflow-hidden min-h-[520px] flex">
       <svg
         viewBox={`0 0 ${VB_W} ${VB_H}`}
-        className="w-full h-auto"
+        preserveAspectRatio="xMidYMid meet"
+        className="w-full h-full block"
         role="img"
         aria-label="Proposed team constellation preview"
       >
@@ -854,7 +866,7 @@ function TeamConstellation({
           if (!p) return null;
           const isOrch = m.role === "orchestrator";
           const tint = isOrch ? "#fde68a" : tintForAgent(m.name);
-          const size = isOrch ? 18 : 12;
+          const size = isOrch ? 26 : 18;
           const isSelected = selectedName === m.name;
           return (
             <g
@@ -866,7 +878,7 @@ function TeamConstellation({
                 <circle
                   cx={p.x}
                   cy={p.y}
-                  r={size + 8}
+                  r={size + 10}
                   fill="none"
                   stroke="rgb(165 180 252 / 0.7)"
                   strokeWidth={1.5}
@@ -879,20 +891,20 @@ function TeamConstellation({
               />
               <text
                 x={p.x}
-                y={p.y + size + 14}
+                y={p.y + size + 18}
                 textAnchor="middle"
-                fontSize={11}
-                fill="rgb(199 210 254 / 0.9)"
+                fontSize={14}
+                fill="rgb(199 210 254 / 0.95)"
                 className="font-mono"
               >
                 {m.name}
               </text>
               <text
                 x={p.x}
-                y={p.y + size + 26}
+                y={p.y + size + 34}
                 textAnchor="middle"
-                fontSize={9}
-                fill="rgb(165 180 252 / 0.6)"
+                fontSize={11}
+                fill="rgb(165 180 252 / 0.65)"
               >
                 {m.role}
               </text>
@@ -906,23 +918,23 @@ function TeamConstellation({
           if (!p) return null;
           return (
             <g key={`ghost-${nm}`}>
-              <circle cx={p.x} cy={p.y} r={6} fill="rgb(99 102 241 / 0.4)" />
+              <circle cx={p.x} cy={p.y} r={9} fill="rgb(99 102 241 / 0.4)" />
               <text
                 x={p.x}
-                y={p.y + 18}
+                y={p.y + 24}
                 textAnchor="middle"
-                fontSize={10}
-                fill="rgb(165 180 252 / 0.6)"
+                fontSize={12}
+                fill="rgb(165 180 252 / 0.65)"
                 className="font-mono"
               >
                 {nm}
               </text>
               <text
                 x={p.x}
-                y={p.y + 30}
+                y={p.y + 38}
                 textAnchor="middle"
-                fontSize={8}
-                fill="rgb(165 180 252 / 0.4)"
+                fontSize={10}
+                fill="rgb(165 180 252 / 0.45)"
               >
                 existing
               </text>
