@@ -322,7 +322,9 @@ export default function TeamFromReadmePage() {
    *  existing (out-of-team) agents are skipped here because we don't
    *  know their command kinds from the plan — the user can wire those
    *  on the agent's auto-approval page if they want. */
-  const installRules = async (): Promise<RulesResult> => {
+  const installRules = async (
+    results: Record<string, DeployResult>,
+  ): Promise<RulesResult> => {
     const teamByName = new Map(team.map((m) => [m.name, m]));
     const installed: RulesResult["installed"] = [];
     const failed: RulesResult["failed"] = [];
@@ -330,11 +332,11 @@ export default function TeamFromReadmePage() {
     const promises: Promise<void>[] = [];
     for (const src of team) {
       // Only wire rules for bots that actually got deployed.
-      if (deployResults[src.name]?.status !== "deployed") continue;
+      if (results[src.name]?.status !== "deployed") continue;
       for (const targetName of src.dispatches_to) {
         const targetMember = teamByName.get(targetName);
         if (!targetMember) continue; // existing-agent edge; skip
-        if (deployResults[targetName]?.status !== "deployed") continue;
+        if (results[targetName]?.status !== "deployed") continue;
         for (const kind of targetMember.command_kinds) {
           const rule = {
             source_agent: src.name,
@@ -400,24 +402,29 @@ export default function TeamFromReadmePage() {
 
     // Seed every approved row to `pending` so the progress UI lights
     // up immediately.
-    const initial: Record<string, DeployResult> = {};
-    for (const m of approved) initial[m.name] = { status: "pending" };
-    setDeployResults(initial);
+    const deployOutcomes: Record<string, DeployResult> = {};
+    for (const m of approved) deployOutcomes[m.name] = { status: "pending" };
+    setDeployResults({ ...deployOutcomes });
+
+    const recordDeployResult = (name: string, result: DeployResult) => {
+      deployOutcomes[name] = result;
+      setDeployResults((cur) => ({
+        ...cur,
+        [name]: result,
+      }));
+    };
 
     await Promise.allSettled(
       approved.map(async (m) => {
         const out = genResults[m.name]?.output;
         if (!out) return;
-        setDeployResults((cur) => ({
-          ...cur,
-          [m.name]: { status: "zipping" },
-        }));
+        recordDeployResult(m.name, { status: "zipping" });
         try {
           const dep = await zipAndDeploy(m.name, out.bot_py, out.requirements_txt);
-          setDeployResults((cur) => ({
-            ...cur,
-            [m.name]: { status: "deployed", deploymentId: dep.id },
-          }));
+          recordDeployResult(m.name, {
+            status: "deployed",
+            deploymentId: dep.id,
+          });
           // Best-effort: carry the LLM rationale as the agent's
           // description so /agents has something to show. Don't block
           // on failure — the bot is deployed and that's what counts.
@@ -431,13 +438,10 @@ export default function TeamFromReadmePage() {
             router.replace("/login");
             return;
           }
-          setDeployResults((cur) => ({
-            ...cur,
-            [m.name]: {
-              status: "failed",
-              error: e instanceof Error ? e.message : String(e),
-            },
-          }));
+          recordDeployResult(m.name, {
+            status: "failed",
+            error: e instanceof Error ? e.message : String(e),
+          });
         }
       }),
     );
@@ -446,7 +450,7 @@ export default function TeamFromReadmePage() {
     // failures here surface in the success view but don't roll back
     // the deploy.
     try {
-      const r = await installRules();
+      const r = await installRules(deployOutcomes);
       setRulesResult(r);
     } catch (e) {
       setRulesResult({
