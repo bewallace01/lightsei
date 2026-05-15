@@ -22,6 +22,13 @@ services:
       - "8000:8000"
     environment:
       - LIGHTSEI_DATABASE_URL=postgresql+psycopg://lightsei:lightsei@db:5432/lightsei
+      # Master key for AES-256-GCM encryption of workspace secrets (e.g.
+      # ANTHROPIC_API_KEY). Passed through from the host so the value isn't
+      # checked in. Generate with:
+      #   python -c "import secrets, base64; print(base64.b64encode(secrets.token_bytes(32)).decode())"
+      # then export LIGHTSEI_SECRETS_KEY=... before `docker compose up` (or
+      # drop it in a .env file next to this compose file).
+      - LIGHTSEI_SECRETS_KEY=${LIGHTSEI_SECRETS_KEY:?LIGHTSEI_SECRETS_KEY is not set - generate one (see comment above) and export it or add it to .env}
     depends_on:
       db:
         condition: service_healthy
