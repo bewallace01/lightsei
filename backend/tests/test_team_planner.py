@@ -372,6 +372,47 @@ def test_plan_retries_on_invalid_first_attempt(client, alice, monkeypatch):
     assert calls["n"] == 2
 
 
+def test_plan_translates_anthropic_overloaded_to_503(client, alice, monkeypatch):
+    """Phase 12C.1 follow-up: Anthropic 529 (overloaded) surfaces from
+    the SDK as an APIStatusError after the SDK's own retries exhaust.
+    The endpoint translates that into a 503 with retry guidance
+    instead of a confusing 502."""
+    import anthropic
+
+    api_key = alice["api_key"]["plaintext"]
+    _set_anthropic_secret(client, api_key)
+
+    # Construct a real APIStatusError requires a real httpx Response;
+    # instead build a tiny subclass that satisfies our `getattr(exc,
+    # "status_code", None)` translation path. The endpoint doesn't care
+    # how the SDK created the exception, only that `status_code == 529`.
+    class _OverloadedError(anthropic.APIError):
+        def __init__(self):
+            self.status_code = 529
+            self.message = "Overloaded"
+
+        def __str__(self) -> str:
+            return "Overloaded"
+
+    fake = _FakeClient()
+
+    def boom(**kw):
+        raise _OverloadedError()
+
+    fake.messages.create = boom
+    monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
+
+    r = client.post(
+        "/workspaces/me/teams/plan",
+        headers=auth_headers(api_key),
+        json={"readme_text": "anything"},
+    )
+    assert r.status_code == 503, r.text
+    detail = r.json()["detail"]
+    assert "overloaded" in detail.lower()
+    assert "try again" in detail.lower()
+
+
 def test_plan_422_when_retry_also_invalid(client, alice, monkeypatch):
     api_key = alice["api_key"]["plaintext"]
     _set_anthropic_secret(client, api_key)

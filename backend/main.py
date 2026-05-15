@@ -4170,6 +4170,35 @@ def get_manifest(
     return _serialize_manifest(a)
 
 
+# ---------- Anthropic error translation ---------- #
+#
+# Both 12B.1 (generate one bot) and 12C.1 (plan a team) hit the same
+# Anthropic API with forced tool_choice. When Anthropic returns 529
+# (overloaded) the user gets a confusing 502; translate to a clear 503
+# with retry guidance instead. Other API errors surface as 502 like
+# before.
+
+def _anthropic_error_to_http(exc: "Exception") -> HTTPException:
+    status = getattr(exc, "status_code", None)
+    if status == 529:
+        return HTTPException(
+            status_code=503,
+            detail=(
+                "Anthropic is overloaded right now (529). The SDK retried "
+                "and gave up — try again in a few seconds."
+            ),
+        )
+    if status == 429:
+        return HTTPException(
+            status_code=429,
+            detail=(
+                "Anthropic rate-limited this workspace's key. Slow down "
+                "(or check your tier limits) and retry."
+            ),
+        )
+    return HTTPException(status_code=502, detail=f"Anthropic API error: {exc}")
+
+
 # ---------- Phase 12B.1: agent code generation ---------- #
 
 
@@ -4285,7 +4314,10 @@ def generate_agent(
             tweak_request=body.tweak_request,
         )
 
-    client = anthropic.Anthropic(api_key=anthropic_key)
+    # max_retries bumped from the SDK default of 2 → 5 so a brief
+    # Anthropic 529 / 5xx blip doesn't surface as a request failure
+    # to the user. SDK uses exponential backoff between retries.
+    client = anthropic.Anthropic(api_key=anthropic_key, max_retries=5)
     model = "claude-opus-4-7"
 
     # Phase 12D follow-up: server-side calls to Anthropic don't go through
@@ -4346,7 +4378,7 @@ def generate_agent(
             resp = _ask()
             out = _extract(resp)
         except anthropic.APIError as e:
-            raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}")
+            raise _anthropic_error_to_http(e)
 
         # 4. Validate name. If the LLM picked off-dictionary or already-in-use,
         # retry once with a corrective hint; if still bad, surface a 422 with
@@ -4368,7 +4400,7 @@ def generate_agent(
                 out = _extract(resp)
                 suggested = (out.get("agent_name") or "").strip().lower()
             except anthropic.APIError as e:
-                raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}")
+                raise _anthropic_error_to_http(e)
 
             if (
                 not agent_generator.is_valid_star_name(suggested)
@@ -4397,7 +4429,7 @@ def generate_agent(
                 resp = _ask(extra_user_msg=retry_msg)
                 out = _extract(resp)
             except anthropic.APIError as e:
-                raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}")
+                raise _anthropic_error_to_http(e)
             # Re-validate the name (Claude might have changed it during the
             # retry) and the code.
             suggested = (out.get("agent_name") or "").strip().lower()
@@ -4603,7 +4635,9 @@ def plan_team(
     # 5. Call Claude with forced submit_team tool_choice. Track tokens
     # across both attempts (initial + validation retry) so generation
     # cost lands on `lightsei.system` even if the call ultimately fails.
-    client = anthropic.Anthropic(api_key=anthropic_key)
+    # max_retries=5 (vs SDK default 2) covers Anthropic 529 / 5xx blips
+    # without surfacing to the user; the SDK handles exponential backoff.
+    client = anthropic.Anthropic(api_key=anthropic_key, max_retries=5)
     model = "claude-opus-4-7"
     token_log: list[tuple[str, int, int]] = []
 
@@ -4654,7 +4688,7 @@ def plan_team(
             resp = _ask()
             plan = _extract(resp)
         except anthropic.APIError as e:
-            raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}")
+            raise _anthropic_error_to_http(e)
 
         # 6. Validate the plan. One retry with corrective feedback if
         # there are problems; surface 422 with the remaining issues if
@@ -4666,7 +4700,7 @@ def plan_team(
                 resp = _ask(extra_user_msg=retry_msg)
                 plan = _extract(resp)
             except anthropic.APIError as e:
-                raise HTTPException(status_code=502, detail=f"Anthropic API error: {e}")
+                raise _anthropic_error_to_http(e)
             remaining = team_planner.validate_team_plan(plan, reserved_names)
             if remaining:
                 raise HTTPException(
