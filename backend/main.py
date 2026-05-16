@@ -104,6 +104,31 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def record_server_anthropic_cost(
+    workspace_id: str, token_log: list[tuple[str, int, int]]
+) -> None:
+    """Persist paid server-side LLM usage outside the request transaction."""
+    if not token_log:
+        return
+    now_ts = utcnow()
+    total_in = sum(t[1] for t in token_log)
+    total_out = sum(t[2] for t in token_log)
+    cost_model = token_log[0][0]
+    delta = compute_cost_usd(cost_model, total_in, total_out)
+    with session_scope() as cost_session:
+        ensure_agent(cost_session, workspace_id, "lightsei.system", now_ts)
+        cost_session.add(
+            Run(
+                id=str(uuid.uuid4()),
+                workspace_id=workspace_id,
+                agent_name="lightsei.system",
+                started_at=now_ts,
+                ended_at=now_ts,
+                cost_usd=Decimal(format(delta, ".6f")),
+            )
+        )
+
+
 class EventIn(BaseModel):
     run_id: str
     agent_name: str
@@ -4475,25 +4500,7 @@ def generate_agent(
         # them. Runs even on the error paths (HTTPException, APIError)
         # because the API call already happened — Anthropic billed for
         # whatever tokens loaded before the failure.
-        if token_log:
-            now_ts = utcnow()
-            ensure_agent(session, workspace_id, "lightsei.system", now_ts)
-            total_in = sum(t[1] for t in token_log)
-            total_out = sum(t[2] for t in token_log)
-            # All attempts use the same model; first entry's model is
-            # canonical (server may echo a more specific id like
-            # `claude-opus-4-7-20260101`, but the rate is the same).
-            cost_model = token_log[0][0]
-            delta = compute_cost_usd(cost_model, total_in, total_out)
-            run_row = Run(
-                id=str(uuid.uuid4()),
-                workspace_id=workspace_id,
-                agent_name="lightsei.system",
-                started_at=now_ts,
-                ended_at=now_ts,
-                cost_usd=Decimal(format(delta, ".6f")),
-            )
-            session.add(run_row)
+        record_server_anthropic_cost(workspace_id, token_log)
 
 
 # ---------- Phase 12C.1: project-analysis endpoint ---------- #
@@ -4722,22 +4729,7 @@ def plan_team(
         # Phase 12D follow-up: server-side Anthropic spend lands on the
         # `lightsei.system` agent so /cost reflects it. Same pattern as
         # `generate_agent`. Runs even on error paths.
-        if token_log:
-            now_ts = utcnow()
-            ensure_agent(session, workspace_id, "lightsei.system", now_ts)
-            total_in = sum(t[1] for t in token_log)
-            total_out = sum(t[2] for t in token_log)
-            cost_model = token_log[0][0]
-            delta = compute_cost_usd(cost_model, total_in, total_out)
-            run_row = Run(
-                id=str(uuid.uuid4()),
-                workspace_id=workspace_id,
-                agent_name="lightsei.system",
-                started_at=now_ts,
-                ended_at=now_ts,
-                cost_usd=Decimal(format(delta, ".6f")),
-            )
-            session.add(run_row)
+        record_server_anthropic_cost(workspace_id, token_log)
 
 
 def _parse_github_repo(s: str) -> tuple[str, str]:
