@@ -545,3 +545,27 @@ def test_generate_records_cost_on_lightsei_system_run(client, alice, monkeypatch
     listed = client.get("/agents", headers=auth_headers(api_key)).json()
     names = [a["name"] for a in listed["agents"]]
     assert "lightsei.system" not in names
+
+
+def test_generate_records_cost_when_retry_fails(client, alice, monkeypatch):
+    api_key = alice["api_key"]["plaintext"]
+    _set_anthropic_secret(client, api_key)
+
+    fake = _FakeClient()
+    fake.messages.create = lambda **kw: _fake_response(agent_name="not-a-star")
+    monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
+
+    r = client.post(
+        "/workspaces/me/agents/generate",
+        headers=auth_headers(api_key),
+        json={"description": "Build a code review bot."},
+    )
+    assert r.status_code == 422
+
+    expected = 2 * ((123 * 15.00 + 456 * 75.00) / 1_000_000)
+    cost = client.get(
+        "/workspaces/me/cost", headers=auth_headers(api_key)
+    ).json()
+    by_agent = {a["agent_name"]: a for a in cost["by_agent"]}
+    assert "lightsei.system" in by_agent
+    assert abs(by_agent["lightsei.system"]["mtd_usd"] - expected) < 1e-6

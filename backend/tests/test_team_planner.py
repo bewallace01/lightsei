@@ -438,6 +438,38 @@ def test_plan_422_when_retry_also_invalid(client, alice, monkeypatch):
     assert "remaining issues" in r.json()["detail"].lower()
 
 
+def test_plan_records_cost_when_retry_fails(client, alice, monkeypatch):
+    api_key = alice["api_key"]["plaintext"]
+    _set_anthropic_secret(client, api_key)
+
+    bad_plan = {
+        "rationale": "still broken",
+        "team": [
+            _team_member("invented-star-1"),
+            _team_member("invented-star-2"),
+            _team_member("invented-star-3"),
+        ],
+    }
+    fake = _FakeClient()
+    fake.messages.create = lambda **kw: _fake_response(plan=bad_plan)
+    monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
+
+    r = client.post(
+        "/workspaces/me/teams/plan",
+        headers=auth_headers(api_key),
+        json={"readme_text": "anything"},
+    )
+    assert r.status_code == 422
+
+    expected = 2 * ((800 * 15.00 + 1500 * 75.00) / 1_000_000)
+    cost = client.get(
+        "/workspaces/me/cost", headers=auth_headers(api_key)
+    ).json()
+    by_agent = {a["agent_name"]: a for a in cost["by_agent"]}
+    assert "lightsei.system" in by_agent
+    assert abs(by_agent["lightsei.system"]["mtd_usd"] - expected) < 1e-6
+
+
 def test_plan_records_cost_on_lightsei_system(client, alice, monkeypatch):
     """Phase 12D follow-up parity: server-side Anthropic spend lands
     on the synthetic `lightsei.system` agent so /cost reflects it."""
