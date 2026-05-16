@@ -256,6 +256,16 @@ def test_generate_422_when_retry_also_off_dictionary(client, alice, monkeypatch)
     assert r.status_code == 422
     assert "valid star name" in r.json()["detail"].lower()
 
+    # The two Anthropic responses were billable even though the endpoint
+    # rejected the invalid output. Keep that spend visible on /cost.
+    expected = 2 * ((123 * 15.00 + 456 * 75.00) / 1_000_000)
+    cost = client.get(
+        "/workspaces/me/cost", headers=auth_headers(api_key)
+    ).json()
+    by_agent = {a["agent_name"]: a for a in cost["by_agent"]}
+    assert "lightsei.system" in by_agent
+    assert abs(by_agent["lightsei.system"]["mtd_usd"] - expected) < 1e-6
+
 
 def test_generate_retries_when_name_already_taken(client, alice, monkeypatch):
     api_key = alice["api_key"]["plaintext"]
@@ -422,6 +432,14 @@ def test_generate_422_when_validation_retry_also_fails(client, alice, monkeypatc
     )
     assert r.status_code == 422
     assert "valid bot" in r.json()["detail"].lower()
+
+    expected = 2 * ((123 * 15.00 + 456 * 75.00) / 1_000_000)
+    cost = client.get(
+        "/workspaces/me/cost", headers=auth_headers(api_key)
+    ).json()
+    by_agent = {a["agent_name"]: a for a in cost["by_agent"]}
+    assert "lightsei.system" in by_agent
+    assert abs(by_agent["lightsei.system"]["mtd_usd"] - expected) < 1e-6
 
 
 # ---------- Phase 12B.3: iteration loop ---------- #

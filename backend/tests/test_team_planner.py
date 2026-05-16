@@ -437,6 +437,16 @@ def test_plan_422_when_retry_also_invalid(client, alice, monkeypatch):
     assert r.status_code == 422
     assert "remaining issues" in r.json()["detail"].lower()
 
+    # Both model responses carried usage, so the failed planner run still
+    # needs to appear in cost accounting.
+    expected = 2 * ((800 * 15.00 + 1500 * 75.00) / 1_000_000)
+    cost = client.get(
+        "/workspaces/me/cost", headers=auth_headers(api_key)
+    ).json()
+    by_agent = {a["agent_name"]: a for a in cost["by_agent"]}
+    assert "lightsei.system" in by_agent
+    assert abs(by_agent["lightsei.system"]["mtd_usd"] - expected) < 1e-6
+
 
 def test_plan_records_cost_on_lightsei_system(client, alice, monkeypatch):
     """Phase 12D follow-up parity: server-side Anthropic spend lands
