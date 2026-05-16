@@ -51,6 +51,41 @@ type RulesResult = {
   failed: { source: string; target: string; kind: string; error: string }[];
 };
 
+// Bulk-generate concurrency cap (12C.6). The per-bot endpoint runs up
+// to two Opus + tool-call round trips and can take 60-120s; firing all
+// N at once trips proxy / connection timeouts upstream. 2 in flight at
+// a time with a small jitter between starts is empirically enough to
+// finish a 5-bot team in the same wall-clock as the unbounded burst,
+// without the long tail of timeout failures.
+const BULK_GENERATE_CONCURRENCY = 2;
+const BULK_GENERATE_JITTER_MS = 250;
+
+async function runWithConcurrencyLimit<T>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<void>,
+): Promise<void> {
+  let cursor = 0;
+  const lanes = Array.from(
+    { length: Math.min(limit, items.length) },
+    async () => {
+      while (cursor < items.length) {
+        const i = cursor++;
+        if (i >= limit) {
+          await new Promise((r) =>
+            setTimeout(
+              r,
+              BULK_GENERATE_JITTER_MS + Math.floor(Math.random() * BULK_GENERATE_JITTER_MS),
+            ),
+          );
+        }
+        await worker(items[i]);
+      }
+    },
+  );
+  await Promise.all(lanes);
+}
+
 /** Build the per-bot description fed to /agents/generate: the team
  *  member's draft_description + an explicit "coordinate with" footer
  *  listing the other team members (so the generator wires send_command
@@ -261,11 +296,11 @@ export default function TeamFromReadmePage() {
     }
     setGenResults(initial);
 
-    // Parallel — Anthropic supports concurrent requests; backend
-    // serializes per-workspace-budget on its side. Promise.allSettled
-    // so a single failure doesn't short-circuit the rest.
-    await Promise.allSettled(
-      team.map((m) => runOneGenerate(m, descriptionFor(m, team))),
+    // Capped concurrency (12C.6). runOneGenerate already swallows its
+    // own errors into per-row state, so we don't need allSettled — we
+    // just need to stop launching all N at once.
+    await runWithConcurrencyLimit(team, BULK_GENERATE_CONCURRENCY, (m) =>
+      runOneGenerate(m, descriptionFor(m, team)),
     );
     setPhase("review");
   };

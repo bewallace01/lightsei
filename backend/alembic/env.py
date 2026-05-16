@@ -14,7 +14,16 @@ from models import Base
 config = context.config
 
 if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+    # `disable_existing_loggers=False` is critical: Python's `fileConfig`
+    # defaults to True, which would silently mute every logger that
+    # already exists in the process — including uvicorn's access /
+    # error loggers, FastAPI's, and our own `lightsei.*` modules. That
+    # mute persists for the rest of the process, so all post-startup
+    # logs vanish even though the app keeps serving requests. The
+    # alembic.ini only configures `root`, `sqlalchemy`, and `alembic`;
+    # we want those settings layered on top of uvicorn's, not in place
+    # of them.
+    fileConfig(config.config_file_name, disable_existing_loggers=False)
 
 target_metadata = Base.metadata
 

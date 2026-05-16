@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 12C.5: demo — drop the Lightsei README, watch the team appear**
+> **Phase 12C.6: bulk-generate hardening — unblock the 12C.5 demo**
 
-12C.1-12C.4 shipped (see Done Log). 12C.5 is the demo: drop the Lightsei project's own README on `/agents/team-from-readme`, generate, expect Claude to propose something like a documentation maintainer + a PR reviewer + a security scanner + a build watcher (the LLM picks — that's the surprise). Edit the team: rename one, remove one, add a "weekly digest" bot. Generate. Review one bot's code. Deploy. Watch them show up on the constellation. Push a commit. See the chain fan out across the new team.
+12C.5 ran partway against app.lightsei.com on 2026-05-16: team-plan worked, edit worked, bulk per-bot generate hard-fails (`net::ERR_FAILED`, no CORS header — connection killed before the backend can respond). Demo can't close until the bulk-generate path survives 4-7 concurrent 60-120s Opus + tool-call requests. Full triage and the punch list are in 12C.6 below. Once those land (or once Railway logs identify a different root cause), re-run 12C.5.
 
-This step is user-driven — it exercises every layer end-to-end (LLM, validators, generator, worker, dispatch, auto-approval rules) and is the proof that 12C closes the loop on "describe a project, get a team."
+12C.1-12C.4 shipped (see Done Log). 12C.5 is still the gate to closing Phase 12C.
 
 ## Phase 12C: drop a README, get a team
 
@@ -69,6 +69,22 @@ Why this matters: the 12B v1 still requires the user to know what bots they want
 - Drop the Lightsei project's own README on `/agents/team-from-readme`. Generate. Expect Claude to propose something like: a documentation maintainer (reads MEMORY.md + TASKS.md, suggests cleanups), a PR reviewer, a security scanner, a build watcher. Whatever the LLM picks — that's the demo's first surprise.
 - Edit the team: rename one, remove one, add a "weekly digest" bot. Generate. Review one bot's code. Deploy.
 - Watch them all show up on the constellation. Push a commit. See the chain fan out across the new team.
+
+### 12C.6 Bulk-generate hardening (surfaced during the 12C.5 demo, 2026-05-16)
+
+The 12C.5 demo against app.lightsei.com got past `POST /workspaces/me/teams/plan` cleanly: Claude proposed a 4-bot team (argus / sirius / vela / vega → hermes), the constellation rendered, edits worked. The break point is 12C.3's bulk-generate step: every `POST /workspaces/me/agents/generate` dies with `net::ERR_FAILED` + missing `Access-Control-Allow-Origin`, the browser pattern that means "connection killed before headers came back." Fails identically in incognito (rules out extension), serialized one-at-a-time (rules out parallel-burst overload), and on retry (rules out transient Anthropic 529 — that path catches `anthropic.APIError` and returns a clean 502 with CORS headers). The team-plan call works because it makes one Anthropic round trip; the per-bot generator does up to two (initial + validation retry via `build_iteration_message`) and that crosses whatever proxy or pod-level limit Railway is enforcing on long requests.
+
+This phase exists to make the bulk-generate path resilient enough for the demo to actually close. Do these in order; stop once the demo runs end-to-end.
+
+- [ ] **Confirm the failure shape from the server side.** Pull Railway logs for `api.lightsei.com` around a known-failing click. Three branches: (a) FastAPI 5xx with traceback → code bug; (b) 502/504 from Railway's proxy → request-duration limit; (c) container restart / OOM → resource limit. The fix depends on which.
+- [ ] **Cap and stagger the dashboard's parallel burst.** `Promise.allSettled(team.map(runOneGenerate))` at `dashboard/app/agents/team-from-readme/page.tsx:267` fires N (3-7) concurrent 60-120s Opus calls. Replace with a concurrency-2 semaphore + 250-500ms jitter between starts. Same retry semantics, much smaller burst. Cheap win even if the root cause turns out to be (a) or (c).
+- [ ] **Make `/workspaces/me/agents/generate` stream / chunk progress** so the connection emits bytes during the long wait and intermediaries don't reap it as idle. SSE works; so does periodic `: keepalive\n\n` heartbeats on a `text/event-stream` response. Either lets the existing per-bot UI render `generating` confidently rather than betting on a single 90s+ round-trip surviving.
+- [ ] **Replace the in-request validation retry with a single-shot generator + a follow-up retry-on-demand endpoint.** Today `_ask()` can loop once via `build_iteration_message` inside the same request — that doubles the worst-case wall time and is exactly the thing that hits proxy timeouts. Return the first attempt (with the validation problems attached), let the dashboard call a `/workspaces/me/agents/generate/{id}/retry` endpoint with the corrective feedback if the user wants it. Smaller blast radius per request, same end result.
+- [ ] **Per-bot deploy log surfacing on the success view.** When a bot does deploy via 12C.4, the worker may still fail on first tick (missing secret, import error, etc.). 12C.4 already surfaces the missing-secrets checklist; extend it with a "first-tick log" tail per bot so the demo's "watch the chain fan out" beat doesn't silently swallow a runtime crash. Reuses `/deployments/{id}/logs`.
+
+### Alembic logger-mute root cause (surfaced + fixed 2026-05-16)
+
+Both the "local-stack startup hang" and the "deployed backend silently failing on agents/generate" lines of investigation pointed at the same bug: `backend/alembic/env.py` was calling `logging.config.fileConfig(config.config_file_name)` without `disable_existing_loggers=False`. The default sets `disabled=True` on every logger that exists at the moment of the call — including `uvicorn`, `uvicorn.access`, `uvicorn.error`, `fastapi`, and our own `lightsei.*` loggers. The app kept serving requests; we just had zero post-startup logs in either local docker or Railway, so the failure shape on /workspaces/me/agents/generate was invisible. Fix is one-liner, committed in the same TASKS.md update window. With it, the access log for /openapi.json shows up locally within a second of the call. Re-deploying api.lightsei.com with this fix is the prerequisite for 12C.6.a finishing — we need real backend logs to see whether agents/generate is timing out, OOM'ing, or 5xx'ing.
 
 ## Phase 12D: cost intelligence (Polaris is smart about spending)
 
@@ -528,6 +544,7 @@ Open candidates for after the constellation's first dispatch chain ships:
 
 Ideas that are good but not now. Add freely. Do not work on these until their phase arrives or you've explicitly decided to promote one.
 
+- **Streaming progress on long generator endpoints**. `/workspaces/me/teams/plan` + `/workspaces/me/agents/generate` both hold a connection open for the full Opus call (60-120s, doubled when validation retry fires). Promoted to a punch-list item in 12C.6 because it's blocking the demo; revisit here if the same shape shows up on the next long-running endpoint we add. The general fix is the same: emit SSE chunks or periodic keepalive bytes from any endpoint whose median latency exceeds 30s.
 - **Multiple workspaces per account** (promoted from a 2026-05-01 nav-redesign conversation). Today the data model is one workspace per user — session, API keys, and every workspace-scoped row assumes it. Real multi-workspace requires a `workspace_members` join table (user ↔ workspace + role), an "active workspace" pointer on the session, list/create/switch endpoints, and a UI to drive them via the new header dropdown. The dropdown shell shipped on 2026-05-01 already has a place for "switch workspace" + "+ new workspace" entries. Worth careful design on invites, billing-per-workspace, and what happens to API keys at switch time before starting.
 - **In-browser zipping for /agents/new**. The drop zone shipped on 2026-05-04 only accepts `.zip` today — a non-engineer still has to right-click → Compress before they can deploy. Add JSZip (or an equivalent) so the page accepts a directory selection and zips client-side before posting. ~half day. Less critical than the .zip path was, but rounds out the "non-terminal user" UX.
 - **"Deploy from GitHub repo path" form on /agents/new**. Companion to the drop-zone path that landed 2026-05-04. Backend endpoint reusing Phase 10.3's `github_api.fetch_directory_zip`; UI form takes `repo + branch + folder` and posts. Lets users pick from repos they already have without zipping locally. ~half day.
