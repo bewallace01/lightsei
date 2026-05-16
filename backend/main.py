@@ -104,6 +104,46 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
+def _add_system_generation_cost_run(
+    session: Session,
+    workspace_id: str,
+    token_log: list[tuple[str, int, int]],
+) -> None:
+    if not token_log:
+        return
+    now_ts = utcnow()
+    ensure_agent(session, workspace_id, "lightsei.system", now_ts)
+    total_in = sum(t[1] for t in token_log)
+    total_out = sum(t[2] for t in token_log)
+    cost_model = token_log[0][0]
+    delta = compute_cost_usd(cost_model, total_in, total_out)
+    session.add(
+        Run(
+            id=str(uuid.uuid4()),
+            workspace_id=workspace_id,
+            agent_name="lightsei.system",
+            started_at=now_ts,
+            ended_at=now_ts,
+            cost_usd=Decimal(format(delta, ".6f")),
+        )
+    )
+
+
+def _commit_system_generation_cost_independently(
+    workspace_id: str,
+    token_log: list[tuple[str, int, int]],
+) -> None:
+    if not token_log:
+        return
+    try:
+        with session_scope() as cost_session:
+            _add_system_generation_cost_run(cost_session, workspace_id, token_log)
+    except Exception:
+        # Preserve the original endpoint error. Losing this accounting row is
+        # bad, but masking the user-facing generation failure is worse.
+        pass
+
+
 class EventIn(BaseModel):
     run_id: str
     agent_name: str
@@ -4456,7 +4496,7 @@ def generate_agent(
                     ),
                 )
 
-        return {
+        result = {
             "agent_name_suggestion": suggested,
             "rationale": out.get("rationale") or "",
             "bot_py": bot_py,
@@ -4465,35 +4505,21 @@ def generate_agent(
             "tokens_in": getattr(getattr(resp, "usage", None), "input_tokens", None),
             "tokens_out": getattr(getattr(resp, "usage", None), "output_tokens", None),
         }
-    finally:
+    except Exception:
+        _commit_system_generation_cost_independently(workspace_id, token_log)
+        raise
+    else:
         # Phase 12D follow-up (#1): record generation API spend on a Run
         # row so /cost reflects it. We attribute to a synthetic
         # `lightsei.system` agent — these aren't user bots, but the
         # workspace did pay for the tokens. Filtered out of the agents
         # list + constellation map below; surfaces in the cost rollup's
         # by_agent breakdown so the user can see what generation cost
-        # them. Runs even on the error paths (HTTPException, APIError)
-        # because the API call already happened — Anthropic billed for
-        # whatever tokens loaded before the failure.
-        if token_log:
-            now_ts = utcnow()
-            ensure_agent(session, workspace_id, "lightsei.system", now_ts)
-            total_in = sum(t[1] for t in token_log)
-            total_out = sum(t[2] for t in token_log)
-            # All attempts use the same model; first entry's model is
-            # canonical (server may echo a more specific id like
-            # `claude-opus-4-7-20260101`, but the rate is the same).
-            cost_model = token_log[0][0]
-            delta = compute_cost_usd(cost_model, total_in, total_out)
-            run_row = Run(
-                id=str(uuid.uuid4()),
-                workspace_id=workspace_id,
-                agent_name="lightsei.system",
-                started_at=now_ts,
-                ended_at=now_ts,
-                cost_usd=Decimal(format(delta, ".6f")),
-            )
-            session.add(run_row)
+        # them. Error paths are recorded in an independent transaction above
+        # because FastAPI rolls back the request session when HTTPException
+        # propagates.
+        _add_system_generation_cost_run(session, workspace_id, token_log)
+        return result
 
 
 # ---------- Phase 12C.1: project-analysis endpoint ---------- #
@@ -4711,33 +4737,22 @@ def plan_team(
                     ),
                 )
 
-        return {
+        result = {
             "rationale": plan.get("rationale") or "",
             "team": plan.get("team") or [],
             "model_used": getattr(resp, "model", model),
             "tokens_in": getattr(getattr(resp, "usage", None), "input_tokens", None),
             "tokens_out": getattr(getattr(resp, "usage", None), "output_tokens", None),
         }
-    finally:
+    except Exception:
+        _commit_system_generation_cost_independently(workspace_id, token_log)
+        raise
+    else:
         # Phase 12D follow-up: server-side Anthropic spend lands on the
         # `lightsei.system` agent so /cost reflects it. Same pattern as
-        # `generate_agent`. Runs even on error paths.
-        if token_log:
-            now_ts = utcnow()
-            ensure_agent(session, workspace_id, "lightsei.system", now_ts)
-            total_in = sum(t[1] for t in token_log)
-            total_out = sum(t[2] for t in token_log)
-            cost_model = token_log[0][0]
-            delta = compute_cost_usd(cost_model, total_in, total_out)
-            run_row = Run(
-                id=str(uuid.uuid4()),
-                workspace_id=workspace_id,
-                agent_name="lightsei.system",
-                started_at=now_ts,
-                ended_at=now_ts,
-                cost_usd=Decimal(format(delta, ".6f")),
-            )
-            session.add(run_row)
+        # `generate_agent`; error paths are recorded before re-raising.
+        _add_system_generation_cost_run(session, workspace_id, token_log)
+        return result
 
 
 def _parse_github_repo(s: str) -> tuple[str, str]:
