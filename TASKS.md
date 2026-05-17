@@ -628,6 +628,8 @@ Polaris had been stale for a day and every team-from-README bot was sitting in `
 
 **Note on hosting decision:** doesn't change MEMORY.md's "single-host worker for v1" call (see Runtime decision 2026-04-27) — it just specifies *which* single host. We're still on the same architecture; the prod state addendum in MEMORY.md captures the move from laptop to Railway. Phase 5B (managed isolation runtime) is still the next switch.
 
+**Concurrency bump:** worker's code default is `MAX_CONCURRENT=4`. Immediately filled up with the team-from-README team (argus/vega/vela/spica) and polaris's fresh redeploy sat stuck in `queued`. Bumped to 8 via `railway variables --service lightsei-worker --set LIGHTSEI_WORKER_MAX_CONCURRENT=8`. Worker auto-redeployed, claimed polaris in the next sweep — polaris went `queued → running` within ~10s of the env var landing. The override lives only on the Railway service; no code change. Watch for CPU/memory pressure on the single Railway instance if the bot count keeps growing — that's the signal to either drop the cap back or split to two worker instances (same signal that'd reopen the Runtime decision).
+
 ### 2026-05-17 — /account: suggested-secrets panel + extract shared guidance module
 
 Two-part change driven by Bailey wanting "something on /account that reminds which keys need to be added" after seeing the missing-secrets list on team-from-README deploy success was transient (gone after navigation).
