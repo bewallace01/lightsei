@@ -6,19 +6,21 @@ This file is the source of truth for the project. Read it at the start of every 
 
 ## What we're building
 
-A drop-in observability and guardrail platform for AI agents and bots. The user installs an SDK, adds one line of code, and gets traces, cost tracking, and safety guardrails on their existing agent. No infrastructure to set up.
+A platform where non-technical users assemble and operate teams of AI coworkers. The dashboard (and eventually a chat client surface like Slack or Teams) is the product. The SDK, backend, observability, and guardrails are the engine room that makes the coworkers safe, reliable, and inspectable; most customers never see them directly.
 
-Think Sentry or Datadog, but for AI agents.
+Think Viktor (viktor.com), but built around a configurable team of specialized bots instead of one generalist coworker, and with security and trust zones as defaults rather than later upgrades. See "Competitive north star" section below for the full positioning and "Target customer shape" for the buyer profile.
 
 ## Why this exists
 
-Production agents need oversight (cost, safety, quality, errors). Existing tools require complex setup or only cover one piece (just traces, just evals, just guardrails). The wedge is making the install ridiculously easy: pip install + one init() call.
+Non-technical teams increasingly want AI coworkers that do real work, not just chat. Viktor (viktor.com) is the closest current option, but it ships as one generalist bot with workspace-wide shared context, which rules it out for anyone whose compliance team won't let an agent co-mingle PII across users. Nobody else ships configurable teams of specialized bots that a non-technical user can stand up safely. The wedge is shipping that, with trust zones and per-team isolation as defaults rather than enterprise upgrades.
+
+(Historical note: through Phase 4 the wedge was framed as "drop-in observability and guardrails for developers, ridiculously easy install: pip install + one init() call." That framing was retired on 2026-05-17 when the configure-your-team direction was decided. The SDK and observability work it produced is still load-bearing as internal infrastructure; it just isn't the customer-facing pitch anymore.)
 
 ## Vision in one line
 
 Easy by default, powerful when you grow into it.
 
-90% of users never go beyond `init()`. The other 10% can drop into custom policies, manifests, and self-hosting.
+90% of users never leave the dashboard. They describe the team they want, connect a few tools, and the bots do the work. The other 10% drop into the underlying SDK, write custom policies, or self-host the whole stack.
 
 ## Core architecture (decisions already made — do not re-debate)
 
@@ -83,6 +85,8 @@ If you find yourself working on any of these before Phase 1's demo runs, stop:
 - Pretty dashboard styling
 - Slack or PagerDuty alerts
 - Multi-region
+
+Note (added 2026-05-17, after the configure-your-team direction was decided): "Pretty dashboard styling" and "Auth, signup, billing" stay on this list until the spine demo runs, but they are not "deferred forever" items the way most of the others are. Under the new direction the dashboard is the product and non-technical users need to self-serve signup, so both become high-priority right after the spine, not "someday." Don't conflate them with the genuinely-later items in the same list.
 
 ## Glossary
 
@@ -168,6 +172,50 @@ When stuck on architecture, look at these:
 - Helicone (LLM proxy and observability)
 - PostHog (best-in-class plug-and-play SDK experience)
 - Sentry (gold standard for graceful degradation and auto-instrumentation)
+
+## Target customer shape: multi-bot systems with trust zones (2026-05-17)
+
+A concrete customer profile we want Lightsei to serve well: organizations running multiple bots that share a single workflow but live on opposite sides of a security boundary. Canonical example a user described:
+
+- Bot A (the "internet bot") sits in a meeting room everyone in the org can join. Can browse the web, can be addressed openly by anyone in the meeting. Has no access to the CRM or any internal PII.
+- Bot B (the "CRM bot") operates inside the CRM. Has read (and possibly write) access to customer records. Has no internet access.
+- The two bots cannot talk to each other directly. The human in the meeting acts as the translation layer: hears the open-room ask, writes the sanitized prompt to the CRM bot.
+
+The shape generalizes well beyond CRMs (any time PII and the outside world both touch the same workflow). Three implications for Lightsei's design:
+
+1. **Trace correlation across a human gap.** The internet-bot trace and the CRM-bot trace are two unrelated runs from Lightsei's perspective unless we let customers log the human translation step. Lean toward making this optional but easy: an explicit "handoff" span the SDK can record, so chains can be reassembled when teams care.
+
+2. **Trust zones in storage and access.** Internet-bot traces are PII-free by design and can live anywhere. CRM-bot traces are loaded with PII. Customers should be able to tag a project, run, or agent with a sensitivity level and have Lightsei apply redaction or access controls accordingly. Affects the SDK contract (redact at the SDK layer like Langfuse, vs. at the backend like some others), so worth picking a side before output-validation layers ship.
+
+3. **Issue surfacing toward a "master bot" dashboard.** The dashboard becomes the inbox where bot failures and odd behaviors get surfaced to operators automatically, not just when end users complain. The data model should leave room for an "issue" or "alert" attached to a run from the start, even if the surfacing UI lands later.
+
+None of this changes the current phase. The implementation work is now sized into Phase 16 (trust zones as a first-class concept: sensitivity tags, capability model, cross-zone dispatch enforcement, redaction, handoff span, presets) and Phase 21 (customer-facing chat widget + operator inbox + Polaris-extended incident response) in TASKS.md. The original Parking Lot entry still exists as a pointer until Phase 16 actually ships, but the canonical work breakdown lives in the phases now.
+
+## Competitive north star: Viktor, but built security-first (2026-05-17)
+
+User has identified Viktor (viktor.com) as the closest direct analogue to the long-term shape of Lightsei. Viktor is an AI coworker that lives in Slack/Teams, runs in its own cloud compute, connects to ~3000 SaaS tools, and produces real artifacts (PDFs, dashboards, web apps, code, emails). It is not an observability tool; it is the agent product itself. SOC 2 Type 1, $50/mo after free credits, backed by Zeta Labs / Jace AI.
+
+This is less of a pivot than it sounds. The current TASKS.md roadmap already grows toward this shape: Phase 5 PaaS for agents, Phase 6 Polaris (project orchestrator), Phases 10 and 11 GitHub integration and constellation dispatch, plus the existing team of bots (argus, vega, vela, spica) on the worker. The constellation is the "AI coworker product" in embryo.
+
+Three "better than Viktor" wedges to design toward:
+
+1. **Trust-zone architecture as a default, not an upgrade.** Viktor's own FAQ admits Private Mode, RBAC, per-user token scoping, and sensitive-data handling are unbuilt and on the roadmap. Their workspace-wide shared-context model rules them out of any use case where PII can't be co-mingled across users. The multi-bot trust-zone work captured in the section above is the direct counter-positioning. Buyers whose compliance team blocks Viktor are the wedge.
+
+2. **Chat-first surface (Slack/Teams native).** Viktor's product surface is a chat client, not a web dashboard. The current Lightsei plan has no equivalent. If "AI coworker your team talks to" is the product, this needs to land somewhere on the long-term map.
+
+3. **Integration breadth.** Viktor advertises 3000+ tool connections. The current Lightsei plan addresses zero of these directly. The work would mostly be wrapping MCPs and prebuilt connectors; not novel, but it's volume, and Viktor is using it as a moat in their marketing.
+
+**Strategic direction decided 2026-05-17:** Reading (b), with a configure-your-team twist. Lightsei is the AI coworker product. Non-technical users are the primary buyer. Instead of Viktor's one-generalist-coworker model, the user assembles a team of specialized bots through the dashboard (and eventually a chat client surface). The SDK, backend, observability, and guardrails are internal infrastructure that powers and protects the team; most customers never see them directly. If a developer-shaped customer ever surfaces who wants the platform directly, that's a (a)-shaped second product down the road, not the main thing.
+
+What this sharpens:
+
+1. **Dashboard is the primary surface.** Eventually plus chat (Slack or Teams). SDK stays internal. Dashboard polish and IA matter more than SDK ergonomics.
+2. **No-code end to end.** Today `/agents/new` accepts a Python zip; the long-term path is "describe your team in plain English, get bots." Polaris-style generation is the seed. Phase 12C ("drop a README, get a team") extends it.
+3. **Pricing is per-seat or per-team, not per-event.** Viktor's $50/mo/seat is the closer reference; Sentry/Datadog usage-based pricing does not fit a non-technical buyer's mental model. Affects backend metering work later.
+4. **Trust-zone work is now P0, not nice-to-have.** Non-technical users won't configure isolation correctly on their own. The platform has to ship sensible presets ("this team can see customer data, this one can't, this one can talk to the internet"). Re-read the "Target customer shape" section above with this in mind.
+5. **Integration breadth becomes a real moat question.** Non-technical users expect Slack, Gmail, Stripe, HubSpot, Notion, Linear, Google Drive to "just work." Wrapping MCPs is the practical path; needs to land somewhere on the long-term map.
+
+None of this changes the current phase. Parking Lot entry mirrors this for the task list.
 
 ## Phase 10.6 demo marker (2026-05-01)
 

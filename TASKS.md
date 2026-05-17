@@ -231,6 +231,72 @@ Sampler: determinism on fixed seed, per-agent coverage, doesn't pick the same ru
 - Look at the next `polaris.cost_analysis` event (12D.2) — it now folds quality regressions into the waste callouts ("agent X quality dropped after recent change; consider revert").
 - 12D.3 is now unblocked: an applied recommendation can be quality-watched against the judge signal.
 
+## Phase 16: Trust zones as a first-class concept (now P0)
+
+Operationalizes the trust-zone work that landed as P0 in the 2026-05-17 strategic-direction decision. See MEMORY.md "Target customer shape" and "Competitive north star". The wedge against Viktor is having this shipped, with sensible presets, before non-technical users have to configure anything. Scope expanded 2026-05-17 to include the framework-level enforcement pieces (capability model, cross-zone dispatch block, handoff span) after a design pass on the canonical CRM-bot scenario showed that data tagging alone is not enough; the trust zones have to actually refuse forbidden operations, not just visualize them.
+
+Rough shape:
+
+1. **Sensitivity tags on agents and runs.** New `sensitivity_level` field on agents (`'public' | 'internal' | 'sensitive' | 'pii'`), inherited by runs by default. Backbone for everything else in the phase.
+2. **Declarative capability model on agents.** Each agent has an explicit allow-list like `['internet', 'connector:hubspot', 'connector:slack']`. The SDK refuses any operation not on the list. A CRM-zone agent literally cannot make an outbound HTTP call even if its code or a prompt injection tries. Trust-zone presets bundle the sensible default capability sets.
+3. **Cross-zone dispatch enforcement at the framework level.** Phase 11's dispatch primitives gain a zone check. Same-zone-only is the safe default; cross-zone dispatch requires explicit configuration on the source agent, not just an approval rule. This is the load-bearing piece that makes the one-way comm pattern actually one-way (a compromised or prompt-injected CRM bot cannot exfiltrate by dispatching to an internet-capable bot).
+4. **SDK-side redaction primitives.** `lightsei.redact()` helper with built-in detectors (email, phone, SSN-shape, card-shape), pluggable for custom patterns. Applied by default for agents tagged `'pii'`; opt-out per-call.
+5. **Optional "handoff" span the SDK records when a human translates between zones.** Lets cross-zone chains be reassembled in traces even though the actual data didn't cross the boundary. Without this, the audit story has a hole where the human sits.
+6. **Dashboard surfaces.** Sensitivity chips on agent tiles and detail pages. Constellation map color-codes nodes by zone and flags cross-zone edges in red. New `/zones` page showing the workspace topology.
+7. **Three trust-zone presets** ("Open team", "Standard team", "Compliance team") wired into the team-from-README flow so the default is the safe choice. The "Compliance team" preset is the canonical CRM-bot scenario as a starting template.
+
+Demo: generate a "Compliance team" from a fake CRM-shaped README. See the constellation render with PII agents isolated from internet-access agents. Try to wire a forbidden cross-zone edge in the editor, see it blocked at deploy time. Try to have the CRM bot dispatch to the internet bot at runtime, see the SDK refuse the call. Watch a human-mediated handoff (operator reads CRM-bot output, types sanitized prompt to internet bot) appear as a single connected chain in the trace view via the handoff span.
+
+Detailed sub-tasks deferred until promoted to NOW.
+
+## Phase 17: Self-serve onboarding (auth, signup, billing)
+
+Operationalizes "non-technical users need to self-serve" from the 2026-05-17 decision. Promoted from "deferred forever" to high-priority in the same update (see MEMORY.md "Things to NOT build" note).
+
+Rough shape: (1) magic-link or Google OAuth signup with no CLI involvement, workspace auto-created on signup; (2) Stripe billing per-seat, $50/mo as the reference (Viktor's price), free credits on signup so users can try before paying; (3) plan-tier limits wired to the existing backend metering. Demo: a fresh non-technical user signs up cold, deploys a team, hits a paywall, adds a card, continues.
+
+Detailed sub-tasks deferred until promoted to NOW.
+
+## Phase 18: Dashboard polish (the dashboard is the product)
+
+Operationalizes "dashboard is the primary surface" from the 2026-05-17 decision. Promoted from "deferred forever" to high-priority in the same update.
+
+Rough shape: (1) IA pass so top-level nav makes sense to a non-technical first-time user (My team, Activity, Integrations, Trust zones, Billing, Settings; developer surfaces tucked under Advanced); (2) first-run onboarding flow that walks a new user from empty dashboard to first deployed bot in five minutes; (3) visual design pass on the headline surfaces (constellation map, agent detail, team-from-README flow); (4) inline help and tooltips on technical terms. Demo: hand the product to someone non-technical with no explanation, watch where they get stuck, fix those things.
+
+Detailed sub-tasks deferred until promoted to NOW.
+
+## Phase 19: Chat surface (Slack first, then Teams)
+
+Operationalizes the "chat-first surface" wedge from the 2026-05-17 decision. Sequenced after Phase 18 because the dashboard product needs to be polished before a chat surface bolts on top.
+
+Rough shape: (1) Lightsei Slack app published to the App Directory, OAuth links a Slack workspace to a Lightsei workspace; (2) `@mention` Lightsei in a channel to address the team, Polaris-style orchestration routes the request to the right bot; (3) bot outputs (PDFs, dashboards, files) post into the channel; (4) per-channel and DM scoping respects Phase 16's trust zones. Microsoft Teams app is a follow-up using the same primitives. Demo: in a Slack channel, `@Lightsei pull our MRR for last month`, watch a bot in the team handle it inline.
+
+Detailed sub-tasks deferred until promoted to NOW.
+
+## Phase 20: Integration breadth (MCP wrappers + connector marketplace)
+
+Operationalizes the "integration breadth as moat" wedge from the 2026-05-17 decision. Viktor's 3000+ integrations is a marketing number; the v1 target is the priority set non-technical users actually use, then grow.
+
+Rough shape: (1) wrap a priority connector set (Slack, Gmail, Google Calendar, Google Drive, Notion, Linear, Jira, Asana, Stripe, HubSpot, Salesforce, GitHub, Figma, Confluence, Box, OneDrive, Outlook, Discord, Airtable, Webflow) as MCP-style integrations callable from bots; (2) browseable `/integrations` UI to connect, OAuth handled; (3) each integration declares which trust zones it can be used in (ties to Phase 16); (4) custom MCP support for the long tail (paste a URL or upload a manifest, get an integration). Demo: a non-technical user connects Slack, Gmail, and Stripe in 90 seconds, deploys a weekly-revenue-digest bot that uses all three.
+
+Detailed sub-tasks deferred until promoted to NOW.
+
+## Phase 21: Customer-facing chat widget + operator inbox
+
+Operationalizes the embeddable-widget-plus-master-bot-view piece of the CRM bot scenario captured in MEMORY.md "Target customer shape" (added 2026-05-17 after a design pass on the canonical CRM-bot scenario). Meaningful expansion of Lightsei's product surface: today the dashboard is for the customer's internal team, and Phase 19 adds Slack/Teams for the same audience. Phase 21 adds a surface where the customer's own end users (the customer of the customer) interact with the customer's Lightsei constellation.
+
+Rough shape:
+
+1. **Embeddable JS widget.** Snippet the customer pastes onto their own product. Renders a corner chat widget (Intercom-shaped). Conversations route to a designated support-shaped bot in the customer's constellation.
+2. **Trust-zone-aware conversation handling.** The customer-facing bot can only access connectors that are explicitly safe to expose externally. Phase 16 capability model and zone tags apply: a bot answering end users can be configured to look up PII for the user it's talking to, but the response is redacted before it leaves.
+3. **Escalation to operator inbox.** When the bot can't resolve a conversation (heuristics: explicit escalate-tool call, low confidence on output, repeated user follow-ups, or explicit user request for a human), the conversation lands in an operator inbox on the Lightsei dashboard.
+4. **Operator-side master-bot view.** Per-workspace inbox showing live customer conversations, escalations, and bot-suggested fixes. Operator can intervene (jump in as a human, "I'll take it from here"), apply a suggested fix, or mark resolved.
+5. **Polaris extended to incident response.** When an issue pattern repeats (same kind of escalation N times in a window), Polaris emits a `polaris.issue_pattern` event with a proposed fix: update the bot's system prompt, add a missing connector, expand a knowledge entry. Auto-apply gated on consent, same shape as 12D.3.
+
+Demo: paste the Lightsei widget snippet onto a fake customer site. End user opens the widget and asks a question the bot answers cleanly (deflected, no operator touch). Open another conversation, ask something the bot escalates. Watch it land in the operator inbox. Operator clicks "apply suggested fix" and watches the bot self-improve, with the next similar question deflecting without escalation.
+
+Detailed sub-tasks deferred until promoted to NOW.
+
 Phases 1-4 shipped 2026-04-25 (spine, cost-cap guardrail, Anthropic + streaming, hosted-readiness). Phase 5 shipped 2026-04-26 (PaaS-for-agents). Phase 6 shipped 2026-04-27 (Polaris orchestrator). Phase 7 shipped 2026-04-28 (output validation, advisory). Phase 8 shipped 2026-04-28 (blocking validators). Phase 9 shipped 2026-04-30 (notifications). Phase 10 shipped 2026-05-01 (GitHub integration: push-to-deploy + Polaris reads docs from the repo). Phase 11 starts the dispatch story: Polaris commands a team of executor agents instead of just emitting plans you read. Phase 11B turns the home page into a real command center while we're at it. Phase 12 is multi-provider so the team can pick the right model per task.
 
 Phases 1-4 shipped 2026-04-25. Production-readiness items (DB backups, tests + CI, rate limits + body cap, bot instance identity, secrets store) shipped 2026-04-26. See Done Log.
@@ -647,6 +713,8 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 - **In-browser zipping for /agents/new**. The drop zone shipped on 2026-05-04 only accepts `.zip` today — a non-engineer still has to right-click → Compress before they can deploy. Add JSZip (or an equivalent) so the page accepts a directory selection and zips client-side before posting. ~half day. Less critical than the .zip path was, but rounds out the "non-terminal user" UX.
 - **"Deploy from GitHub repo path" form on /agents/new**. Companion to the drop-zone path that landed 2026-05-04. Backend endpoint reusing Phase 10.3's `github_api.fetch_directory_zip`; UI form takes `repo + branch + folder` and posts. Lets users pick from repos they already have without zipping locally. ~half day.
 - **Backend cold-start fix for webhook delivery.** Surfaced during the Phase 10.6 demo on 2026-05-01: github.com's first push-webhook delivery after a period of inactivity timed out at GitHub's 10-second deadline because the Railway backend container had gone to sleep and the cold boot took ~9.6s. Once warm the same endpoint responded in 0.3s, so the code path is fine — the issue is operational. Three viable fixes, pick whichever fits the plan being run: (a) Railway service → Settings → set min instances ≥ 1 (or the equivalent "no sleep" toggle) so the backend stays warm. (b) Add a heartbeat ping from a cheap cron source (cron-job.org, GitHub Actions, even Polaris itself once it's ticking on schedule) hitting `/health` every minute or two — keeps the container warm without paying for an idle instance. (c) Pre-warm by hand before any expected webhook firing, which is the workaround we used during the demo (curl `/health` once, redeliver from github.com's UI). Until one of these lands, prod webhook delivery is timing-fragile: any push after a quiet stretch can silently drop on the floor with no retry.
+- **Multi-bot trust-zone support** (surfaced 2026-05-17, see MEMORY.md section "Target customer shape: multi-bot systems with trust zones"). Target customer profile: orgs running an internet-facing bot and a PII-accessing bot in the same workflow, separated by a one-way trust boundary with a human translating between them. Three implications to design for when their phases arrive: (1) an optional "handoff" span the SDK can record, so human-mediated chains can be stitched end-to-end in traces; (2) per-project, per-run, or per-agent sensitivity tagging with redaction or access controls applied accordingly (decide SDK-side vs. backend-side redaction before output-validation ships, since the choice changes the SDK contract); (3) an "issue or alert attached to a run" concept in the data model from the start, so the dashboard can grow into an automatic surfacing inbox (not just a passive log viewer). Promoted to Phase 16 + Phase 21 on the same day; this bullet stays as a pointer until those phases ship.
+- **"Better than Viktor" north star** (surfaced 2026-05-17, direction decided same day, see MEMORY.md section "Competitive north star: Viktor, but built security-first"). User has named Viktor (viktor.com, AI coworker in Slack with ~3000 integrations) as the closest direct analogue to Lightsei's long-term shape. Direction decided: Lightsei is the AI coworker product (not the underlying platform sold to developers), with a configure-your-team twist on Viktor's one-generalist model. Non-technical users assemble a team of specialized bots through the dashboard. SDK, backend, and observability stay as internal infrastructure. Three "better than Viktor" wedges to design toward when their phases arrive: (1) trust-zone architecture as default with sensible presets (now P0 because non-technical users won't configure isolation themselves; ties to the multi-bot trust-zone Parking Lot entry above); (2) chat-first surface (Slack or Teams native), currently absent from every phase; (3) integration breadth via MCP wrappers and prebuilt connectors, also absent from every phase. Don't promote any of this until the spine is done.
 - LangChain auto-patch
 - LangGraph auto-patch
 - Requests library auto-patch (for script bots making HTTP calls)
