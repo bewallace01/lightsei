@@ -1,0 +1,4 @@
+# worker/runner.py only needs httpx; everything else is stdlib.
+# Pinned to match backend/requirements.txt so we don't accidentally
+# pull two different versions into the same Railway project.
+httpx==0.27.2
