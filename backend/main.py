@@ -536,10 +536,19 @@ def on_startup() -> None:
     import jobs
     jobs.start_runner()
 
+    # Phase 14.3: periodic eval cron. Drops one eval_runs job per
+    # workspace per LIGHTSEI_EVAL_INTERVAL_S (default 3600s); the
+    # runner above picks them up and the judge-LLM verdict lands on
+    # run_evaluations.
+    import eval_runner
+    eval_runner.start_eval_cron()
+
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
+    import eval_runner
     import jobs
+    await eval_runner.stop_eval_cron()
     await jobs.stop_runner()
 
 

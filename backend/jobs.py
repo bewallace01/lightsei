@@ -57,6 +57,7 @@ def _load_default_handlers() -> None:
     """
     # Imported for side-effect registration.
     import agent_generator  # noqa: F401
+    import eval_runner  # noqa: F401
     import team_planner  # noqa: F401
 
 

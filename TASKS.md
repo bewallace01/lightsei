@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 14.3: periodic eval job (reuse generation_jobs runner)**
+> **Phase 14.4: quality signal endpoints + dashboard surface**
 
-14.1 (sampler + judge prompt + schema) and 14.2 (`run_evaluations` table + alembic 0026) shipped together 2026-05-17 — see Done Log. Tests cover both: 547 passing in 113s, including 22 new tests for the sampler / prompt / schema.
+14.1 (sampler + judge prompt + schema), 14.2 (`run_evaluations` table + alembic 0026), and 14.3 (periodic eval job + cron) all shipped 2026-05-17 — see Done Log. Full backend suite at 560 passing in 118s. End-to-end: cron runs hourly, drops one `eval_runs` job per workspace, the existing generation_jobs runner claims it, the handler samples completed runs, calls Sonnet as the judge, persists verdicts to `run_evaluations`, attributes judge spend to `lightsei.system` so the workspace monthly cap covers it.
 
-NOW is 14.3: wire the sampler to a periodic background job that actually runs the judge and writes to `run_evaluations`. Pattern: register `eval_runs` as a new `kind` in `backend/jobs.py`'s dispatch registry (same SKIP LOCKED + asyncio.to_thread shape from 12C.6.2). Handler calls `eval_sampler.pick_sample`, builds the prompt with `build_judge_prompt`, calls `anthropic.Anthropic().messages.create(**prompt)`, extracts the verdict from the tool_use block, writes a `run_evaluations` row, records cost on the `lightsei.system` Run row. Cron-style enqueue: at FastAPI startup, register an asyncio task that drops one `eval_runs` job per hour (configurable via `LIGHTSEI_EVAL_INTERVAL_S`, default 3600).
+NOW is 14.4: surface what the judge wrote. Two backend endpoints — `GET /workspaces/me/agents/{name}/quality?days=7` for one agent (verdict counts + recent bads with reasons + trend) and `GET /workspaces/me/quality` for the workspace rollup. Dashboard: a Quality column on /agents (green pill if all-good, amber if borderline present, red if any bad within the window) and a Quality section on /agents/{name} showing the verdict breakdown + the most recent bads so the user can see _why_ a bot got flagged.
 
 ## Phase 12C: drop a README, get a team
 
@@ -206,7 +206,7 @@ No DB writes, no LLM calls — pure shaping logic, same pattern as `agent_genera
 
 New table backed by SQLAlchemy model in `backend/models.py`: `id` (uuid pk), `run_id` (FK to runs, ON DELETE CASCADE), `workspace_id` (FK, indexed), `agent_name` (string, indexed), `judge_model` (string), `verdict` (string: 'good'/'borderline'/'bad'), `reasons` (jsonb), `confidence` (numeric), `judge_tokens_in`/`judge_tokens_out` (int), `judge_cost_usd` (numeric), `created_at`. Indexes: `(workspace_id, agent_name, created_at DESC)` for dashboard surfacing, `(workspace_id, verdict, created_at DESC)` for "recent bads" queries.
 
-### 14.3 — Periodic eval job (reuse generation_jobs runner)
+### 14.3 — Periodic eval job (reuse generation_jobs runner) ✅ shipped 2026-05-17
 
 Register `eval_runs` as a new `kind` in `backend/jobs.py`'s dispatch registry (same SKIP LOCKED + asyncio.to_thread pattern from 12C.6.2). Handler calls `eval_sampler.pick_sample`, runs the judge for each, writes a `run_evaluations` row. Cron-style enqueue: at startup register an asyncio task that drops one `eval_runs` job per hour (configurable via `LIGHTSEI_EVAL_INTERVAL_S`, default 3600). Judge spend lands on `lightsei.system` like generation spend, so the workspace budget gate already applies; no separate cap in v1.
 
@@ -666,6 +666,18 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 14.3: periodic eval job + cron enqueuer
+
+Wires the pure sampler from 14.1 into the in-process job runner from 12C.6.2. End-to-end: cron drops one `eval_runs` job per workspace per hour → existing runner claims it via SKIP LOCKED → handler samples completed runs → calls Sonnet as judge → persists verdicts to `run_evaluations` → attributes judge spend to `lightsei.system` so the workspace monthly cap covers it.
+
+- [x] **`backend/eval_runner.py` (new).** `run_eval_job(session, workspace_id, payload)` handler: pre-checks workspace's ANTHROPIC_API_KEY + budget cap (same shape as `agent_generator.run_agent_generation_job` for consistency); calls `eval_sampler.pick_sample`; for each sampled run, builds the prompt via `eval_sampler.build_judge_prompt`, calls `anthropic.Anthropic().messages.create(**prompt)`, extracts the verdict from the `submit_verdict` tool_use block, writes a `RunEvaluation` row; accumulates token totals + writes one `lightsei.system` Run row at the end for the cost rollup. Per-sample failures (Anthropic error, missing run, agent deleted, judge returned plain text instead of calling the tool) increment `errored` but don't stop the cycle — next sample is tried.
+- [x] **Cron enqueuer in the same module.** `start_eval_cron()` / `stop_eval_cron()` mirror `jobs.start_runner` / `jobs.stop_runner`. Loop sleeps `LIGHTSEI_EVAL_INTERVAL_S` (default 3600s, floored at 10s so a misconfigured tiny value can't hammer). Enqueues immediately on first iteration so fresh deploys get evals within minutes rather than waiting a full hour. Per-workspace: one `eval_runs` row per workspace per cycle (`enqueue_eval_job_for_workspace`).
+- [x] **Wired into FastAPI lifecycle.** `eval_runner.start_eval_cron()` added to `main.py`'s `on_startup` (after `jobs.start_runner()`). `eval_runner.stop_eval_cron()` added to `on_shutdown` (before `jobs.stop_runner()` so in-flight eval_runs rows aren't orphaned). `jobs._load_default_handlers()` imports `eval_runner` so the `eval_runs` handler is registered before the runner starts claiming jobs.
+
+**Verification:** 13 new tests in `backend/tests/test_eval_runner.py` — pre-check skips (no_anthropic_key, over_budget, no_samples), happy-path writes a RunEvaluation row with all the right fields including cost, judge spend lands on lightsei.system on /cost, multi-sample, resilience to one Anthropic error (other samples still evaluated), resilience to non-tool response (no row written — does not default to 'good'), idempotency across repeated handler invocations (sampler's NOT EXISTS holds), cron interval env reading with bad-value fallback + 10s floor, enqueuer drops correctly-shaped row, cron sweeps all workspaces, handler is wired into the dispatch registry. Full backend suite: 560 passed in 118s, 0 regressions outside the new files.
+
+**Not done in this slice:** the quality endpoints + dashboard surface (14.4), SDK helper for 12D.3 (14.5), phase demo (14.7).
 
 ### 2026-05-17 — Phase 14.1 + 14.2: sampler + judge prompt + run_evaluations schema
 
