@@ -24,6 +24,7 @@ from ._commands import (
 from ._context import get_run_id
 from ._cost_insights import get_cost_insights as _impl_get_cost_insights
 from ._instance import TooManyInstancesError
+from ._quality_signal import get_quality_signal as _impl_get_quality_signal
 from ._secrets import get_secret as _impl_get_secret
 from ._track import track
 from .errors import LightseiError, LightseiPolicyError
@@ -56,6 +57,7 @@ __all__ = [
     "shutdown",
     "check_policy",
     "get_cost_insights",
+    "get_quality_signal",
     "get_run_id",
     "get_secret",
     "on_command",
@@ -229,6 +231,28 @@ def get_cost_insights() -> list[dict[str, Any]]:
     essential — the bot's tick should never block on this.
     """
     return _impl_get_cost_insights(_client)
+
+
+def get_quality_signal(
+    agent_name: str, *, days: int = 7,
+) -> Optional[dict[str, Any]]:
+    """Fetch this workspace's quality summary for one agent (Phase 14).
+
+    Returns the dict the dashboard's /agents/{name} Quality section
+    renders: `agent_name`, `days`, `verdict_counts`, `total_evaluations`,
+    `recent_bads`, `trend`. The verdict source is the eval runner's
+    judge LLM (Phase 14.3).
+
+    Fails *closed*: returns `None` on any error (unreachable backend,
+    non-200, malformed body, SDK not initialized). Unlike
+    `get_cost_insights` — where `[]` is a fine no-op — quality has a
+    real "no evals yet" state (zero counts) that's meaningfully
+    different from a fetch failure. Returning `None` on failure forces
+    the caller to handle the distinction; matters most for
+    auto-tuners (Phase 12D.3) that must never tune blindly when the
+    signal is unavailable.
+    """
+    return _impl_get_quality_signal(_client, agent_name, days=days)
 
 
 def send_command(

@@ -28,6 +28,9 @@ def fake_backend(
     heartbeat_409_detail: str | None = None,
     cost_insights: list[dict] | None = None,
     cost_insights_status: int = 200,
+    quality_signal: dict | None = None,
+    quality_signal_status: int = 200,
+    quality_signal_body_raw: bytes | None = None,
 ) -> Iterator[str]:
     """Fake Lightsei backend.
 
@@ -47,6 +50,31 @@ def fake_backend(
                     return
                 items = cost_insights if cost_insights is not None else []
                 body = json.dumps({"insights": items}).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif "/quality" in self.path and self.path.startswith(
+                "/workspaces/me/agents/"
+            ):
+                # Phase 14.5: per-agent quality signal endpoint.
+                # Path shape: /workspaces/me/agents/{name}/quality?days=N.
+                if quality_signal_status != 200:
+                    self.send_error(quality_signal_status)
+                    return
+                if quality_signal_body_raw is not None:
+                    body = quality_signal_body_raw
+                else:
+                    payload = quality_signal if quality_signal is not None else {
+                        "agent_name": "stub",
+                        "days": 7,
+                        "verdict_counts": {"good": 0, "borderline": 0, "bad": 0},
+                        "total_evaluations": 0,
+                        "recent_bads": [],
+                        "trend": {"delta_pp": 0.0, "direction": "unknown"},
+                    }
+                    body = json.dumps(payload).encode()
                 self.send_response(200)
                 self.send_header("content-type", "application/json")
                 self.send_header("content-length", str(len(body)))
@@ -288,6 +316,133 @@ def test_get_cost_insights_empty_when_uninitialized():
     # Note: the autouse fixture resets the client after each test, so by
     # the time this test starts, _client is uninitialized.
     assert lightsei.get_cost_insights() == []
+
+
+# ---------- Phase 14.5: get_quality_signal ---------- #
+
+
+def test_get_quality_signal_returns_dict():
+    """Happy path: backend returns a verdict summary; SDK passes it
+    through unchanged. 12D.3's auto-tuner consumes the same shape the
+    dashboard's /agents/{name} Quality section renders."""
+    payload = {
+        "agent_name": "argus",
+        "days": 7,
+        "verdict_counts": {"good": 8, "borderline": 1, "bad": 1},
+        "total_evaluations": 10,
+        "recent_bads": [
+            {
+                "run_id": "abcd1234",
+                "agent_name": "argus",
+                "reasons": ["off-task"],
+                "confidence": 0.9,
+                "judge_model": "claude-sonnet-4-6",
+                "created_at": "2026-05-17T10:00:00+00:00",
+                "run_started_at": "2026-05-17T09:59:55+00:00",
+            },
+        ],
+        "trend": {"delta_pp": 5.0, "direction": "up"},
+    }
+    with fake_backend([], quality_signal=payload) as url:
+        lightsei.init(api_key="k", agent_name="argus", base_url=url)
+        got = lightsei.get_quality_signal("argus")
+        assert got == payload
+
+
+def test_get_quality_signal_passes_days_param():
+    """The `days` kwarg should land as a query param so callers can
+    ask for a different window without rewriting the URL themselves."""
+    with fake_backend([], quality_signal={
+        "agent_name": "argus", "days": 30,
+        "verdict_counts": {"good": 0, "borderline": 0, "bad": 0},
+        "total_evaluations": 0, "recent_bads": [],
+        "trend": {"delta_pp": 0.0, "direction": "unknown"},
+    }) as url:
+        lightsei.init(api_key="k", agent_name="argus", base_url=url)
+        got = lightsei.get_quality_signal("argus", days=30)
+        assert got is not None
+        assert got["days"] == 30
+
+
+def test_get_quality_signal_fails_closed_on_404():
+    """Returns None (NOT an empty dict) on non-200 — caller distinguishes
+    'backend flapping' from a real 'no evals yet' empty pool. Matters for
+    12D.3's auto-tuner: never auto-tune when the quality signal is
+    unavailable."""
+    with fake_backend([], quality_signal_status=404) as url:
+        lightsei.init(api_key="k", agent_name="argus", base_url=url)
+        assert lightsei.get_quality_signal("argus") is None
+
+
+def test_get_quality_signal_fails_closed_on_malformed_body():
+    """A 200 with non-dict body (e.g. a list, or a string) means
+    something is wrong upstream — return None rather than feeding garbage
+    to the caller."""
+    with fake_backend([], quality_signal_body_raw=b"[1, 2, 3]") as url:
+        lightsei.init(api_key="k", agent_name="argus", base_url=url)
+        assert lightsei.get_quality_signal("argus") is None
+
+
+def test_get_quality_signal_fails_closed_when_missing_verdict_counts():
+    """A 200 with a dict that doesn't have verdict_counts is also
+    treated as malformed — every real response carries that field."""
+    with fake_backend([], quality_signal={"agent_name": "argus"}) as url:
+        lightsei.init(api_key="k", agent_name="argus", base_url=url)
+        assert lightsei.get_quality_signal("argus") is None
+
+
+def test_get_quality_signal_none_when_uninitialized():
+    """Calling before init() returns None — matches the fail-closed
+    contract. Caller never has to guard with `if lightsei.initialized()`."""
+    assert lightsei.get_quality_signal("argus") is None
+
+
+def test_get_quality_signal_url_encodes_agent_name():
+    """Agent names can in principle contain `/` or other URL-special
+    characters; the helper must percent-encode so the request lands on
+    the right path."""
+    captured: list[str] = []
+
+    @contextmanager
+    def capture_path_backend():
+        import http.server
+        import socket
+        import threading
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                captured.append(self.path)
+                body = json.dumps({
+                    "agent_name": "x", "days": 7,
+                    "verdict_counts": {"good": 0, "borderline": 0, "bad": 0},
+                    "total_evaluations": 0, "recent_bads": [],
+                    "trend": {"delta_pp": 0.0, "direction": "unknown"},
+                }).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *a, **kw):
+                pass
+
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        srv = http.server.HTTPServer(("127.0.0.1", port), H)
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            yield f"http://127.0.0.1:{port}"
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    with capture_path_backend() as url:
+        lightsei.init(api_key="k", agent_name="argus", base_url=url)
+        lightsei.get_quality_signal("weird/name")
+    assert any("weird%2Fname" in p for p in captured), captured
 
 
 def test_get_secret_before_init_raises():

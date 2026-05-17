@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 14.5: SDK helper for 12D.3 consumption**
+> **Phase 14.7: demo Phase 14 on prod, close it, promote 12D.3**
 
-14.1-14.4 all shipped 2026-05-17 — full pipeline live: sampler picks runs, judge writes verdicts, dashboard renders them inline as chips on /agents and a recent-bads breakdown on /agents/{name}. Full backend suite at 577 passing in 122s. The signal exists; the next thing that needs to read it is the auto-tuner that lands in 12D.3.
+14.1-14.5 all shipped 2026-05-17. 14.6 folded into the prior sub-tasks (59 new tests cover the surfaces 14.6 was meant to test, no gap left). The whole continuous-eval pipeline is live: cron picks runs hourly → Sonnet rates them → verdicts land in `run_evaluations` → dashboard renders Quality chips on /agents and a recent-bads section on /agents/{name} → SDK ships `lightsei.get_quality_signal` fail-closed so 12D.3's auto-tuner can read the signal safely.
 
-NOW is 14.5: ship `lightsei.get_quality_signal(agent_name, days=7)` in the SDK so 12D.3 (when it lands) can read the same shape the dashboard renders without reinventing the call. Same fail-open pattern as `lightsei.get_cost_insights` from 12D.2 — a SDK helper that just wraps the existing `/workspaces/me/agents/{name}/quality` endpoint with the workspace API key the bot already has on hand. After this, only 14.6 (additional tests if any) + 14.7 (the demo) remain before Phase 14 closes and 12D.3 is unblocked.
+NOW is the Phase 14 demo (user-driven). After the next eval cycle completes on prod (~1 hour after the worker picks up the latest deploy): walk through /agents and confirm Quality pills are populated; click into a bot that has a bad and confirm the judge's reasons render; then watch the next `polaris.cost_analysis` event fold quality regressions into its waste callouts. Once the demo passes, Phase 14 closes and **12D.3 (auto-optimization with explicit consent) is unblocked** — that's the next phase after 14.7.
 
 ## Phase 12C: drop a README, get a team
 
@@ -214,11 +214,13 @@ Register `eval_runs` as a new `kind` in `backend/jobs.py`'s dispatch registry (s
 
 Backend: `GET /workspaces/me/agents/{name}/quality?days=7` returns `{verdict_counts: {good, borderline, bad}, recent_bads: [{run_id, reasons, confidence, occurred_at}, ...], trend_7d}` for one agent; `GET /workspaces/me/quality` for the workspace rollup. Dashboard: new "Quality" column on /agents (green chip with count if all good, amber if any borderline, red if any bad in the window). New section on /agents/{name} showing the verdict breakdown + the most recent bad evaluations with their judge reasons, so the user can see _why_ the bot is flagged.
 
-### 14.5 — SDK helper for 12D.3 consumption
+### 14.5 — SDK helper for 12D.3 consumption ✅ shipped 2026-05-17
 
 `lightsei.get_quality_signal(agent_name, days=7)` in the SDK so the auto-tuner (when 12D.3 lands) can read the same shape the dashboard renders. Same fail-open pattern as `lightsei.get_cost_insights` from 12D.2.
 
-### 14.6 — Tests
+### 14.6 — Tests ✅ folded into 14.1 + 14.3 + 14.4 + 14.5
+
+The original list (sampler determinism, schema strictness, runner state machine with stub judge, endpoint authz + rollup math) was covered by the tests that landed alongside each sub-task: 22 tests in `test_eval_sampler.py` (14.1), 13 in `test_eval_runner.py` (14.3), 17 in `test_quality_signal.py` (14.4), 7 in `test_basic.py` quality block (14.5). Total: 59 new Phase 14 tests; no additional coverage gap once those merged. Skipped a separate sub-task commit for the same reason 12C.6.8 was a single sub-task — tests live with the code they cover.
 
 Sampler: determinism on fixed seed, per-agent coverage, doesn't pick the same run twice within a window. Judge schema: forced tool_choice produces the expected dict; missing fields surface as a judge-level failure rather than a `verdict=good` default. Background job: state-machine tests through the existing `test_jobs.py` harness with a stub judge. Endpoints: authz, rollup math, cross-workspace 404.
 
@@ -666,6 +668,18 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 14.5: SDK get_quality_signal helper
+
+The read-side wrapper for 12D.3's eventual auto-tuner. Same shape as `lightsei.get_cost_insights` from 12D.2 — a thin SDK helper that wraps the `/workspaces/me/agents/{name}/quality` endpoint with the bot's existing api_key — but flipped to fail-*closed*: returns `None` on any error rather than an empty dict, so callers can distinguish "backend flapping" from a real "no evals yet" empty pool. Matters for 12D.3 specifically: never auto-tune blindly when the quality signal is unavailable.
+
+- [x] **`sdk/lightsei/_quality_signal.py` (new).** `get_quality_signal(client, agent_name, *, days=7)` → `dict | None`. URL-encodes the agent name, passes `days` as a query param. Treats SDK-not-initialized + network errors + non-200 + non-JSON + dict-missing-verdict_counts as failure (all return `None`).
+- [x] **`sdk/lightsei/__init__.py` exposes the wrapper.** Public name `lightsei.get_quality_signal(agent_name, *, days=7)` with a docstring that explicitly calls out the fail-*closed* contract vs `get_cost_insights`'s fail-*open* contract — different defaults are easy to get wrong without a heads-up.
+- [x] **Added to `__all__`.**
+
+**Verification:** 7 new tests in `sdk/tests/test_basic.py` covering happy path, days query param wiring, fail-closed on 404, fail-closed on malformed body (raw bytes that don't parse), fail-closed when verdict_counts missing, returns None when uninitialized, URL-encodes weird agent names. Extended the `fake_backend` context manager with `quality_signal`/`quality_signal_status`/`quality_signal_body_raw` knobs to back those tests. Full SDK suite: 47 passed in 13s. Backend untouched, 577 passing.
+
+**Not done in this slice:** 14.7 (Phase 14 demo — user-driven, needs an eval cycle to run on prod). 14.6 was the planned "additional tests" sub-task; folded into 14.1+14.3+14.4+14.5 since those covered the items 14.6 was meant to test.
 
 ### 2026-05-17 — Phase 14.4: quality signal endpoints + dashboard surface
 
