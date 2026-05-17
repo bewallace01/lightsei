@@ -9,9 +9,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 > **Phase 14.1: sampler + judge prompt + schema (pure module)**
 
-Phase 12C closed today; 12D.1 + 12D.2 had already shipped (the 12D.2 spec heading just never got check-marked). 12D.3 (auto-optimization with consent) is gated on Phase 14 (continuous eval), which now has a spec (see below) and starts at 14.1.
-
-14.1 is the same shape as `agent_generator.py` v1: a pure module (`backend/eval_sampler.py`) with `pick_sample(session, workspace_id, n)` returning the run_ids to evaluate, and `build_judge_prompt(run, agent)` composing the judge's LLM turn with a forced `submit_verdict` tool_choice. No DB writes, no LLM calls — the storage / runner / endpoints land in 14.2-14.4 once the schema is settled. **Before implementation, the open design questions called out in the Phase 14 intro (sampling rate, judge model choice, judge depth, per-run vs per-agent, cost cap) need resolution** — otherwise 14.1 ships heuristics that 14.2 has to rework.
+Phase 12C closed 2026-05-17; 12D.1 + 12D.2 already shipped. 12D.3 (auto-optimization with consent) gates on Phase 14 (continuous eval), which now has a full spec (see below) with all five design questions resolved this session — pick rule, judge model, judge depth, storage shape, cost cap all locked. 14.1 is unblocked: build the pure module (`backend/eval_sampler.py`) with the two functions in the spec, no DB writes, no LLM calls. 14.2 (the `run_evaluations` table) lands once the schema in 14.1 is committed.
 
 ## Phase 12C: drop a README, get a team
 
@@ -186,11 +184,21 @@ Layer 5 of MEMORY.md's "Five guardrail layers": a background-sampling judge-LLM 
 
 The validators from Phase 7/8 catch _hard_ failures (the bot's output doesn't parse, contains a banned phrase, fails a schema check). Phase 14 catches _soft_ failures: the output parsed and got delivered, but is worse than the model's prior bar. Validators are a contract; the judge is a critic.
 
-**Open design questions to settle in 14.1, listed so future-me doesn't sleepwalk past them.** Sampling rate (cost-weighted? recency-weighted? per-agent cap?) — affects judge spend. Judge model (always Opus for consistency vs same-as-bot for apples-to-apples) — affects cost + signal. Judge depth (final output only vs plan + tool calls + output) — affects detection power. Per-run vs per-agent storage — affects how granular the dashboard can be. Cost cap (separate budget for judge spend vs rolled into workspace cap) — affects how aggressive the sampler can be.
+**Design choices settled 2026-05-17 (do not re-debate without a reason; switch triggers per choice below).**
+- **Sampling rate: per-agent round-robin, default 3 / agent / hour** via `LIGHTSEI_EVAL_PER_AGENT_PER_CYCLE`. Quiet bots get 100% coverage; chatty bots are sampled. Within an agent's pool, bias toward most recent. Switch trigger: per-agent caps stop catching meaningful drift on the chatty-but-cheap bots, or a single workspace's judge spend exceeds 5% of its monthly LLM total — at which point reconsider cost-weighted sampling.
+- **Judge model: always `claude-sonnet-4-6`** (the current Sonnet). Same model for every verdict so scores are comparable across agents and over time. Avoids both the "Opus is unfairly harsh on Haiku output" risk and the "Haiku rates Haiku as fine" risk. Switch trigger: a newer Sonnet ships, or a workspace's bots all use Opus and the Sonnet judge produces verdicts the user can demonstrate are wrong.
+- **Judge depth: plan + final output.** Plan tells the judge what the bot intended; output tells it what was delivered. Tool-call traces are deliberately omitted from v1 to keep the judge prompt bounded. Switch trigger: a real case where the bot's plan + output look fine but the tool-call sequence was wrong — promote to plan + tool calls + output.
+- **Storage: per-run rows in `run_evaluations`** (not pre-rolled). Postgres handles 10 bots × 3 samples × 24h × 365d ≈ 263k rows / workspace / year without breaking a sweat, and the rollup queries are cheap on the indexes specced in 14.2. Switch trigger: a workspace's table crosses ~10M rows and queries slow down (likely a 5+ year horizon).
+- **Cost cap: rolled into the existing workspace monthly cap.** Judge spend attributes to the `lightsei.system` synthetic agent (same as generation calls do today). Workspace budget gates everything together; one knob to tune. Switch trigger: a user complains that judge spend ate their generation budget — split with a separate env var then.
 
 ### 14.1 — Sampler + judge prompt + schema (pure module)
 
-New `backend/eval_sampler.py`. Two pure functions: `pick_sample(session, workspace_id, n)` returns the run_ids to evaluate this cycle (initial heuristic: 50% cost-weighted recency + 50% per-agent round-robin so a chatty bot doesn't starve quiet ones), and `build_judge_prompt(run, agent)` composes the input + output + agent's system prompt + the validators that ran into a single LLM turn. Forced tool_choice on a `submit_verdict` tool that returns `{verdict: 'good'|'borderline'|'bad', reasons: [string, ...], confidence: 0..1}`. No DB writes, no LLM calls — pure shaping logic, same pattern as `agent_generator.py` v1.
+New `backend/eval_sampler.py`. Two pure functions:
+
+- `pick_sample(session, workspace_id, per_agent=3)` returns up to `per_agent * n_agents` `run_id`s to evaluate this cycle. Implementation: for each non-`lightsei.*` agent in the workspace, query the last hour's completed runs that don't yet have a `run_evaluations` row, sort by `ended_at DESC`, take up to `per_agent`. No cross-agent re-weighting; the per-agent cap _is_ the fairness mechanism. `per_agent` defaults from `LIGHTSEI_EVAL_PER_AGENT_PER_CYCLE` (default 3).
+- `build_judge_prompt(run, agent)` composes the judge's single LLM turn: the agent's role + system prompt, the run's `polaris.plan` event payload (or whichever event embodies the bot's "plan" for non-orchestrator agents — `tick` events for executors), and the run's final output event. No tool-call traces in v1. Forced `tool_choice={"type": "tool", "name": "submit_verdict"}` on a `SUBMIT_VERDICT_TOOL` whose schema is `{verdict: enum(good, borderline, bad), reasons: array(string, min 1, max 5), confidence: number(0..1)}`. Schema-strict so a malformed response surfaces as a judge failure rather than a default-good verdict.
+
+No DB writes, no LLM calls — pure shaping logic, same pattern as `agent_generator.py` v1. Tests assert prompt content, schema validation, and that `pick_sample` honors per-agent caps + skips already-evaluated runs.
 
 ### 14.2 — `run_evaluations` table + alembic migration
 
