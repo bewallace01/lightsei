@@ -1,83 +1,67 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { setSession, signup } from "../api";
 import Logo from "../Logo";
-
-type Result = {
-  apiKey: string;
-  apiKeyPrefix: string;
-};
+import { requestMagicLink, startGoogleOAuth } from "../api";
 
 export default function SignupPage() {
-  const router = useRouter();
   const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [workspaceName, setWorkspaceName] = useState("");
+  const [busy, setBusy] = useState<"magic" | "google" | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState<Result | null>(null);
-  const [copied, setCopied] = useState(false);
+  const [sent, setSent] = useState<string | null>(null);
 
-  const onSubmit = async (e: React.FormEvent) => {
+  const sendMagicLink = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
-    setBusy(true);
+    setBusy("magic");
     try {
-      const res = await signup(email, password, workspaceName);
-      setSession(res.session_token, res.user, res.workspace);
-      setDone({ apiKey: res.api_key.plaintext, apiKeyPrefix: res.api_key.prefix });
+      await requestMagicLink(email);
+      setSent(email);
     } catch (err) {
       setError((err as Error).message);
     } finally {
-      setBusy(false);
+      setBusy(null);
     }
   };
 
-  if (done) {
+  const signUpWithGoogle = async () => {
+    setError(null);
+    setBusy("google");
+    try {
+      const { authorization_url } = await startGoogleOAuth("/");
+      window.location.href = authorization_url;
+    } catch (err) {
+      setError((err as Error).message);
+      setBusy(null);
+    }
+  };
+
+  if (sent) {
     return (
       <main className="min-h-screen flex flex-col items-center justify-center px-6">
-        <div className="w-full max-w-md">
+        <div className="w-full max-w-sm text-center">
           <div className="mb-6 flex justify-center">
             <Logo size={28} />
           </div>
-          <h1 className="text-2xl font-semibold tracking-tight text-center mb-2">
-            You&apos;re in.
+          <h1 className="text-2xl font-semibold tracking-tight mb-3">
+            Check your email
           </h1>
-          <p className="text-sm text-gray-500 text-center mb-8">
-            Save your API key below. It&apos;s shown once.
+          <p className="text-sm text-gray-500 mb-3">
+            We sent a sign-in link to <span className="font-medium text-gray-900">{sent}</span>.
           </p>
-          <div className="border border-amber-300 bg-amber-50 rounded-lg p-5">
-            <div className="text-[10px] uppercase tracking-wider font-semibold text-amber-800 mb-1.5">
-              api key
-            </div>
-            <code className="block font-mono text-sm break-all text-amber-900 mb-3">
-              {done.apiKey}
-            </code>
-            <button
-              type="button"
-              onClick={async () => {
-                await navigator.clipboard.writeText(done.apiKey);
-                setCopied(true);
-              }}
-              className="text-sm text-accent-700 hover:text-accent-800 font-medium"
-            >
-              {copied ? "copied ✓" : "copy to clipboard"}
-            </button>
-          </div>
-          <pre className="mt-6 text-xs bg-gray-50 border border-gray-200 rounded-lg p-4 overflow-x-auto font-mono text-gray-700">
-{`pip install -e ./sdk openai
-export LIGHTSEI_API_KEY="${done.apiKey}"
-python examples/demo_bot.py`}
-          </pre>
+          <p className="text-sm text-gray-500 mb-8">
+            Clicking it will create your workspace and sign you in. The link is good for 15 minutes.
+          </p>
           <button
             type="button"
-            onClick={() => router.push("/")}
-            className="mt-6 w-full bg-accent-600 hover:bg-accent-700 text-white rounded-md py-2.5 text-sm font-medium transition-colors"
+            onClick={() => {
+              setSent(null);
+              setEmail("");
+            }}
+            className="text-sm text-accent-700 hover:text-accent-800 font-medium"
           >
-            continue to dashboard
+            Use a different email
           </button>
         </div>
       </main>
@@ -94,22 +78,9 @@ python examples/demo_bot.py`}
           Create your workspace
         </h1>
         <p className="text-sm text-gray-500 text-center mb-8">
-          Free, no credit card.
+          Free to start, $5 of credits on us, no credit card.
         </p>
-        <form onSubmit={onSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1.5">
-              Workspace name
-            </label>
-            <input
-              value={workspaceName}
-              onChange={(e) => setWorkspaceName(e.target.value)}
-              required
-              placeholder="acme"
-              autoFocus
-              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent-500/30 focus:border-accent-500 transition-shadow"
-            />
-          </div>
+        <form onSubmit={sendMagicLink} className="space-y-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1.5">
               Email
@@ -119,22 +90,10 @@ python examples/demo_bot.py`}
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               required
+              autoFocus
+              placeholder="you@company.com"
               className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent-500/30 focus:border-accent-500 transition-shadow"
             />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1.5">
-              Password
-            </label>
-            <input
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              required
-              minLength={8}
-              className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-accent-500/30 focus:border-accent-500 transition-shadow"
-            />
-            <p className="text-xs text-gray-500 mt-1">at least 8 characters</p>
           </div>
           {error && (
             <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-md p-2.5">
@@ -143,19 +102,43 @@ python examples/demo_bot.py`}
           )}
           <button
             type="submit"
-            disabled={busy}
+            disabled={busy !== null}
             className="w-full bg-accent-600 hover:bg-accent-700 text-white rounded-md py-2.5 text-sm font-medium disabled:opacity-50 transition-colors"
           >
-            {busy ? "creating…" : "create account"}
+            {busy === "magic" ? "sending…" : "send magic link"}
           </button>
         </form>
-        <p className="text-sm text-gray-500 mt-6 text-center">
+        <div className="flex items-center my-6">
+          <div className="flex-1 h-px bg-gray-200" />
+          <span className="px-3 text-xs uppercase tracking-wider text-gray-400">
+            or
+          </span>
+          <div className="flex-1 h-px bg-gray-200" />
+        </div>
+        <button
+          type="button"
+          onClick={signUpWithGoogle}
+          disabled={busy !== null}
+          className="w-full border border-gray-300 hover:bg-gray-50 text-gray-800 rounded-md py-2.5 text-sm font-medium disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+        >
+          {busy === "google" ? "opening…" : "continue with Google"}
+        </button>
+        <p className="text-sm text-gray-500 mt-8 text-center">
           Already have an account?{" "}
           <Link
             href="/login"
             className="text-accent-600 hover:text-accent-700 font-medium"
           >
             Log in
+          </Link>
+        </p>
+        <p className="text-xs text-gray-400 mt-4 text-center">
+          Developer using the SDK?{" "}
+          <Link
+            href="/signup/advanced"
+            className="hover:text-gray-600 underline"
+          >
+            Get an API key directly
           </Link>
         </p>
       </div>

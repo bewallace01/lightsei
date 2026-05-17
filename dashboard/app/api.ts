@@ -229,6 +229,94 @@ export async function login(
   return await r.json();
 }
 
+// ---------- Phase 17.6: magic-link + Google OAuth helpers ---------- //
+
+export type AuthSuccess = {
+  user: SessionUser;
+  workspace: SessionWorkspace;
+  session_token: string;
+  session_expires_at?: string;
+  is_new_user?: boolean;
+  redirect_after?: string;
+};
+
+export async function requestMagicLink(email: string): Promise<void> {
+  // Backend always returns 200 (no-leak contract); we only surface
+  // genuine network or 5xx failures to the user.
+  const r = await fetch(`${API_URL}/auth/magic-link/request`, {
+    method: "POST",
+    cache: "no-store",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email }),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.detail || `magic-link request failed (${r.status})`);
+  }
+}
+
+export async function consumeMagicLink(token: string): Promise<AuthSuccess> {
+  const r = await fetch(`${API_URL}/auth/magic-link/consume`, {
+    method: "POST",
+    cache: "no-store",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(
+      typeof body.detail === "string"
+        ? body.detail
+        : `magic-link consume failed (${r.status})`,
+    );
+  }
+  return await r.json();
+}
+
+export async function startGoogleOAuth(
+  redirectAfter?: string,
+): Promise<{ authorization_url: string; state: string }> {
+  const qs = redirectAfter
+    ? `?redirect_after=${encodeURIComponent(redirectAfter)}`
+    : "";
+  const r = await fetch(`${API_URL}/auth/google/start${qs}`, {
+    cache: "no-store",
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(
+      typeof body.detail === "string"
+        ? body.detail
+        : `google sign-in unavailable (${r.status})`,
+    );
+  }
+  return await r.json();
+}
+
+export async function completeGoogleOAuth(
+  code: string,
+  state: string,
+): Promise<AuthSuccess> {
+  const params = new URLSearchParams({ code, state });
+  const r = await fetch(
+    `${API_URL}/auth/google/callback?${params.toString()}`,
+    { cache: "no-store" },
+  );
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    const detail = (body as { detail?: unknown })?.detail;
+    if (detail && typeof detail === "object" && "message" in detail) {
+      throw new Error(String((detail as { message: string }).message));
+    }
+    throw new Error(
+      typeof detail === "string"
+        ? detail
+        : `google sign-in failed (${r.status})`,
+    );
+  }
+  return await r.json();
+}
+
 export async function logout(): Promise<void> {
   const token = getSessionToken();
   if (!token) return;

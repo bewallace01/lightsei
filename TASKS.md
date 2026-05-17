@@ -7,13 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 17.4: Stripe integration (customer-on-workspace-create + checkout-session + webhook + portal) — deferred**
+> **Phase 17.7: dashboard billing UI on /account (depends on 17.4)**
 
-17.5 shipped out of order to keep momentum while 17.4 sits parked (Stripe integration genuinely benefits from fresh attention given signing-secret verification, webhook idempotency, and customer-portal session work). 17.5 + the magic-link / OAuth signin paths already give a usable demo: a fresh user signs up, gets $5 of free credits, runs through team-from-readme, hits a clean 402 when exhausted. Stripe lands when there's a paying customer to charge.
+17.5 + 17.6 shipped 2026-05-17 — magic-link + Google sign-in UI is live, the paywall fires when free credits run out. The whole non-technical-user demo arc works EXCEPT for the upgrade-to-paid step, which needs 17.4 (Stripe).
 
-17.1-17.3 + 17.5 shipped 2026-05-17 (schema, both auth paths, paywall). Backend at 724 tests passing.
-
-NOW is 17.6 — the dashboard signup + login UI — since 17.4 is the next-blocker for that work (the upgrade-to-paid button needs the Checkout session endpoint to exist). 17.6 wires the magic-link request form + Google OAuth button + the magic-link / Google callback pages against the 17.2 + 17.3 backend endpoints; the existing API-key signup form moves to /login/advanced with a pointer to the SDK init flow.
+17.4 (Stripe integration) is the next blocker. 17.7 (billing UI on /account) hangs off 17.4's endpoints. Once 17.4 lands, 17.7 is a small UI sub-task (credits-remaining + upgrade button + manage-subscription button). NOW points at 17.4 since it's the one with external setup work (Stripe dashboard configuration, webhook signing secret, customer-portal config).
 
 ## Phase 12C: drop a README, get a team
 
@@ -347,15 +345,16 @@ Call sites: anywhere an LLM-charged op runs. `agent_generator.run_agent_generati
 
 Free credits decrement on every Run row creation. `lightsei.system` cost (generation + judge) and bot-run cost both come out of the same pool — keeps the accounting in one column.
 
-### 17.6 — Dashboard signup + login UI
+### 17.6 — Dashboard signup + login UI ✅ shipped 2026-05-17
 
-Replaces the existing API-key signup form on `/login` (or wherever it lives) with:
+Replaced the password-only `/login` and `/signup` pages with magic-link-first flows.
 
-- Email field + "send magic link" button → POST `/auth/magic-link/request`, render "check your email" state.
-- Google OAuth button → opens `/auth/google/start` in a new tab (or same tab with return URL).
-- New `/auth/magic-link?token=...` page (consumes the token, sets session, redirects to `/`).
-- New `/auth/google/callback?code&state` page (passes through to backend, sets session, redirects).
-- Existing API-key signup form moved to `/login/advanced` with an explanatory blurb pointing developers at the SDK init flow.
+- `/login` — email + "send magic link" primary CTA, "continue with Google" secondary, password sign-in moved to `/login/advanced` (subtle link). "Check your email" success state.
+- `/signup` — same shape as `/login`, "$5 of credits on us, no credit card" subtitle, API-key signup form moved to `/signup/advanced`.
+- `/auth/magic-link?token=...` — consumes token via POST `/auth/magic-link/consume`, sets session, redirects to `/` (with a 700ms success-state beat). Error state links back to `/login` to request a fresh link.
+- `/auth/google/callback?code&state` — passes through to backend `GET /auth/google/callback`, sets session, redirects per `redirect_after` (default `/`). Handles `?error=access_denied` cleanly.
+- `/login/advanced` + `/signup/advanced` — the old password-based forms, preserved verbatim, with "back to magic-link" link and explanatory copy pointing developers at the SDK init flow.
+- `api.ts` — added `requestMagicLink`, `consumeMagicLink`, `startGoogleOAuth`, `completeGoogleOAuth`, and shared `AuthSuccess` type.
 
 ### 17.7 — Dashboard billing UI
 
@@ -870,6 +869,22 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 17.6: dashboard signup + login UI
+
+The non-technical-user signup flow specced in Phase 17 is now wired end-to-end on the frontend. A user can land on /signup or /login, type their email, and either get a magic link or kick off Google OAuth. After consuming the link, they land on the dashboard signed in with a fresh workspace ($5 of free credits per 17.1's backfill). The only step still gated by 17.4 (Stripe) is the upgrade-to-paid button on /account (17.7).
+
+- **`dashboard/app/api.ts`**: added `requestMagicLink`, `consumeMagicLink`, `startGoogleOAuth`, `completeGoogleOAuth`, and a shared `AuthSuccess` type. Mirrors the existing `login` / `signup` helper shape so the page code can reach for `setSession(res.session_token, res.user, res.workspace)` the same way.
+- **`/login` rewritten**: email field + "send magic link" primary CTA + "continue with Google" secondary, separated by an "or" divider. "Check your email" success state with a "use a different email" affordance. Subtle "developer using the SDK? sign in with a password" footnote linking to `/login/advanced`.
+- **`/login/advanced`** (new): the previous email + password form, preserved verbatim, with "back to magic-link sign-in" link and a one-sentence explanation that this is for developers who initialised the SDK with a workspace password.
+- **`/signup` rewritten**: same shape as `/login`, "free to start, $5 of credits on us, no credit card" subtitle. "Check your email" state explains the link will create a workspace + sign them in.
+- **`/signup/advanced`** (new): the previous API-key signup form (workspace name + email + password + API-key reveal), preserved verbatim, with copy explaining this is for developers who want an API key directly.
+- **`/auth/magic-link?token=...`** (new): client-side route wrapped in Suspense (App Router requires it for useSearchParams). Pulls `token` from the URL, POSTs to `/auth/magic-link/consume`, sets the session in localStorage, shows a "welcome to Lightsei" / "you're in" beat for 700ms, then routes to `/`. Distinguishes new-user vs returning-user copy via the `is_new_user` flag the backend returns. Failure state ("link is invalid or expired") links back to `/login`.
+- **`/auth/google/callback?code&state`** (new): same shape as the magic-link page. Reads `code` + `state` from the URL, calls the backend `GET /auth/google/callback` to do the exchange, sets the session, redirects to `res.redirect_after` (which the backend echoes from the start-flow). Handles `?error=access_denied` with a clean "you cancelled the Google sign-in" message rather than a stack trace.
+
+**Verification**: `npx tsc --noEmit` clean (no output). `npx next build` builds all six new routes statically (`/login`, `/login/advanced`, `/signup`, `/signup/advanced`, `/auth/magic-link`, `/auth/google/callback`). Backend auth test files re-run clean: 42 passed in 4.22s.
+
+**What this unblocks**: the demo arc — a fresh non-technical user signs up cold via magic link or Google, gets $5 of free credits, runs through team-from-readme, hits a clean 402 when exhausted. The only remaining gap is 17.4 (Stripe) for the upgrade-to-paid path on /account (17.7), which is the next-blocker for the full Phase 17 demo.
 
 ### 2026-05-17 — Phase 17.5: paywall middleware + credit decrement (shipped out of order)
 
