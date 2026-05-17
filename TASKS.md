@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 17.2: magic-link auth backend (Resend integration + request/consume endpoints + new-user-creates-workspace path)**
+> **Phase 17.3: Google OAuth backend (auth-code + PKCE flow + new-user-creates-workspace path)**
 
-17.1 shipped 2026-05-17 — alembic 0030 lands `email_verified` + `auth_provider` + `google_user_id` on `users`; `stripe_customer_id` + `stripe_subscription_id` + `plan_tier` + `free_credits_remaining_usd` on `workspaces`; new `email_signin_tokens` table. Backfilled every existing workspace to `plan_tier='free'` + `free_credits_remaining_usd=5.00`. 18 new tests cover the validator helpers, default behavior, partial-unique constraints, and the token table round-trip. Full backend suite at 672 passing.
+17.1 + 17.2 shipped 2026-05-17. Magic-link is the first dashboard-side auth surface: a fresh user types their email, gets a Resend-delivered link, clicks, lands on /  signed in with a fresh workspace + $5 free credits. Existing API-key signup users get promoted to email_verified on first magic-link consume. Backend at 688 tests passing.
 
-NOW is 17.2: magic-link auth backend. Three pieces: (a) new `backend/email.py` pure module wrapping Resend's API for transactional sends (configurable via `LIGHTSEI_RESEND_API_KEY` env var, with a fake-send mode for tests that just captures the email); (b) `POST /auth/magic-link/request {email}` — generates a single-use token, hashes it, inserts an `email_signin_tokens` row with 15-minute TTL, sends a Resend email with the unhashed token in a magic URL. Rate-limited via the existing `limits` machinery (~5/hour per email). Always 200 (don't leak existence on unknown emails); (c) `POST /auth/magic-link/consume {token}` — looks up by hashed token, checks not-consumed + not-expired, marks consumed, either signs in the matching user OR creates a fresh user+workspace pair (`auth_provider='magic_link'`, `email_verified=true`, `free_credits_remaining_usd=5.00`). Returns a session token.
+NOW is 17.3: Google OAuth backend. Standard OAuth 2.0 authorization-code flow with PKCE so a leaked redirect-URL can't be replayed. Two endpoints: (a) `GET /auth/google/start` — generates a PKCE verifier + state, stores both in a short-lived signed cookie or table, returns a redirect to Google's auth endpoint with the configured client_id + scopes; (b) `GET /auth/google/callback?code&state` — verifies the state, exchanges the code for tokens, fetches userinfo for `sub` + `email` + `email_verified`, matches a returning user by `google_user_id` (exact) or falls back to verified-email match; on no match creates a fresh user+workspace pair (`auth_provider='google_oauth'`, `email_verified=True` iff Google says so). Configured via `LIGHTSEI_GOOGLE_CLIENT_ID` + `LIGHTSEI_GOOGLE_CLIENT_SECRET` env vars.
 
 ## Phase 12C: drop a README, get a team
 
@@ -308,7 +308,7 @@ Single alembic migration (0030) adding:
 
 Indexes: `(workspaces.stripe_customer_id)` unique, `(email_signin_tokens.email, created_at DESC)` for the rate-limit query.
 
-### 17.2 — Magic-link auth backend
+### 17.2 — Magic-link auth backend ✅ shipped 2026-05-17
 
 Two endpoints + the Resend integration in `backend/email.py` (new pure module).
 
@@ -868,6 +868,20 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 17.2: magic-link auth backend
+
+First dashboard-side auth surface. A fresh user types their email on `/login`, gets a Resend-delivered link in their inbox, clicks, lands on `/` signed in with a fresh workspace + $5 free credits. Existing API-key signup users get promoted to email_verified on first magic-link consume. No password, no API key auto-created — non-technical-user path is purely email + click.
+
+- [x] **`backend/email_provider.py` (new).** Pure module wrapping Resend's `/emails` API. `send_magic_link(email, token, dashboard_url)` either POSTs to Resend (when `LIGHTSEI_RESEND_API_KEY` is set + `LIGHTSEI_EMAIL_FAKE_CAPTURE` is not) or appends to an in-process `_captured` list so tests + dev assert without hitting the network. HTML + plain-text body together (HTML for clients that render it, plain text as fallback + what shows in Resend's preview dashboard). Filename is `email_provider.py` not `email.py` — Python's stdlib already owns `email` and shadowing it breaks transitive imports (httpx → urllib → http.client → email.parser).
+- [x] **`POST /auth/magic-link/request {email}`.** Always-200 contract (don't leak whether the email is registered). Two rate-limits stacked: per-IP via the existing `limit_signup_attempt` (5/min) for brute-force protection, and per-email via a query against `email_signin_tokens` (`MAGIC_LINK_MAX_PER_HOUR=5`) so a malicious sender can't spam a single inbox by rotating IPs. Inserts a hashed row with 15-minute TTL (`MAGIC_LINK_TTL`), sends an email with the unhashed token in `{dashboard_url}/auth/magic-link?token=...`. Best-effort email send — exception logged but doesn't break the 200 contract.
+- [x] **`POST /auth/magic-link/consume {token}`.** Same single-use semantics as the existing API-key auth path. Hashes the input, looks up the row; rejects unknown / expired / already-consumed with the same 422 message (no probe-existence path). Marks consumed_at BEFORE doing anything else so parallel POSTs with the same token can't both succeed. New-user path: creates Workspace (with `_workspace_name_for_signup_email` → "alice's workspace"), seeds default validators, creates User (`auth_provider='magic_link'`, `email_verified=True`, password_hash is a placeholder that explicitly won't verify so /auth/login can't be back-doored). Existing-user path: signs in, promotes to `email_verified=True` (doesn't rewrite `auth_provider`). Returns `{user, workspace, session_token, session_expires_at, is_new_user}`.
+- [x] **`MagicLinkRequestIn` + `MagicLinkConsumeIn`** Pydantic schemas at the top of main.py alongside SignupIn / LoginIn.
+- [x] **`EmailSigninToken` added to main.py's model imports** so the new endpoints can use it directly.
+
+**Verification:** 16 new tests in `backend/tests/test_magic_link_auth.py` covering capture mode (works without API key set, env var forces capture even with key set, URL trailing-slash normalized), request endpoint (inserts token + sends, lowercases email, always-200 on unknown, per-email rate-limit silent-throttles 6th, validates email format), consume endpoint (creates new user+workspace with the 17.1 defaults, signs in existing user without duplicating, single-use, unknown-token 422, expired-token 422, marks consumed_at, returned session_token authenticates against /auth/me, schema rejects short tokens). Full backend suite: 688 passed in 139s (was 672, +16 new). 0 regressions.
+
+**What this unblocks:** 17.3 (Google OAuth) follows the same shape — different signup path, same new-user-creates-workspace + sign-in-existing-user pattern. 17.6 (dashboard signup UI) wires the magic-link request form + token-consume page against these endpoints.
 
 ### 2026-05-17 — Phase 17.1: schema backbone for auth + billing
 

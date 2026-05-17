@@ -48,6 +48,7 @@ from models import (
     Deployment,
     DeploymentBlob,
     DeploymentLog,
+    EmailSigninToken,
     Event,
     EventValidation,
     GenerationJob,
@@ -193,6 +194,15 @@ class SignupIn(BaseModel):
 class LoginIn(BaseModel):
     email: EmailStr
     password: str
+
+
+# Phase 17.2: magic-link auth.
+class MagicLinkRequestIn(BaseModel):
+    email: EmailStr
+
+
+class MagicLinkConsumeIn(BaseModel):
+    token: str = Field(min_length=8, max_length=256)
 
 
 class CommandEnqueueIn(BaseModel):
@@ -3619,6 +3629,209 @@ def logout(
     if auth.session.revoked_at is None:
         auth.session.revoked_at = utcnow()
     return {"status": "ok"}
+
+
+# ---------- Phase 17.2: magic-link auth ---------- #
+
+
+# How many magic-link requests we accept for a single email per hour.
+# Tight enough that a malicious sender can't spam someone's inbox,
+# loose enough that a confused user clicking "send again" 2-3 times
+# in a row still works.
+MAGIC_LINK_MAX_PER_HOUR = 5
+
+# How long a fresh token is valid. 15 minutes is plenty for the user
+# to switch to their email and click; short enough that a leaked
+# email backup doesn't hand attackers active sign-in.
+MAGIC_LINK_TTL = timedelta(minutes=15)
+
+
+def _hash_magic_token(token: str) -> str:
+    """Same sha256-hex pattern keys.hash_token uses. Defined here to
+    avoid coupling the magic-link flow to the API-key key derivation —
+    if either changes the other shouldn't have to follow."""
+    import hashlib as _hashlib
+    return _hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _dashboard_base_url() -> str:
+    """Where the magic-link URL points. Env-overridable so local dev
+    can use localhost; defaults to the prod dashboard."""
+    return os.environ.get(
+        "LIGHTSEI_DASHBOARD_URL", "https://app.lightsei.com",
+    )
+
+
+def _workspace_name_for_signup_email(email: str) -> str:
+    """A friendly default workspace name from the user's email local
+    part — `alice@example.com` → "alice's workspace". The user can
+    rename via /account afterward."""
+    local = email.split("@", 1)[0]
+    return f"{local}'s workspace"
+
+
+@app.post("/auth/magic-link/request")
+def request_magic_link(
+    body: MagicLinkRequestIn,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 17.2: kick off a magic-link sign-in.
+
+    Always returns 200 — don't leak whether the email is registered.
+    Rate-limited per-IP (existing limit_signup_attempt machinery)
+    AND per-email (count in the last hour vs MAGIC_LINK_MAX_PER_HOUR)
+    so a malicious sender can't spam a single inbox via rotating IPs.
+
+    On success, inserts an email_signin_tokens row with a 15-minute
+    TTL and sends a Resend email containing the unhashed token in a
+    magic URL. The dashboard's /auth/magic-link page POSTs the
+    token back to /auth/magic-link/consume.
+    """
+    import email_provider as _email_mod
+
+    limit_signup_attempt(request)
+    email_addr = body.email.lower()
+    now = utcnow()
+
+    # Per-email rate-limit: count tokens we've issued in the last hour.
+    # An hour is enough that 5 attempts feels generous; a malicious
+    # sender hitting the limit means the user already has 5 fresh
+    # magic links in their inbox.
+    cutoff = now - timedelta(hours=1)
+    recent_count = session.execute(
+        select(func.count(EmailSigninToken.token_hash)).where(
+            EmailSigninToken.email == email_addr,
+            EmailSigninToken.created_at >= cutoff,
+        )
+    ).scalar_one()
+    if recent_count >= MAGIC_LINK_MAX_PER_HOUR:
+        # Same always-200 contract so we don't leak that this email
+        # is being targeted.
+        return {"status": "ok"}
+
+    # Generate token + insert hashed row. Same plain-token-in-URL +
+    # hashed-row-in-DB pattern the existing API keys use.
+    plaintext = _stdlib_secrets.token_urlsafe(32)
+    token_hash = _hash_magic_token(plaintext)
+    session.add(EmailSigninToken(
+        token_hash=token_hash,
+        email=email_addr,
+        created_at=now,
+        expires_at=now + MAGIC_LINK_TTL,
+    ))
+    session.flush()
+
+    try:
+        _email_mod.send_magic_link(
+            email=email_addr,
+            token=plaintext,
+            dashboard_url=_dashboard_base_url(),
+        )
+    except Exception:
+        # Best-effort email send. Logged inside the module. We still
+        # return 200 to preserve the no-leak contract; user can
+        # retry from the dashboard if the email never arrives.
+        import logging as _logging
+        _logging.getLogger("lightsei.auth").warning(
+            "magic-link request: send failed for %s — token still "
+            "valid via direct backend POST",
+            email_addr,
+        )
+    return {"status": "ok"}
+
+
+@app.post("/auth/magic-link/consume")
+def consume_magic_link(
+    body: MagicLinkConsumeIn,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 17.2: consume a magic-link token, sign in (or create) the
+    user, return a session.
+
+    422 on unknown / expired / consumed token (don't distinguish — the
+    user can't action the difference and we don't want token-validity
+    probes to leak existence). 200 with a session token on success.
+
+    New-user path creates a User + Workspace pair the same way the
+    existing /auth/signup does, minus the password (auth_provider =
+    'magic_link', email_verified = True since they proved control of
+    the inbox). No API key is auto-created — non-technical users don't
+    need one; developers can generate one from /account.
+    """
+    limit_login_attempt(request)
+    token_hash = _hash_magic_token(body.token)
+    now = utcnow()
+
+    row = session.get(EmailSigninToken, token_hash)
+    if row is None or row.consumed_at is not None or row.expires_at <= now:
+        # Single 422 covers all the rejection paths so the client
+        # can't probe for "exists but expired" vs "never existed".
+        raise HTTPException(
+            status_code=422,
+            detail="magic-link token is invalid or expired — request a new one",
+        )
+
+    # Mark consumed before doing anything else so a parallel POST with
+    # the same token gets rejected by the next check. Single-use.
+    row.consumed_at = now
+    session.flush()
+
+    email_addr = row.email
+    user = session.execute(
+        select(User).where(User.email == email_addr)
+    ).scalar_one_or_none()
+    is_new_user = user is None
+
+    if user is None:
+        # Fresh signup via magic link. Workspace gets the same starting
+        # state Phase 17.1's backfill applied to existing rows: free
+        # tier + $5 in credits. No API key auto-generated — magic-link
+        # users land on the dashboard, not the SDK.
+        ws = Workspace(
+            id=str(uuid.uuid4()),
+            name=_workspace_name_for_signup_email(email_addr),
+            created_at=now,
+            plan_tier="free",
+            free_credits_remaining_usd=Decimal("5.00"),
+        )
+        session.add(ws)
+        session.flush()
+        seed_default_validators(session, ws.id, now)
+
+        user = User(
+            id=str(uuid.uuid4()),
+            email=email_addr,
+            # No password — magic-link users can't fall back to the
+            # password login. A non-empty placeholder so the NOT NULL
+            # constraint passes; it's not a real bcrypt hash so the
+            # /auth/login verify_password will fail-closed for them.
+            password_hash="magic-link-only:no-password",
+            workspace_id=ws.id,
+            created_at=now,
+            email_verified=True,
+            auth_provider="magic_link",
+        )
+        session.add(user)
+        session.flush()
+    else:
+        # Existing user signing in via magic link — promote them to
+        # verified if they weren't already. Doesn't change the original
+        # auth_provider; the user keeps whatever path created them.
+        if not user.email_verified:
+            user.email_verified = True
+
+    sess_row, sess_plain = _create_session(session, user)
+    ws = session.get(Workspace, user.workspace_id)
+
+    return {
+        "user": _serialize_user(user),
+        "workspace": _serialize_workspace(ws) if ws else None,
+        "session_token": sess_plain,
+        "session_expires_at": sess_row.expires_at.isoformat(),
+        "is_new_user": is_new_user,
+    }
 
 
 @app.get("/auth/me")
