@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 12C.6 demo: drop the Lightsei README on prod, watch the team appear without timeouts**
+> **Phase 12C.6 demo (resume): set the missing workspace secrets, watch the team tick + push a commit to see the dispatch chain**
 
-12C.6.1-12C.6.8 are done (see Done Log): job model + migration, in-process runner, both endpoints refactored to 202 + job_id, poll endpoint with cross-workspace 404, dashboard polling behind the existing helper signatures, and 525 backend tests passing including a new test_jobs.py covering the runner state machine + poll endpoint and full coverage of the kick-off-and-poll path through the existing endpoint tests.
+12C.6.1-12C.6.8 are done (see Done Log). The 12C.6.5 demo against prod on 2026-05-16 surfaced a long-standing prerequisite that was never on the 12C plan: there was no worker process running anywhere on Railway, so the team-from-README bots deployed-but-queued and never executed. Fixed today (see Done Log "Deploy worker as a Railway service") — now all 4 team bots (argus / vega / vela / spica) plus polaris are claimed + spawned by the new `lightsei-worker` Railway service.
 
-NOW is the 12C.6 demo: deploy to prod, drop the Lightsei README on `/agents/team-from-readme`, confirm plan returns inside the timeout, confirm bulk generate completes for all bots without CORS errors. Once green, NOW reverts to 12C.5 (the full team-from-README flow demo including deploy + dispatch chain).
+To close the 12C.6 demo: (1) set the missing workspace secrets via the new /account "Suggested secrets" panel (GITHUB_TOKEN, OPENAI_API_KEY, ANTHROPIC_API_KEY — whatever the team-from-README success view flagged for your team); (2) wait one tick interval and confirm /agents shows last_seen + runs > 0 + non-stale status for each bot; (3) push any commit to bewallace01/lightsei to fire the GitHub webhook into polaris; (4) watch polaris dispatch out to argus / vega / vela / spica on the constellation map. Once that chain fans out, NOW reverts to 12C.5 (or 12C closes — 12C.5 was really "the team-from-README flow works end to end" and that's what this demo proves).
 
 ## Phase 12C: drop a README, get a team
 
@@ -588,6 +588,7 @@ Open candidates for after the constellation's first dispatch chain ships:
 
 Ideas that are good but not now. Add freely. Do not work on these until their phase arrives or you've explicitly decided to promote one.
 
+- **Wire `lightsei-worker` Railway service to GitHub auto-deploy** (surfaced 2026-05-17). The worker was created via `railway add --service lightsei-worker` (empty service) and code pushed via `railway up --path-as-root worker --service lightsei-worker --ci`. Tried to use `railway add --repo bewallace01/lightsei` at creation time — kept returning "Unauthorized" even though `railway whoami` showed Bailey authenticated. Likely needs the GitHub OAuth flow that only runs through Railway's dashboard. Action: Railway dashboard → lightsei-worker service → Settings → Source → Connect Repo (`bewallace01/lightsei`, branch `main`, root directory `worker`). Once wired, `git push origin main` rebuilds the worker the same way it rebuilds backend + dashboard. Until then, every worker code change needs `cd worker && railway up --path-as-root . --service lightsei-worker --ci` from a shell with Railway CLI auth. ~5-10 minutes of dashboard clicks; not urgent because the worker is stable and rarely changes, but you'll forget the upload step the first time you tweak runner.py without this.
 - **Streaming progress on long generator endpoints**. `/workspaces/me/teams/plan` + `/workspaces/me/agents/generate` both hold a connection open for the full Opus call (60-120s, doubled when validation retry fires). Promoted to a punch-list item in 12C.6 because it's blocking the demo; revisit here if the same shape shows up on the next long-running endpoint we add. The general fix is the same: emit SSE chunks or periodic keepalive bytes from any endpoint whose median latency exceeds 30s.
 - **Multiple workspaces per account** (promoted from a 2026-05-01 nav-redesign conversation). Today the data model is one workspace per user — session, API keys, and every workspace-scoped row assumes it. Real multi-workspace requires a `workspace_members` join table (user ↔ workspace + role), an "active workspace" pointer on the session, list/create/switch endpoints, and a UI to drive them via the new header dropdown. The dropdown shell shipped on 2026-05-01 already has a place for "switch workspace" + "+ new workspace" entries. Worth careful design on invites, billing-per-workspace, and what happens to API keys at switch time before starting.
 - **In-browser zipping for /agents/new**. The drop zone shipped on 2026-05-04 only accepts `.zip` today — a non-engineer still has to right-click → Compress before they can deploy. Add JSZip (or an equivalent) so the page accepts a directory selection and zips client-side before posting. ~half day. Less critical than the .zip path was, but rounds out the "non-terminal user" UX.
@@ -614,6 +615,28 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Deploy worker as a Railway service (Phase 5 prod gap, surfaced during 12C.6 demo)
+
+Polaris had been stale for a day and every team-from-README bot was sitting in `queued` state on /agents/<name>. Root cause was a long-standing infrastructure gap that 12C.6 just happened to surface: the worker (`worker/runner.py`) was running on Bailey's laptop pointed at api.lightsei.com, not on prod. Lid-close took every bot offline at once. Lightsei's prod had a backend + a dashboard but no actual bot-execution process anywhere.
+
+- [x] **worker/Procfile + worker/requirements.txt added.** Procfile says `worker: python runner.py`. requirements.txt pins `httpx==0.27.2` to match backend's version (everything else runner.py uses is stdlib). Minimum scaffolding so Railway's railpack auto-detects the build.
+- [x] **`lightsei-worker` Railway service created.** Via CLI: `railway add --service lightsei-worker --variables LIGHTSEI_WORKER_TOKEN=<copied-from-backend> --variables LIGHTSEI_BASE_URL=http://beacon-backend.railway.internal:8000`. Internal Railway domain (not the public api.lightsei.com) so we don't pay for a public-internet hop on every poll. Backend's `RAILWAY_PRIVATE_DOMAIN` is still `beacon-backend.railway.internal` (from before the rename) — that's the form to use, don't normalize it.
+- [x] **First deploy via `railway up --path-as-root worker --service lightsei-worker --ci`.** Build took ~30s (Python image + pip install httpx). Within 4 seconds of deploy completion, worker claimed argus / vega / vela / spica from the team-from-README team, plus a fourth deploy. Logs show: `claimed deployment=... agent=vela`, `fetching bundle`, `creating venv`, `pip install`, `starting bot.py`, `pid=...`, and heartbeats flowing back to the backend.
+
+**One unresolved follow-up (parked):** the worker service doesn't auto-redeploy on `git push origin main` because the CLI's `--repo bewallace01/lightsei` flag kept failing with "Unauthorized" during service creation — likely needs Railway's GitHub OAuth flow that only runs through the dashboard. Today the worker runs the code I uploaded directly via `railway up`; future worker changes need a manual `cd worker && railway up --path-as-root . --service lightsei-worker --ci` until this is wired. See Parking Lot.
+
+**Note on hosting decision:** doesn't change MEMORY.md's "single-host worker for v1" call (see Runtime decision 2026-04-27) — it just specifies *which* single host. We're still on the same architecture; the prod state addendum in MEMORY.md captures the move from laptop to Railway. Phase 5B (managed isolation runtime) is still the next switch.
+
+### 2026-05-17 — /account: suggested-secrets panel + extract shared guidance module
+
+Two-part change driven by Bailey wanting "something on /account that reminds which keys need to be added" after seeing the missing-secrets list on team-from-README deploy success was transient (gone after navigation).
+
+- [x] **`dashboard/app/secret_guidance.ts` (new).** Shared module owning `SECRET_GUIDANCE` (what / where / url for each well-known secret), `guidanceFor()` fallback for secret names not in the map, and `SUGGESTED_SECRET_ORDER` for stable display ordering. Replaces the inline copy that landed in team-from-readme/page.tsx earlier today.
+- [x] **/account "Suggested secrets" panel.** Above the existing add-secret form. For each entry in `SUGGESTED_SECRET_ORDER`: green `✓ set` / amber `not set` pill (computed against the workspace's current secrets list, no extra backend call), expandable details (what / where / deep-link to provider's create-key page), and a `use this name in the form below →` button on unset rows that prefills `setSecretName(name)` + scrolls the form into view. Header pill shows `N of M set` for at-a-glance coverage.
+- [x] **team-from-readme/page.tsx refactored** to import from the shared module instead of the inline copy.
+
+**Not yet:** the panel still shows "well-known secrets bots typically want" rather than "specifically YOUR bots need these." Real per-bot lists would require persisting `needs_workspace_secrets` on Agent rows from the team-planner pipeline (currently only lives on the plan, not the persisted bot). Punted as too much scope for the user-friction problem at hand; the panel + the deploy-success view together cover the workflow.
 
 ### 2026-05-16 — Phase 12C.6.8: tests for the async-job machinery
 
