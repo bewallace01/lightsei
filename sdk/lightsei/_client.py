@@ -427,6 +427,10 @@ class _Client:
             self._command_poller = None
             self._chat_poller = None
             self._heartbeat = None
+            # Phase 16.3: clear the capability cache too so tests
+            # don't leak granted/denied state across runs.
+            self._capabilities_cache = []
+            self._capabilities_loaded = False
             self._event_rejected_count = 0
 
 

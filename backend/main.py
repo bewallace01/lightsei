@@ -4603,7 +4603,16 @@ def instance_heartbeat(
         if body.sdk_version is not None:
             inst.sdk_version = body.sdk_version
     session.flush()
-    return _serialize_instance(inst, now)
+    # Phase 16.3: echo the agent's current capability list back so the
+    # SDK can refresh its cache on every heartbeat. Dashboard edits to
+    # `capabilities` propagate within one heartbeat interval (default
+    # 10s) — no separate fetch needed.
+    response = _serialize_instance(inst, now)
+    agent_row = session.get(Agent, (workspace_id, agent_name))
+    if agent_row is not None:
+        response["capabilities"] = list(agent_row.capabilities or [])
+        response["sensitivity_level"] = agent_row.sensitivity_level
+    return response
 
 
 @app.get("/agents/{agent_name}/instances")

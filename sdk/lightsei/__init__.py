@@ -111,6 +111,18 @@ def init(
         heartbeat_interval=heartbeat_interval,
     )
     _auto_patch()
+    # Phase 16.3: pull the agent's capability list once so the gate
+    # is active on the user's first outbound call. The httpx patch
+    # fails open until this fires (`has_capability` returns True when
+    # the cache hasn't loaded yet), so a fast `httpx.get()` immediately
+    # after init() still works — the gate engages as soon as the
+    # initial fetch returns, then refreshes on every heartbeat
+    # response (in _instance.py).
+    try:
+        from ._capabilities import fetch_capabilities
+        fetch_capabilities(_client)
+    except Exception as e:
+        _log.debug("lightsei capabilities fetch failed: %s", e)
 
 
 def _auto_patch() -> None:
@@ -129,6 +141,16 @@ def _auto_patch() -> None:
         patch_gemini()
     except Exception as e:
         _log.warning("lightsei gemini auto-patch failed: %s", e)
+    # Phase 16.3: trust-zone capability gate on outbound HTTP. Wraps
+    # httpx.Client.send + httpx.AsyncClient.send so a bot without
+    # 'internet' can't make outbound network calls. SDK's own backend
+    # calls bypass via host whitelist (see _capabilities.is_lightsei_
+    # internal_url). Idempotent — dev-reload doesn't double-wrap.
+    try:
+        from .integrations.httpx_patch import patch_httpx
+        patch_httpx()
+    except Exception as e:
+        _log.warning("lightsei httpx auto-patch failed: %s", e)
 
 
 def emit(

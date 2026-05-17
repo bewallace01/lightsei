@@ -121,3 +121,20 @@ class _HeartbeatPoster:
                 "lightsei heartbeat non-2xx: %s %s",
                 r.status_code, r.text[:200],
             )
+            return
+        # Phase 16.3: refresh the capability cache from the heartbeat
+        # response. Backend echoes the agent's current capability list
+        # on every heartbeat so dashboard edits propagate within one
+        # heartbeat interval (default 10s) without a separate fetch.
+        try:
+            body = r.json()
+        except Exception:
+            return
+        if isinstance(body, dict):
+            try:
+                from ._capabilities import update_capabilities
+                update_capabilities(self._client, body.get("capabilities"))
+            except Exception as e:
+                logger.debug(
+                    "lightsei capability cache refresh failed: %s", e,
+                )

@@ -260,6 +260,7 @@ def send_command(
 
     Raises LightseiError on transport failure or non-2xx response.
     """
+    from ._capabilities import check_capability
     from .errors import LightseiError
 
     if not target_agent:
@@ -271,6 +272,12 @@ def send_command(
             "send_command called before lightsei.init() — "
             "no HTTP client available"
         )
+    # Phase 16.3: trust-zone capability gate. Refuses dispatches from
+    # agents that haven't been granted send_command. Fails open before
+    # init() completes (check_capability returns silently when the cache
+    # isn't loaded yet) so a send_command immediately after init still
+    # works while the initial fetch is in flight.
+    check_capability(client, "send_command")
 
     chain_id = (
         dispatch_chain_id

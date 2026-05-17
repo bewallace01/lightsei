@@ -31,6 +31,8 @@ def fake_backend(
     quality_signal: dict | None = None,
     quality_signal_status: int = 200,
     quality_signal_body_raw: bytes | None = None,
+    capabilities: list[str] | None = None,
+    agent_get_status: int = 200,
 ) -> Iterator[str]:
     """Fake Lightsei backend.
 
@@ -75,6 +77,34 @@ def fake_backend(
                         "trend": {"delta_pp": 0.0, "direction": "unknown"},
                     }
                     body = json.dumps(payload).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            elif self.path.startswith("/agents/") and "/" not in self.path[len("/agents/"):]:
+                # Phase 16.3: GET /agents/{name}. The SDK fetches this
+                # on init() to seed its capability cache. Body shape
+                # mirrors the real backend's _serialize_agent — only
+                # `name` + `capabilities` matter for the gate; the
+                # other fields are stubbed.
+                if agent_get_status != 200:
+                    self.send_error(agent_get_status)
+                    return
+                name = self.path[len("/agents/"):]
+                body = json.dumps({
+                    "name": name,
+                    "daily_cost_cap_usd": None,
+                    "system_prompt": None,
+                    "provider": None,
+                    "model": None,
+                    "tick_interval_s": None,
+                    "description": None,
+                    "sensitivity_level": "internal",
+                    "capabilities": list(capabilities) if capabilities is not None else [],
+                    "created_at": "2026-05-17T00:00:00+00:00",
+                    "updated_at": "2026-05-17T00:00:00+00:00",
+                }).encode()
                 self.send_response(200)
                 self.send_header("content-type", "application/json")
                 self.send_header("content-length", str(len(body)))
@@ -132,10 +162,43 @@ def fake_backend(
                     self.end_headers()
                     self.wfile.write(payload)
                     return
+                # Phase 16.3: heartbeat response carries the agent's
+                # capability list so the SDK can refresh its cache
+                # mid-flight. capabilities=None means the test isn't
+                # exercising the gate; send the existing minimal body.
+                if capabilities is not None:
+                    body = json.dumps({
+                        "status": "active",
+                        "capabilities": list(capabilities),
+                        "sensitivity_level": "internal",
+                    }).encode()
+                else:
+                    body = b'{"status":"active"}'
                 self.send_response(200)
                 self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
                 self.end_headers()
-                self.wfile.write(b'{"status":"active"}')
+                self.wfile.write(body)
+            elif self.path.startswith("/agents/") and self.path.endswith("/commands"):
+                # Phase 16.3: send_command POSTs to /agents/{name}/commands.
+                # Echo back a canonical command row so the SDK's
+                # response-parsing path runs end-to-end.
+                received.append({"_path": self.path, **data})
+                parts = self.path.split("/")
+                target = parts[2] if len(parts) >= 3 else "x"
+                body = json.dumps({
+                    "id": "cmd-fake-1",
+                    "target_agent": target,
+                    "kind": data.get("kind") if isinstance(data, dict) else "x",
+                    "payload": data.get("payload") if isinstance(data, dict) else {},
+                    "status": "pending",
+                    "created_at": "2026-05-17T00:00:00+00:00",
+                }).encode()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.send_header("content-length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
             else:
                 self.send_error(404)
 
