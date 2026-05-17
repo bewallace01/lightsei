@@ -7,13 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 16 demo: drop a CRM-shaped README on /agents/team-from-readme, pick Compliance team, confirm the wedge actually works**
+> **Phase 17.1: schema backbone for auth + billing (single alembic migration)**
 
-Phase 16 is structurally complete on prod — all seven sub-tasks shipped 2026-05-17. The full pipeline runs end-to-end: schema (16.1) → capability storage + validator (16.2) → SDK gate (16.3) → cross-zone enforcement (16.4) → redaction + handoff (16.5) → dashboard surfaces (16.6) → trust-zone presets wired into team-from-README (16.7). Backend 654 + SDK 101 passing.
+Phase 16 is structurally complete on prod (all seven sub-tasks shipped 2026-05-17, 654 backend tests + 101 SDK tests passing). The Phase 16 demo on prod is still user-driven and pending — moved to "open demos" in the Done Log below since the structural work is finished and the demo is a Bailey-side validation. Picking up on Phase 17 in parallel since they're independent and 17 is the gate to actually putting Lightsei in front of a real customer.
 
-NOW is the Phase 16 demo (user-driven). The proof point: pick a CRM-shaped README, generate a team with the Compliance preset, confirm the wedge actually closes. Specifically: (1) see the /zones topology lay out specialists in `pii` + messengers in `public` after deploy; (2) try to make a `pii` bot do `httpx.get('https://example.com')` from its bot.py — should raise `LightseiCapabilityError`; (3) try to have a `pii` specialist `lightsei.send_command` to a `public` messenger — should raise `LightseiCrossZoneError` before the network call; (4) verify backend 403s with `cross_zone_blocked` if the SDK call were spoofed; (5) emit a payload with a real-looking email/SSN from a `pii` agent and confirm the persisted event shows `[redacted-email]` / `[redacted-ssn]`. Once that's all visibly working, Phase 16 closes and **the wedge against Viktor is real and demonstrable** (not just spec'd).
+Phase 17 spec session just landed (see below) with all five design choices locked: both magic link + Google OAuth, Resend for email, $50/mo per workspace with $5 free credits at signup, hard 402 paywall when credits exhausted, one-workspace = one-seat for v1. 17.1-17.9 sub-tasks specced.
 
-After 16 closes, the natural next phases are 17 (auth/signup/billing) and 18 (dashboard polish) per the 2026-05-17 strategic direction — non-technical users still can't try the product without 17, and won't succeed at it without 18.
+NOW is 17.1: schema backbone. Single alembic migration (0030) adds `email_verified` + `auth_provider` + `google_user_id` to `users`; `stripe_customer_id` + `stripe_subscription_id` + `plan_tier` + `free_credits_remaining_usd` to `workspaces`; new `email_signin_tokens` table for magic-link single-use tokens. Backfills existing workspaces to `plan_tier='free'` + `free_credits_remaining_usd=5.00` (everyone gets the free credit on migration). Same shape as Phase 16.1 and 14.1 schema-backbone sub-tasks — pure storage, no endpoints, just makes the columns exist so 17.2-17.5 can wire against them.
 
 ## Phase 12C: drop a README, get a team
 
@@ -285,11 +285,111 @@ Generate a "Compliance team" from a fake CRM-shaped README. See the constellatio
 
 ## Phase 17: Self-serve onboarding (auth, signup, billing)
 
-Operationalizes "non-technical users need to self-serve" from the 2026-05-17 decision. Promoted from "deferred forever" to high-priority in the same update (see MEMORY.md "Things to NOT build" note).
+Operationalizes "non-technical users need to self-serve" from the 2026-05-17 strategic direction. Promoted from "deferred forever" to high-priority — non-technical users can't try the product without this. This is the gate to actually putting Lightsei in front of a real customer.
 
-Rough shape: (1) magic-link or Google OAuth signup with no CLI involvement, workspace auto-created on signup; (2) Stripe billing per-seat, $50/mo as the reference (Viktor's price), free credits on signup so users can try before paying; (3) plan-tier limits wired to the existing backend metering. Demo: a fresh non-technical user signs up cold, deploys a team, hits a paywall, adds a card, continues.
+**Design choices settled 2026-05-17 (do not re-debate without a reason; switch triggers per choice below).**
 
-Detailed sub-tasks deferred until promoted to NOW.
+- **Auth: magic link AND Google OAuth, both first-class.** Magic link is the no-friction path (anyone with email); Google OAuth is the one-click path for users already signed into Google. Both land on the same `users` row. The existing API-key signup at `/auth/signup` stays for SDK / CLI / developer use — repositioned as the "advanced" path; the dashboard signup uses the new flows. Switch trigger: if either dashboard path turns out to be unused after a month of real users, drop it; don't keep two surfaces both half-maintained.
+- **Email provider: Resend.** Best DX for transactional email; 3k/month free covers signup volume well past the first paying customers. Switch trigger: monthly send volume crosses 100k OR cost optimization at scale starts mattering more than DX → revisit AWS SES.
+- **Billing: $50/mo flat per workspace + $5 free credits on signup.** Matches Viktor's reference price. Free credits cover roughly a day of typical light use so the user can try the product before deciding. Card required only when credits exhaust. Single paid tier in v1 (no "pro"); expand later if signal demands it. Per-event usage-based billing explicitly rejected — doesn't fit the non-technical-buyer mental model per MEMORY.md.
+- **Paywall trigger: hard 402 on the next LLM call when free credits exhausted AND no active subscription.** Reuses the existing budget gate pattern from agent_generator + eval_runner. Read-only dashboard / signup / billing surfaces keep working so the user can see what they had + add a card. Switch trigger: customer feedback says the hard cutoff feels broken vs out-of-credits → consider a soft warning + 24h grace period.
+- **One workspace = one seat in v1.** Multi-user-per-workspace is parked in the Parking Lot. Per-seat billing makes sense once that lands; for now, "seat" and "workspace" are the same thing.
+
+### 17.1 — Schema backbone for auth + billing
+
+Single alembic migration (0030) adding:
+
+- `users.email_verified` (Boolean, default false). Magic-link signup sets it true on first successful consume; existing API-key-signup users land verified=false until they do a magic-link round-trip.
+- `users.auth_provider` (String(16), default `'apikey'`). Tracks which path created the row: `'apikey'`, `'magic_link'`, `'google_oauth'`. Used for analytics + the dashboard signup-flow detection.
+- `users.google_user_id` (String, nullable, unique). Google's `sub` claim. Lets a returning OAuth user be matched to the same row even if they change their email.
+- `workspaces.stripe_customer_id` (String, nullable, unique). Created on workspace-create; the workspace, not the user, is the Stripe Customer (matches the per-workspace seat model).
+- `workspaces.stripe_subscription_id` (String, nullable). Set when the workspace has an active subscription; null when on the free tier.
+- `workspaces.plan_tier` (String(16), default `'free'`). `'free'` (using credits) | `'paid'` (active subscription). Single source of truth for "should this workspace be allowed to spend right now."
+- `workspaces.free_credits_remaining_usd` (Numeric(12,6), default 5.0). Server_default 5.00 so new workspaces start with $5 of credits; existing workspaces backfilled to the same value (everyone gets the same free credit on the migration).
+- New `email_signin_tokens` table: `token_hash` (PK), `email`, `created_at`, `expires_at`, `consumed_at` (nullable). Single-use, 15-minute TTL.
+
+Indexes: `(workspaces.stripe_customer_id)` unique, `(email_signin_tokens.email, created_at DESC)` for the rate-limit query.
+
+### 17.2 — Magic-link auth backend
+
+Two endpoints + the Resend integration in `backend/email.py` (new pure module).
+
+- `POST /auth/magic-link/request {email}` — generates a fresh single-use token, hashes it (same `hash_token` pattern from `keys.py`), inserts an `email_signin_tokens` row with 15-minute TTL, sends a Resend email containing the unhashed token in a magic URL (`https://app.lightsei.com/auth/magic-link?token=...`). Always 200 even on unknown email (don't leak existence). Rate-limited to ~5/hour per email via the existing limits machinery so a malicious sender can't spam users.
+- `POST /auth/magic-link/consume {token}` — looks up by hashed token, checks not consumed + not expired, marks consumed, either signs in the matching user OR creates a new user + workspace pair if the email is new. Returns a session token (existing `keys.generate_session_token` + `Session` row).
+- New-user creation sets `auth_provider='magic_link'`, `email_verified=true`, free workspace name (`"{email_local_part}'s workspace"`), `free_credits_remaining_usd=5.00`, `plan_tier='free'`.
+
+### 17.3 — Google OAuth backend
+
+Two endpoints implementing the standard OAuth 2.0 authorization-code flow with PKCE.
+
+- `GET /auth/google/start` — generates state + PKCE verifier, stores both server-side (small table or signed cookie), returns a redirect to Google's auth endpoint with the configured client_id + redirect_uri.
+- `GET /auth/google/callback?code&state` — verifies state, exchanges the code for tokens, fetches the userinfo endpoint for `sub` + `email` + `email_verified`, either signs in the matching user (`google_user_id` exact match → preferred; otherwise `email` match if email_verified) OR creates a new user + workspace pair (`auth_provider='google_oauth'`).
+- Configuration: `LIGHTSEI_GOOGLE_CLIENT_ID` + `LIGHTSEI_GOOGLE_CLIENT_SECRET` env vars + Railway-side OAuth consent setup. New-user shape matches 17.2's pattern.
+
+### 17.4 — Stripe integration
+
+`backend/stripe_integration.py` (new) + endpoints + webhook handler.
+
+- On workspace-create (both new flows from 17.2 + 17.3): create a Stripe Customer with the workspace's email, store the customer_id on `workspaces.stripe_customer_id`.
+- `POST /workspaces/me/billing/checkout` — creates a Checkout Session for the $50/mo subscription (configured as a Stripe Product / Price up front), returns the session URL the dashboard redirects to.
+- `POST /webhooks/stripe` — verifies signature, handles `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_failed`. Updates `workspaces.stripe_subscription_id` + `workspaces.plan_tier` accordingly.
+- `POST /workspaces/me/billing/portal` — creates a Stripe Customer Portal session, returns the URL. Lets the user manage their subscription, swap card, cancel, view invoices without us building any of that UI.
+- Configuration: `LIGHTSEI_STRIPE_SECRET_KEY` + `LIGHTSEI_STRIPE_WEBHOOK_SECRET` + `LIGHTSEI_STRIPE_PRICE_ID` env vars.
+
+### 17.5 — Paywall middleware
+
+Reuses the existing budget-gate pattern. New helper `_assert_billing_active(session, workspace_id)` raises `HTTPException(402, detail={"error": "out_of_credits", "remaining_usd": 0.0, "upgrade_url": "/account#billing"})` when:
+
+- `workspace.plan_tier == 'free'` AND `free_credits_remaining_usd <= 0` → 402.
+- `workspace.plan_tier == 'paid'` → allow (still subject to the existing `budget_usd_monthly` cap).
+
+Call sites: anywhere an LLM-charged op runs. `agent_generator.run_agent_generation_job`, `team_planner.run_team_plan_job`, `eval_runner.run_eval_job`. Also the worker's outbound LLM path (bots themselves) needs a similar check — done by the SDK reading the workspace state and refusing emit / send_command when paywall'd. (Defer the SDK-side gate until 17.5 implementation to keep this scope tight; the workspace cap from 16-and-earlier already covers worst case.)
+
+Free credits decrement on every Run row creation. `lightsei.system` cost (generation + judge) and bot-run cost both come out of the same pool — keeps the accounting in one column.
+
+### 17.6 — Dashboard signup + login UI
+
+Replaces the existing API-key signup form on `/login` (or wherever it lives) with:
+
+- Email field + "send magic link" button → POST `/auth/magic-link/request`, render "check your email" state.
+- Google OAuth button → opens `/auth/google/start` in a new tab (or same tab with return URL).
+- New `/auth/magic-link?token=...` page (consumes the token, sets session, redirects to `/`).
+- New `/auth/google/callback?code&state` page (passes through to backend, sets session, redirects).
+- Existing API-key signup form moved to `/login/advanced` with an explanatory blurb pointing developers at the SDK init flow.
+
+### 17.7 — Dashboard billing UI
+
+New section on `/account`:
+
+- "Plan" header showing current tier (Free / Paid).
+- Free tier: "Free credits remaining: $X.XX" + "Upgrade to $50/mo" button → POST `/workspaces/me/billing/checkout`, redirect to Checkout session URL.
+- Paid tier: "Active subscription · $50/mo · next charge YYYY-MM-DD" + "Manage subscription" button → POST `/workspaces/me/billing/portal`, redirect.
+- Empty / failure states handled (Stripe down, customer_id missing, etc.).
+
+When the user lands back on `/account` after Checkout success, page polls the workspace until `plan_tier='paid'` updates (webhook lands within seconds — short poll loop covers the race).
+
+### 17.8 — Tests
+
+Per the existing test pattern (tests live with the code they cover):
+
+- 17.1: schema + alembic backfill (matches `test_sensitivity_level.py` shape).
+- 17.2: magic-link request + consume (mocked Resend), rate-limit, expiry, single-use, new-user vs existing-user paths.
+- 17.3: OAuth callback (mocked Google userinfo), state validation, returning-user vs new-user paths, email-link fallback when `google_user_id` not matched.
+- 17.4: webhook signature verification, subscription lifecycle state transitions, idempotency on duplicate webhook delivery.
+- 17.5: paywall middleware fires when free+exhausted, doesn't fire when paid, doesn't fire when free+remaining>0.
+- 17.6 + 17.7: dashboard `tsc --noEmit` clean.
+
+### 17.9 — Demo
+
+A fresh non-technical user signs up cold:
+
+- Lands on `/login`, types an email, hits "send magic link," sees confirmation, clicks the email link, lands on `/` signed in with a fresh workspace ($5 free credits, `plan_tier='free'`).
+- (Or alternative: clicks Google OAuth, same end state.)
+- Walks through team-from-README, picks a preset, deploys. Some LLM-calling ops decrement credits.
+- Either runs out of credits OR clicks "Upgrade to $50/mo" on `/account` → Stripe Checkout → returns to /account showing "Paid · $50/mo · next charge ...". From here all LLM ops work unbounded (subject to the existing monthly cap).
+- Cancel works via the Stripe portal link.
+
+Phase 17 closes when that whole arc runs end-to-end without manual backend intervention.
 
 ## Phase 18: Dashboard polish (the dashboard is the product)
 
@@ -770,6 +870,25 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 17 spec: auth, signup, billing — design choices locked, 17.1-17.9 sub-tasks
+
+Same shape as today's earlier Phase 14 + Phase 16 spec sessions: convert the rough-shape bullets into per-sub-task specs concrete enough to implement against, lock the design choices up front so the schema doesn't get reworked mid-build, write the demo concretely.
+
+**Design choices settled** (with switch triggers each, full prose in the Phase 17 section above):
+- **Auth surface**: magic link AND Google OAuth, both first-class. Existing API-key signup stays as the developer path.
+- **Email**: Resend (3k/mo free covers signup volume well past first paying customers).
+- **Billing**: $50/mo flat per workspace + $5 free credits on signup. Single paid tier in v1. No per-event usage billing (doesn't fit non-technical-buyer mental model).
+- **Paywall**: hard 402 on next LLM call when credits exhausted + no card. Read-only surfaces stay accessible.
+- **Seat model**: one workspace = one seat. Multi-user-per-workspace stays parked.
+
+**Nine sub-tasks**: 17.1 schema backbone (single alembic 0030 — same shape as the Phase 16.1 + 14.1 schema-only sub-tasks), 17.2 magic-link auth backend (Resend integration + request/consume endpoints + new-user-creates-workspace path), 17.3 Google OAuth backend (auth-code + PKCE flow), 17.4 Stripe integration (customer-on-workspace-create + checkout-session endpoint + webhook handler + portal endpoint), 17.5 paywall middleware (gates LLM-call endpoints when free+exhausted), 17.6 dashboard signup/login UI (magic-link form + Google button + callback page; existing API-key signup moves to /login/advanced), 17.7 dashboard billing UI on /account (credits remaining + upgrade button → Checkout / portal link), 17.8 tests, 17.9 demo (fresh non-technical user signs up cold → deploys a team → hits paywall → upgrades → continues).
+
+NOW → 17.1 schema backbone.
+
+### Open demos (user-driven, not blocking the next phase)
+
+- **Phase 16**: drop a CRM-shaped README on /agents/team-from-readme with the Compliance preset; confirm /zones lays out pii specialists + public messengers; confirm a pii bot's outbound httpx raises LightseiCapabilityError; confirm pii→public send_command raises LightseiCrossZoneError before the network call; confirm a forged backend POST gets the typed cross_zone_blocked 403; confirm a real-looking email in a pii agent's emit lands as `[redacted-email]`. Once green, the wedge against Viktor is real and demonstrable (not just spec'd).
 
 ### 2026-05-17 — Phase 16.7: three trust-zone presets + team-from-README integration
 
