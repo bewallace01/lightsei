@@ -7,9 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 14.1: sampler + judge prompt + schema (pure module)**
+> **Phase 14.3: periodic eval job (reuse generation_jobs runner)**
 
-Phase 12C closed 2026-05-17; 12D.1 + 12D.2 already shipped. 12D.3 (auto-optimization with consent) gates on Phase 14 (continuous eval), which now has a full spec (see below) with all five design questions resolved this session — pick rule, judge model, judge depth, storage shape, cost cap all locked. 14.1 is unblocked: build the pure module (`backend/eval_sampler.py`) with the two functions in the spec, no DB writes, no LLM calls. 14.2 (the `run_evaluations` table) lands once the schema in 14.1 is committed.
+14.1 (sampler + judge prompt + schema) and 14.2 (`run_evaluations` table + alembic 0026) shipped together 2026-05-17 — see Done Log. Tests cover both: 547 passing in 113s, including 22 new tests for the sampler / prompt / schema.
+
+NOW is 14.3: wire the sampler to a periodic background job that actually runs the judge and writes to `run_evaluations`. Pattern: register `eval_runs` as a new `kind` in `backend/jobs.py`'s dispatch registry (same SKIP LOCKED + asyncio.to_thread shape from 12C.6.2). Handler calls `eval_sampler.pick_sample`, builds the prompt with `build_judge_prompt`, calls `anthropic.Anthropic().messages.create(**prompt)`, extracts the verdict from the tool_use block, writes a `run_evaluations` row, records cost on the `lightsei.system` Run row. Cron-style enqueue: at FastAPI startup, register an asyncio task that drops one `eval_runs` job per hour (configurable via `LIGHTSEI_EVAL_INTERVAL_S`, default 3600).
 
 ## Phase 12C: drop a README, get a team
 
@@ -191,7 +193,7 @@ The validators from Phase 7/8 catch _hard_ failures (the bot's output doesn't pa
 - **Storage: per-run rows in `run_evaluations`** (not pre-rolled). Postgres handles 10 bots × 3 samples × 24h × 365d ≈ 263k rows / workspace / year without breaking a sweat, and the rollup queries are cheap on the indexes specced in 14.2. Switch trigger: a workspace's table crosses ~10M rows and queries slow down (likely a 5+ year horizon).
 - **Cost cap: rolled into the existing workspace monthly cap.** Judge spend attributes to the `lightsei.system` synthetic agent (same as generation calls do today). Workspace budget gates everything together; one knob to tune. Switch trigger: a user complains that judge spend ate their generation budget — split with a separate env var then.
 
-### 14.1 — Sampler + judge prompt + schema (pure module)
+### 14.1 — Sampler + judge prompt + schema (pure module) ✅ shipped 2026-05-17
 
 New `backend/eval_sampler.py`. Two pure functions:
 
@@ -200,7 +202,7 @@ New `backend/eval_sampler.py`. Two pure functions:
 
 No DB writes, no LLM calls — pure shaping logic, same pattern as `agent_generator.py` v1. Tests assert prompt content, schema validation, and that `pick_sample` honors per-agent caps + skips already-evaluated runs.
 
-### 14.2 — `run_evaluations` table + alembic migration
+### 14.2 — `run_evaluations` table + alembic migration ✅ shipped 2026-05-17
 
 New table backed by SQLAlchemy model in `backend/models.py`: `id` (uuid pk), `run_id` (FK to runs, ON DELETE CASCADE), `workspace_id` (FK, indexed), `agent_name` (string, indexed), `judge_model` (string), `verdict` (string: 'good'/'borderline'/'bad'), `reasons` (jsonb), `confidence` (numeric), `judge_tokens_in`/`judge_tokens_out` (int), `judge_cost_usd` (numeric), `created_at`. Indexes: `(workspace_id, agent_name, created_at DESC)` for dashboard surfacing, `(workspace_id, verdict, created_at DESC)` for "recent bads" queries.
 
@@ -664,6 +666,17 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 14.1 + 14.2: sampler + judge prompt + run_evaluations schema
+
+Two sub-tasks shipped together because 14.1's `pick_sample` queries `run_evaluations` (the table 14.2 creates) — splitting them would leave 14.1's tests unable to run end-to-end against the test DB schema. [[feedback-chain-coupled-tasks]] pattern.
+
+- [x] **14.2 — `RunEvaluation` model in `backend/models.py` + alembic 0026.** Schema per spec: id (str pk), run_id (FK runs CASCADE), workspace_id (FK workspaces CASCADE), agent_name, judge_model, verdict (string, not enum, so future verdicts don't need a migration), reasons (jsonb), confidence (Numeric 4,3), judge_tokens_in/out (Integer), judge_cost_usd (Numeric 12,6), created_at. Three indexes: `(workspace_id, agent_name, created_at DESC)` for the /agents quality column, `(workspace_id, verdict, created_at DESC)` for "recent bads" queries, and `(run_id, judge_model)` unique so the sampler's "skip already-evaluated" check has DB-level enforcement alongside the application-level `NOT EXISTS`.
+- [x] **14.1 — `backend/eval_sampler.py` (pure module).** Two functions plus a tool schema. `pick_sample(session, workspace_id, per_agent=3, window=1h, now=...)` returns run_ids: for each non-`lightsei.*` agent in the workspace, takes the last hour's completed runs that don't have a verdict from `JUDGE_MODEL`, ordered by `ended_at DESC`, capped at per_agent. `build_judge_prompt(session, run_id)` composes the judge's single LLM turn — agent role + system prompt + plan event + output event, all wrapped in a `messages.create()`-ready dict with forced `tool_choice` on `SUBMIT_VERDICT_TOOL`. Plan event = `<agent_name>.plan` when present (orchestrator pattern), else first non-envelope event from the agent (executor fallback). Output event = last non-envelope event from the agent. `SUBMIT_VERDICT_TOOL` schema-strict: verdict in {good, borderline, bad}, reasons array 1-5, confidence 0..1, additionalProperties false. Locked design choices documented inline (judge model = claude-sonnet-4-6, per_agent default = 3, window = 1h).
+
+**Verification:** 22 new tests in `backend/tests/test_eval_sampler.py` — sampler honors per-agent cap, skips lightsei.* agents, skips already-evaluated runs (and dedup is keyed on judge_model so different-judge re-evals are allowed), skips out-of-window runs, skips uncompleted runs, covers multiple agents, respects workspace isolation, reads env var with bad-value fallback. Prompt builder covers orchestrator/executor patterns, single-event runs (plan == output), forced tool_choice, error paths (missing run, deleted agent). Schema validated with jsonschema against the 6 corner cases (good/borderline/bad enum, reasons min 1 / max 5, confidence range, additionalProperties false). Full backend suite: 547 passed, 0 failures, 113s. No regressions outside the new file.
+
+**Not done in this slice:** the runner that actually fires judge calls (14.3), the storage of verdicts to `run_evaluations` (14.3's responsibility), endpoints + dashboard (14.4), SDK helper (14.5), demo (14.7).
 
 ### 2026-05-17 — Phase 12C closed: team-from-README flow runs end-to-end on prod
 

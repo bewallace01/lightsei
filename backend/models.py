@@ -883,3 +883,73 @@ class GenerationJob(Base):
         Index("idx_generation_jobs_status_created", "status", "created_at"),
         Index("idx_generation_jobs_workspace", "workspace_id", created_at.desc()),
     )
+
+
+class RunEvaluation(Base):
+    """Judge-LLM verdict on a completed Run (Phase 14.2).
+
+    One row per (run_id, judge_model) pair. The eval runner samples
+    completed runs via `backend/eval_sampler.py`, asks the configured
+    judge (claude-sonnet-4-6 in v1) for a verdict, and persists the
+    answer here. Dashboard reads via /workspaces/me/agents/{name}/quality;
+    12D.3's auto-tuner consumes the same data via lightsei.get_quality_signal().
+
+    Cost (judge_cost_usd) lands on the `lightsei.system` synthetic
+    agent through the eval runner's Run row, so the workspace's
+    monthly budget gate covers judge spend the same way it covers
+    generation spend.
+    """
+
+    __tablename__ = "run_evaluations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    agent_name: Mapped[str] = mapped_column(String, nullable=False)
+    judge_model: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 'good' | 'borderline' | 'bad'. Short string instead of an enum so
+    # adding a future verdict ('unparseable', etc.) doesn't need a
+    # migration.
+    verdict: Mapped[str] = mapped_column(String(16), nullable=False)
+    reasons: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    confidence: Mapped[Decimal] = mapped_column(Numeric(4, 3), nullable=False)
+    judge_tokens_in: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    judge_tokens_out: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    judge_cost_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 6), nullable=False, default=Decimal("0")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        Index(
+            "idx_run_evaluations_ws_agent_created",
+            "workspace_id", "agent_name", created_at.desc(),
+        ),
+        Index(
+            "idx_run_evaluations_ws_verdict_created",
+            "workspace_id", "verdict", created_at.desc(),
+        ),
+        # DB-level guard mirroring the sampler's "skip already-evaluated
+        # runs" check. One verdict per (run, judge) pair; switching
+        # judges later (e.g. Opus-as-judge for a re-eval cycle) is
+        # allowed because judge_model is part of the key.
+        Index(
+            "idx_run_evaluations_run_judge",
+            "run_id", "judge_model",
+            unique=True,
+        ),
+    )
