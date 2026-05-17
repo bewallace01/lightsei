@@ -572,7 +572,7 @@ export default function TeamFromReadmePage() {
             )}
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-[1fr_320px] gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-[1fr_320px] gap-6 md:items-start">
             <TeamConstellation
               team={team}
               existingAgents={existingAgents}
@@ -777,14 +777,12 @@ function InputCard({
 
 // ---------- Constellation preview ---------- //
 
-// Near-square viewBox keeps stars from clustering toward the top of a
-// tall column. The SVG fills its container (which stretches to match
-// the side panel's height), so we want the intrinsic shape to look
-// good at portrait-ish aspects too. `preserveAspectRatio` defaults to
-// `xMidYMid meet` so the contents stay centered when the container is
-// wider or taller than the viewBox.
+// Square viewBox + `aspect-square` on the container = the dark canvas
+// is a balanced square regardless of how tall the side panel grows.
+// `md:items-start` on the grid wrapper detaches the dark box from the
+// panel's column-stretch so it sizes by its own aspect ratio.
 const VB_W = 600;
-const VB_H = 520;
+const VB_H = 600;
 
 function positionFor(
   i: number,
@@ -797,10 +795,9 @@ function positionFor(
   if (role === "orchestrator") {
     return { x: VB_W / 2, y: VB_H / 2 };
   }
-  // Big radii so the team uses the canvas. Specialists sit at ~75% of
-  // the half-canvas; messengers push a little further out so their
-  // edge length implies "downstream / leaf".
-  const radius = role === "messenger" ? 220 : 180;
+  // Specialists sit at ~67% of the half-canvas; messengers push a
+  // little further out so their edge length implies "downstream / leaf".
+  const radius = role === "messenger" ? 240 : 200;
   const angle =
     (i / Math.max(1, total)) * Math.PI * 2 - Math.PI / 2;
   return {
@@ -866,7 +863,7 @@ function TeamConstellation({
   }, [team, existingAgents]);
 
   return (
-    <div className="rounded-lg border border-indigo-900/30 bg-gradient-to-br from-slate-950 via-indigo-950 to-slate-900 overflow-hidden min-h-[520px] flex">
+    <div className="rounded-lg border border-indigo-900/30 bg-gradient-to-br from-slate-950 via-indigo-950 to-slate-900 overflow-hidden aspect-square md:self-start">
       <svg
         viewBox={`0 0 ${VB_W} ${VB_H}`}
         preserveAspectRatio="xMidYMid meet"

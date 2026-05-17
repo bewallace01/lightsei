@@ -662,3 +662,298 @@ def build_validation_retry_message(problems: list[str]) -> str:
         "itself."
     )
     return "\n".join(lines)
+
+
+# ---------- Phase 12C.6.3: async job handler ---------- #
+#
+# The synchronous endpoint logic that used to live in
+# `main.generate_agent` (the Anthropic-calling part) moves here so the
+# in-process runner in `backend/jobs.py` can call it off the request
+# path. The endpoint now does only the synchronous-fast bits
+# (auth, key + budget gate, input validation) and enqueues a row.
+#
+# Why re-read the workspace secret in the handler instead of passing the
+# decrypted key through the payload JSON: keys don't belong in the jobs
+# table even briefly. The DB lookup is cheap.
+
+def run_agent_generation_job(
+    session,
+    workspace_id: str,
+    payload: dict,
+) -> dict:
+    """Job-runner handler for `kind='agent_generate'`.
+
+    Mirrors the original `POST /workspaces/me/agents/generate` body
+    one-for-one, minus the input validation (the endpoint did that
+    before enqueue). Returns the same dict the endpoint used to return
+    synchronously; the runner persists it to `generation_jobs.result_payload`.
+
+    Failure modes that used to surface as HTTPException now bubble as
+    HTTPException too; the runner catches and writes `error`. The
+    dashboard's poll loop surfaces the error text verbatim.
+    """
+    import uuid
+    from datetime import datetime, timezone
+    from decimal import Decimal
+    from typing import Any, Optional
+
+    import anthropic
+    from fastapi import HTTPException
+    from sqlalchemy import select
+
+    import secrets_crypto
+    from cost import workspace_cost_mtd
+    from db import ensure_agent
+    from models import Agent, Run, WorkspaceSecret
+    from pricing import compute_cost_usd
+
+    # Local copy of main._anthropic_error_to_http so this module doesn't
+    # import main (which imports us). Mirrors the same status mapping.
+    def _anthropic_err_to_http(exc: Exception) -> HTTPException:
+        status = getattr(exc, "status_code", None)
+        if status == 529:
+            return HTTPException(
+                status_code=503,
+                detail=(
+                    "Anthropic is overloaded right now (529). The SDK retried "
+                    "and gave up — try again in a few seconds."
+                ),
+            )
+        if status == 429:
+            return HTTPException(
+                status_code=429,
+                detail=(
+                    "Anthropic rate-limited this workspace's key. Slow down "
+                    "(or check your tier limits) and retry."
+                ),
+            )
+        return HTTPException(status_code=502, detail=f"Anthropic API error: {exc}")
+
+    # 1. Re-read the workspace secret. Endpoint already gated on its
+    # presence, but a race (user revoked it between enqueue and run) is
+    # possible — fail clean.
+    secret_row = session.get(WorkspaceSecret, (workspace_id, "ANTHROPIC_API_KEY"))
+    if secret_row is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "ANTHROPIC_API_KEY was removed from this workspace between "
+                "enqueue and run. Re-add it on /account and retry."
+            ),
+        )
+    try:
+        anthropic_key = secrets_crypto.decrypt(secret_row.encrypted_value)
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="failed to decrypt ANTHROPIC_API_KEY (server config issue)",
+        )
+
+    description = payload.get("description") or ""
+    target_agents = payload.get("target_agents") or None
+    name_hint = payload.get("name_hint") or None
+    tweak_request = payload.get("tweak_request") or None
+    previous_bot_py = payload.get("previous_bot_py") or None
+    previous_requirements_txt = payload.get("previous_requirements_txt") or None
+
+    # 2. Snapshot the workspace's constellation for the prompt.
+    agent_rows = session.execute(
+        select(Agent).where(Agent.workspace_id == workspace_id).order_by(Agent.name)
+    ).scalars().all()
+    existing_agents: list[dict[str, Any]] = []
+    reserved_names: set[str] = set()
+    for a in agent_rows:
+        reserved_names.add(a.name.strip().lower())
+        cmd_kinds: list[str] = []
+        for h in a.command_handlers or []:
+            kind = (h or {}).get("kind") if isinstance(h, dict) else None
+            if isinstance(kind, str):
+                cmd_kinds.append(kind)
+        existing_agents.append(
+            {
+                "name": a.name,
+                "role": a.role,
+                "provider": a.provider,
+                "model": a.model,
+                "command_kinds": cmd_kinds,
+            }
+        )
+
+    system_prompt = build_system_prompt(
+        existing_agents=existing_agents,
+        reserved_names=reserved_names,
+    )
+    user_msg = build_user_message(
+        description,
+        target_agents=target_agents,
+        name_hint=name_hint,
+    )
+
+    iteration_turn: Optional[str] = None
+    if tweak_request and previous_bot_py and previous_requirements_txt:
+        iteration_turn = build_iteration_message(
+            previous_bot_py=previous_bot_py,
+            previous_requirements_txt=previous_requirements_txt,
+            tweak_request=tweak_request,
+        )
+
+    # Now that the call runs off the request path, the edge-timeout
+    # pressure is gone — keep max_retries at 5 so a transient 529
+    # doesn't bubble as a job failure.
+    client = anthropic.Anthropic(api_key=anthropic_key, max_retries=5)
+    model = "claude-opus-4-7"
+
+    token_log: list[tuple[str, int, int]] = []
+
+    def _ask(extra_user_msg: Optional[str] = None) -> Any:
+        messages: list[dict[str, Any]] = [{"role": "user", "content": user_msg}]
+        if iteration_turn:
+            messages.append({"role": "user", "content": iteration_turn})
+        if extra_user_msg:
+            messages.append({"role": "user", "content": extra_user_msg})
+        resp = client.messages.create(
+            model=model,
+            max_tokens=8000,
+            system=system_prompt,
+            tools=[SUBMIT_BOT_TOOL],
+            tool_choice={"type": "tool", "name": "submit_bot"},
+            messages=messages,
+        )
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            token_log.append(
+                (
+                    getattr(resp, "model", None) or model,
+                    int(getattr(usage, "input_tokens", 0) or 0),
+                    int(getattr(usage, "output_tokens", 0) or 0),
+                )
+            )
+        return resp
+
+    def _extract(resp: Any) -> dict[str, Any]:
+        block = next(
+            (
+                b for b in resp.content
+                if getattr(b, "type", None) == "tool_use"
+                and getattr(b, "name", None) == "submit_bot"
+            ),
+            None,
+        )
+        if block is None:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "model did not call submit_bot "
+                    f"(stop_reason={getattr(resp, 'stop_reason', '?')})"
+                ),
+            )
+        return block.input
+
+    try:
+        try:
+            resp = _ask()
+            out = _extract(resp)
+        except anthropic.APIError as e:
+            raise _anthropic_err_to_http(e)
+
+        suggested = (out.get("agent_name") or "").strip().lower()
+        if not is_valid_star_name(suggested) or suggested in reserved_names:
+            retry_msg = (
+                f"The name `{suggested}` you proposed is "
+                + (
+                    "already taken in this workspace"
+                    if suggested in reserved_names
+                    else "not in the star-naming dictionary"
+                )
+                + ". Pick a different name from the dictionary in the system prompt "
+                "and call submit_bot again with the same bot_py/requirements_txt."
+            )
+            try:
+                resp = _ask(extra_user_msg=retry_msg)
+                out = _extract(resp)
+                suggested = (out.get("agent_name") or "").strip().lower()
+            except anthropic.APIError as e:
+                raise _anthropic_err_to_http(e)
+
+            if not is_valid_star_name(suggested) or suggested in reserved_names:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"generator could not pick a valid star name "
+                        f"(got {suggested!r}); try editing the description or pass "
+                        "a name_hint."
+                    ),
+                )
+
+        bot_py = out.get("bot_py") or ""
+        requirements_txt = out.get("requirements_txt") or ""
+        problems = validate_generated_bot(bot_py, requirements_txt)
+        if problems:
+            retry_msg = build_validation_retry_message(problems)
+            try:
+                resp = _ask(extra_user_msg=retry_msg)
+                out = _extract(resp)
+            except anthropic.APIError as e:
+                raise _anthropic_err_to_http(e)
+            suggested = (out.get("agent_name") or "").strip().lower()
+            if not is_valid_star_name(suggested) or suggested in reserved_names:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"validation retry produced an invalid name "
+                        f"(got {suggested!r})"
+                    ),
+                )
+            bot_py = out.get("bot_py") or ""
+            requirements_txt = out.get("requirements_txt") or ""
+            remaining = validate_generated_bot(bot_py, requirements_txt)
+            if remaining:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "generator could not produce a valid bot after retry; "
+                        "remaining issues: " + " | ".join(remaining)
+                    ),
+                )
+
+        return {
+            "agent_name_suggestion": suggested,
+            "rationale": out.get("rationale") or "",
+            "bot_py": bot_py,
+            "requirements_txt": requirements_txt,
+            "model_used": getattr(resp, "model", model),
+            "tokens_in": getattr(getattr(resp, "usage", None), "input_tokens", None),
+            "tokens_out": getattr(getattr(resp, "usage", None), "output_tokens", None),
+        }
+    finally:
+        # Record cost even on failure paths: Anthropic already billed
+        # for whatever tokens loaded before the exception. Commit
+        # explicitly so the cost survives the runner's session-rollback
+        # on handler failure.
+        if token_log:
+            now_ts = datetime.now(timezone.utc)
+            ensure_agent(session, workspace_id, "lightsei.system", now_ts)
+            total_in = sum(t[1] for t in token_log)
+            total_out = sum(t[2] for t in token_log)
+            cost_model = token_log[0][0]
+            delta = compute_cost_usd(cost_model, total_in, total_out)
+            run_row = Run(
+                id=str(uuid.uuid4()),
+                workspace_id=workspace_id,
+                agent_name="lightsei.system",
+                started_at=now_ts,
+                ended_at=now_ts,
+                cost_usd=Decimal(format(delta, ".6f")),
+            )
+            session.add(run_row)
+            session.commit()
+
+
+# Register on import so backend/jobs.py's `_load_default_handlers()`
+# picks it up at startup.
+def _register() -> None:
+    import jobs
+    jobs.register_handler("agent_generate", run_agent_generation_job)
+
+
+_register()

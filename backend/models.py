@@ -826,3 +826,60 @@ class WorkspacePricingOverride(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
+
+
+class GenerationJob(Base):
+    """Async job row for long-running LLM calls (Phase 12C.6).
+
+    `/agents/generate` and `/teams/plan` enqueue a row here instead of
+    running their Anthropic call inline; the in-process runner in
+    `backend/jobs.py` picks pending rows, dispatches by `kind`, and
+    writes `result_payload` or `error` on terminal state. The dashboard
+    polls `GET /workspaces/me/generation-jobs/{id}` to surface progress.
+
+    `kind` is the dispatch discriminator. Valid values:
+      - 'agent_generate': payload is the old POST /agents/generate body
+      - 'team_plan': payload is the old POST /teams/plan body
+
+    `status` lifecycle: pending -> running -> success | failed.
+    No auto-retry in v1; on `failed`, the dashboard surfaces the error
+    and the user retries from the UI.
+    """
+
+    __tablename__ = "generation_jobs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending"
+    )
+    request_payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    result_payload: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=True
+    )
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        # Runner's pending-picker hits (status, created_at). Keeping
+        # status leftmost lets the same index serve "is anything
+        # pending?" probes.
+        Index("idx_generation_jobs_status_created", "status", "created_at"),
+        Index("idx_generation_jobs_workspace", "workspace_id", created_at.desc()),
+    )

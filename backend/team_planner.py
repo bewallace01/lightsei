@@ -422,3 +422,295 @@ def build_validation_retry_message(problems: list[str]) -> str:
         "Call submit_team again with a corrected plan. Keep the rationale "
         "format the same."
     )
+
+
+def run_team_plan_job(
+    session,
+    workspace_id: str,
+    payload: dict,
+) -> dict:
+    """Job-runner handler for `kind='team_plan'`.
+
+    Mirrors the original `POST /workspaces/me/teams/plan` body one-for-one,
+    minus the synchronous input gate (the endpoint did that before
+    enqueue). Returns the same dict the endpoint used to return
+    synchronously; the runner persists it to `generation_jobs.result_payload`.
+
+    The GitHub README fetch moves into the handler so a slow fetch doesn't
+    block the enqueue. The endpoint still validates the input shape
+    (`_parse_github_repo`) so users see format errors synchronously; the
+    network call to GitHub happens here.
+
+    Failure modes that used to surface as HTTPException still raise
+    HTTPException; the runner catches and writes `error`. The dashboard's
+    poll loop surfaces the error text verbatim.
+    """
+    import uuid
+    from datetime import datetime, timezone
+    from decimal import Decimal
+    from typing import Any, Optional
+
+    import anthropic
+    from fastapi import HTTPException
+    from sqlalchemy import select
+
+    import github_api
+    import secrets_crypto
+    from cost import workspace_cost_mtd
+    from db import ensure_agent
+    from models import Agent, GitHubIntegration, Run, WorkspaceSecret
+    from pricing import compute_cost_usd
+
+    # Local copy of main._anthropic_error_to_http (same reason as
+    # agent_generator.run_agent_generation_job: avoid importing main).
+    def _anthropic_err_to_http(exc: Exception) -> HTTPException:
+        status = getattr(exc, "status_code", None)
+        if status == 529:
+            return HTTPException(
+                status_code=503,
+                detail=(
+                    "Anthropic is overloaded right now (529). The SDK retried "
+                    "and gave up — try again in a few seconds."
+                ),
+            )
+        if status == 429:
+            return HTTPException(
+                status_code=429,
+                detail=(
+                    "Anthropic rate-limited this workspace's key. Slow down "
+                    "(or check your tier limits) and retry."
+                ),
+            )
+        return HTTPException(status_code=502, detail=f"Anthropic API error: {exc}")
+
+    # 1. Re-read the workspace secret. Endpoint already gated on its
+    # presence; a race (revoked between enqueue and run) is possible.
+    secret_row = session.get(WorkspaceSecret, (workspace_id, "ANTHROPIC_API_KEY"))
+    if secret_row is None:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "ANTHROPIC_API_KEY was removed from this workspace between "
+                "enqueue and run. Re-add it on /account and retry."
+            ),
+        )
+    try:
+        anthropic_key = secrets_crypto.decrypt(secret_row.encrypted_value)
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="failed to decrypt ANTHROPIC_API_KEY (server config issue)",
+        )
+
+    readme_text = payload.get("readme_text") or None
+    freeform_description = payload.get("freeform_description") or None
+    github_repo = payload.get("github_repo") or None
+    github_branch = payload.get("github_branch") or None
+    # Endpoint normalized `github_repo` to a parsed `(owner, name)` tuple
+    # before enqueue; if it's set, the handler uses that. Falls back to
+    # parsing again here so an older enqueued row (or a direct caller)
+    # still works.
+    parsed_repo = payload.get("github_repo_parsed")
+
+    # 2. Resolve README from GitHub if requested. Done in the handler so
+    # the fetch is off the request path. Format-level errors already
+    # raised synchronously in the endpoint via `_parse_github_repo`.
+    if github_repo and not readme_text:
+        if parsed_repo and isinstance(parsed_repo, list) and len(parsed_repo) == 2:
+            owner, name = parsed_repo[0], parsed_repo[1]
+        else:
+            owner, name, _err = _parse_github_repo_safe(github_repo)
+            if _err is not None:
+                raise HTTPException(status_code=400, detail=_err)
+        pat: Optional[str] = None
+        integ = session.execute(
+            select(GitHubIntegration).where(
+                GitHubIntegration.workspace_id == workspace_id,
+                GitHubIntegration.repo_owner == owner,
+                GitHubIntegration.repo_name == name,
+            )
+        ).scalar_one_or_none()
+        if integ is not None and integ.encrypted_pat:
+            try:
+                pat = secrets_crypto.decrypt(integ.encrypted_pat)
+            except Exception:
+                pat = None
+        try:
+            readme_text = github_api.fetch_readme(
+                repo_owner=owner,
+                repo_name=name,
+                branch=github_branch,
+                pat=pat,
+            )
+        except github_api.GitHubAPIError as e:
+            raise HTTPException(
+                status_code=400 if e.kind in ("auth", "not_found") else 502,
+                detail=f"GitHub: {e.message}",
+            )
+
+    # 3. Snapshot the workspace's existing agents so the plan can wire
+    # to them rather than duplicate. Mirrors the agent_generator path.
+    agent_rows = session.execute(
+        select(Agent).where(Agent.workspace_id == workspace_id).order_by(Agent.name)
+    ).scalars().all()
+    existing_agents: list[dict[str, Any]] = []
+    reserved_names: set[str] = set()
+    for a in agent_rows:
+        if a.name.startswith("lightsei."):
+            continue
+        reserved_names.add(a.name.strip().lower())
+        cmd_kinds: list[str] = []
+        for h in a.command_handlers or []:
+            kind = (h or {}).get("kind") if isinstance(h, dict) else None
+            if isinstance(kind, str):
+                cmd_kinds.append(kind)
+        existing_agents.append(
+            {
+                "name": a.name,
+                "role": a.role,
+                "command_kinds": cmd_kinds,
+            }
+        )
+
+    system_prompt = build_system_prompt(
+        existing_agents=existing_agents,
+        reserved_names=reserved_names,
+    )
+    user_msg = build_user_message(
+        readme_text=readme_text,
+        freeform_description=freeform_description,
+        github_repo=github_repo,
+    )
+
+    # Now off the request path; keep max_retries=5 so transient 529s
+    # don't bubble as job failures.
+    client = anthropic.Anthropic(api_key=anthropic_key, max_retries=5)
+    model = "claude-opus-4-7"
+    token_log: list[tuple[str, int, int]] = []
+
+    def _ask(extra_user_msg: Optional[str] = None) -> Any:
+        messages: list[dict[str, Any]] = [{"role": "user", "content": user_msg}]
+        if extra_user_msg:
+            messages.append({"role": "user", "content": extra_user_msg})
+        resp = client.messages.create(
+            model=model,
+            max_tokens=8000,
+            system=system_prompt,
+            tools=[SUBMIT_TEAM_TOOL],
+            tool_choice={"type": "tool", "name": "submit_team"},
+            messages=messages,
+        )
+        usage = getattr(resp, "usage", None)
+        if usage is not None:
+            token_log.append(
+                (
+                    getattr(resp, "model", None) or model,
+                    int(getattr(usage, "input_tokens", 0) or 0),
+                    int(getattr(usage, "output_tokens", 0) or 0),
+                )
+            )
+        return resp
+
+    def _extract(resp: Any) -> dict[str, Any]:
+        block = next(
+            (
+                b for b in resp.content
+                if getattr(b, "type", None) == "tool_use"
+                and getattr(b, "name", None) == "submit_team"
+            ),
+            None,
+        )
+        if block is None:
+            raise HTTPException(
+                status_code=502,
+                detail=(
+                    "model did not call submit_team "
+                    f"(stop_reason={getattr(resp, 'stop_reason', '?')})"
+                ),
+            )
+        return block.input
+
+    try:
+        try:
+            resp = _ask()
+            plan = _extract(resp)
+        except anthropic.APIError as e:
+            raise _anthropic_err_to_http(e)
+
+        problems = validate_team_plan(plan, reserved_names)
+        if problems:
+            retry_msg = build_validation_retry_message(problems)
+            try:
+                resp = _ask(extra_user_msg=retry_msg)
+                plan = _extract(resp)
+            except anthropic.APIError as e:
+                raise _anthropic_err_to_http(e)
+            remaining = validate_team_plan(plan, reserved_names)
+            if remaining:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "team planner could not produce a valid plan after "
+                        "retry; remaining issues: " + " | ".join(remaining)
+                    ),
+                )
+
+        return {
+            "rationale": plan.get("rationale") or "",
+            "team": plan.get("team") or [],
+            "model_used": getattr(resp, "model", model),
+            "tokens_in": getattr(getattr(resp, "usage", None), "input_tokens", None),
+            "tokens_out": getattr(getattr(resp, "usage", None), "output_tokens", None),
+        }
+    finally:
+        # Spend lands on `lightsei.system` even on error paths: Anthropic
+        # billed for whatever tokens loaded before the exception. Commit
+        # explicitly so the cost survives the runner's session-rollback
+        # on handler failure.
+        if token_log:
+            now_ts = datetime.now(timezone.utc)
+            ensure_agent(session, workspace_id, "lightsei.system", now_ts)
+            total_in = sum(t[1] for t in token_log)
+            total_out = sum(t[2] for t in token_log)
+            cost_model = token_log[0][0]
+            delta = compute_cost_usd(cost_model, total_in, total_out)
+            run_row = Run(
+                id=str(uuid.uuid4()),
+                workspace_id=workspace_id,
+                agent_name="lightsei.system",
+                started_at=now_ts,
+                ended_at=now_ts,
+                cost_usd=Decimal(format(delta, ".6f")),
+            )
+            session.add(run_row)
+            session.commit()
+
+
+def _parse_github_repo_safe(s: str) -> tuple[str, str, str | None]:
+    """Parse `owner/name` or a full URL, returning (owner, name, error).
+
+    Mirrors main._parse_github_repo's logic but returns an error string
+    instead of raising. Used by the job handler when an older enqueued
+    row didn't pre-parse; the endpoint uses the strict raising version.
+    """
+    raw = s.strip()
+    if raw.endswith(".git"):
+        raw = raw[:-4]
+    for prefix in ("https://github.com/", "http://github.com/"):
+        if raw.startswith(prefix):
+            raw = raw[len(prefix):]
+            break
+    if raw.startswith("git@github.com:"):
+        raw = raw[len("git@github.com:"):]
+    parts = raw.strip("/").split("/")
+    if len(parts) < 2:
+        return "", "", f"github_repo must be `owner/name` or a GitHub URL (got {s!r})"
+    return parts[0], parts[1], None
+
+
+def _register() -> None:
+    import jobs
+    jobs.register_handler("team_plan", run_team_plan_job)
+
+
+_register()

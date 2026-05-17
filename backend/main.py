@@ -528,6 +528,19 @@ def on_startup() -> None:
                 "model_pricing seed failed: %s", e
             )
 
+    # Phase 12C.6.2: in-process runner for /agents/generate and
+    # /teams/plan. Picks pending generation_jobs rows and runs them
+    # off the request path so long Anthropic calls don't race the
+    # edge timeout. See backend/jobs.py.
+    import jobs
+    jobs.start_runner()
+
+
+@app.on_event("shutdown")
+async def on_shutdown() -> None:
+    import jobs
+    await jobs.stop_runner()
+
 
 # Phase 11.7 demo trigger v6: full auto-approve chain — should land green ✅ in Slack with zero clicks.
 @app.get("/health")
@@ -4202,28 +4215,28 @@ def _anthropic_error_to_http(exc: "Exception") -> HTTPException:
 # ---------- Phase 12B.1: agent code generation ---------- #
 
 
-@app.post("/workspaces/me/agents/generate")
+@app.post("/workspaces/me/agents/generate", status_code=202)
 def generate_agent(
     body: AgentGenerateIn,
     session: Session = Depends(get_session),
     workspace_id: str = Depends(get_workspace_id),
 ) -> dict[str, Any]:
-    """Generate `bot.py` + `requirements.txt` from a natural-language
-    description by calling Claude with a curated system prompt that
-    teaches the SDK + injects this workspace's existing constellation.
+    """Enqueue an agent-generation job and return its id.
 
-    The agent_name returned is constrained to the star-naming dictionary
-    (see `agent_generator.STAR_DICTIONARY`); names already in use in this
-    workspace are filtered out of the prompt and rejected if Claude
-    re-suggests one anyway. One automatic retry with corrective feedback
-    if the first response violates the constraint; otherwise 422.
+    Phase 12C.6: the synchronous Anthropic call moved off the request
+    path because it could exceed Railway's edge timeout (~100s with
+    retries on Opus). The endpoint now validates input + pre-checks
+    workspace state, then writes a `pending` row to `generation_jobs`
+    and returns `{job_id, status: "pending"}`. The dashboard polls
+    `GET /workspaces/me/generation-jobs/{id}` until terminal.
 
-    Cost: counts against the workspace's daily cap. Anthropic API key
-    is read from the workspace's `ANTHROPIC_API_KEY` secret — the same
-    secret bots use, no new key plumbing.
+    Pre-checks that 4xx synchronously (not enqueued): no
+    ANTHROPIC_API_KEY secret, or workspace already over its monthly
+    budget. Anything that can only fail mid-LLM-call (rate limits,
+    validation retry exhaustion, etc.) is recorded as `error` on the
+    job row instead.
     """
-    import agent_generator
-    import anthropic
+    import jobs
 
     # 1. Auth-paired prereqs: workspace's Anthropic key + cost-cap room.
     secret_row = session.get(
@@ -4236,13 +4249,6 @@ def generate_agent(
                 "ANTHROPIC_API_KEY not set on this workspace. Add it on "
                 "/account before using the bot generator."
             ),
-        )
-    try:
-        anthropic_key = secrets_crypto.decrypt(secret_row.encrypted_value)
-    except Exception:
-        raise HTTPException(
-            status_code=500,
-            detail="failed to decrypt ANTHROPIC_API_KEY (server config issue)",
         )
 
     # Cost-cap check: workspace.budget_usd_monthly is the cap; reject
@@ -4262,262 +4268,43 @@ def generate_agent(
                 ),
             )
 
-    # 2. Snapshot the workspace's constellation for the prompt.
-    agent_rows = session.execute(
-        select(Agent).where(Agent.workspace_id == workspace_id).order_by(Agent.name)
-    ).scalars().all()
-    existing_agents: list[dict[str, Any]] = []
-    reserved_names: set[str] = set()
-    for a in agent_rows:
-        reserved_names.add(a.name.strip().lower())
-        cmd_kinds: list[str] = []
-        for h in a.command_handlers or []:
-            kind = (h or {}).get("kind") if isinstance(h, dict) else None
-            if isinstance(kind, str):
-                cmd_kinds.append(kind)
-        existing_agents.append(
-            {
-                "name": a.name,
-                "role": a.role,
-                "provider": a.provider,
-                "model": a.model,
-                "command_kinds": cmd_kinds,
-            }
-        )
-
-    # 3. Build prompts and call Claude. Forced tool_choice on submit_bot
-    # gives us guaranteed-shape JSON output (same trick Polaris uses for
-    # submit_plan in Phase 6.5).
-    system_prompt = agent_generator.build_system_prompt(
-        existing_agents=existing_agents,
-        reserved_names=reserved_names,
+    job_id = str(uuid.uuid4())
+    jobs.enqueue_job(
+        session,
+        job_id=job_id,
+        workspace_id=workspace_id,
+        kind="agent_generate",
+        request_payload=body.model_dump(exclude_none=False),
     )
-    user_msg = agent_generator.build_user_message(
-        body.description,
-        target_agents=body.target_agents,
-        name_hint=body.name_hint,
-    )
-
-    # Phase 12B.3: when the user is iterating on a previous generation,
-    # append the prior bot + their tweak as additional user turns. The
-    # `description` field still serves as the original framing so Claude
-    # has the full context.
-    iteration_turn: Optional[str] = None
-    if (
-        body.tweak_request
-        and body.previous_bot_py
-        and body.previous_requirements_txt
-    ):
-        iteration_turn = agent_generator.build_iteration_message(
-            previous_bot_py=body.previous_bot_py,
-            previous_requirements_txt=body.previous_requirements_txt,
-            tweak_request=body.tweak_request,
-        )
-
-    # max_retries bumped from the SDK default of 2 → 5 so a brief
-    # Anthropic 529 / 5xx blip doesn't surface as a request failure
-    # to the user. SDK uses exponential backoff between retries.
-    client = anthropic.Anthropic(api_key=anthropic_key, max_retries=5)
-    model = "claude-opus-4-7"
-
-    # Phase 12D follow-up: server-side calls to Anthropic don't go through
-    # the SDK auto-patch, so they bypass the `llm_call_completed` event +
-    # `add_run_cost_from_event` that ordinarily lights up the cost rollup.
-    # Track tokens across every attempt (including retries) and commit a
-    # single Run row at the end so generation calls show up on /cost.
-    token_log: list[tuple[str, int, int]] = []  # (model, in, out) per call
-
-    def _ask(extra_user_msg: Optional[str] = None) -> Any:
-        messages: list[dict[str, Any]] = [{"role": "user", "content": user_msg}]
-        if iteration_turn:
-            messages.append({"role": "user", "content": iteration_turn})
-        if extra_user_msg:
-            # Retry pass: append corrective feedback. Same conversation;
-            # Claude has its prior attempt(s) in scope.
-            messages.append({"role": "user", "content": extra_user_msg})
-        resp = client.messages.create(
-            model=model,
-            max_tokens=8000,
-            system=system_prompt,
-            tools=[agent_generator.SUBMIT_BOT_TOOL],
-            tool_choice={"type": "tool", "name": "submit_bot"},
-            messages=messages,
-        )
-        usage = getattr(resp, "usage", None)
-        if usage is not None:
-            token_log.append(
-                (
-                    getattr(resp, "model", None) or model,
-                    int(getattr(usage, "input_tokens", 0) or 0),
-                    int(getattr(usage, "output_tokens", 0) or 0),
-                )
-            )
-        return resp
-
-    def _extract(resp: Any) -> dict[str, Any]:
-        block = next(
-            (
-                b for b in resp.content
-                if getattr(b, "type", None) == "tool_use"
-                and getattr(b, "name", None) == "submit_bot"
-            ),
-            None,
-        )
-        if block is None:
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    "model did not call submit_bot "
-                    f"(stop_reason={getattr(resp, 'stop_reason', '?')})"
-                ),
-            )
-        return block.input
-
-    try:
-        try:
-            resp = _ask()
-            out = _extract(resp)
-        except anthropic.APIError as e:
-            raise _anthropic_error_to_http(e)
-
-        # 4. Validate name. If the LLM picked off-dictionary or already-in-use,
-        # retry once with a corrective hint; if still bad, surface a 422 with
-        # the chosen name so the dashboard can show the user what happened.
-        suggested = (out.get("agent_name") or "").strip().lower()
-        if not agent_generator.is_valid_star_name(suggested) or suggested in reserved_names:
-            retry_msg = (
-                f"The name `{suggested}` you proposed is "
-                + (
-                    "already taken in this workspace"
-                    if suggested in reserved_names
-                    else "not in the star-naming dictionary"
-                )
-                + ". Pick a different name from the dictionary in the system prompt "
-                "and call submit_bot again with the same bot_py/requirements_txt."
-            )
-            try:
-                resp = _ask(extra_user_msg=retry_msg)
-                out = _extract(resp)
-                suggested = (out.get("agent_name") or "").strip().lower()
-            except anthropic.APIError as e:
-                raise _anthropic_error_to_http(e)
-
-            if (
-                not agent_generator.is_valid_star_name(suggested)
-                or suggested in reserved_names
-            ):
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"generator could not pick a valid star name "
-                        f"(got {suggested!r}); try editing the description or pass "
-                        "a name_hint."
-                    ),
-                )
-
-        # 5. Phase 12B.4 validation gate: compile bot.py, check imports vs
-        # requirements.txt, ensure main() exists. If anything fails, retry
-        # once with the problems appended as a corrective turn. After two
-        # tries we surface the failures rather than ship broken code into
-        # the user's deploy pipeline.
-        bot_py = out.get("bot_py") or ""
-        requirements_txt = out.get("requirements_txt") or ""
-        problems = agent_generator.validate_generated_bot(bot_py, requirements_txt)
-        if problems:
-            retry_msg = agent_generator.build_validation_retry_message(problems)
-            try:
-                resp = _ask(extra_user_msg=retry_msg)
-                out = _extract(resp)
-            except anthropic.APIError as e:
-                raise _anthropic_error_to_http(e)
-            # Re-validate the name (Claude might have changed it during the
-            # retry) and the code.
-            suggested = (out.get("agent_name") or "").strip().lower()
-            if (
-                not agent_generator.is_valid_star_name(suggested)
-                or suggested in reserved_names
-            ):
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        f"validation retry produced an invalid name "
-                        f"(got {suggested!r})"
-                    ),
-                )
-            bot_py = out.get("bot_py") or ""
-            requirements_txt = out.get("requirements_txt") or ""
-            remaining = agent_generator.validate_generated_bot(bot_py, requirements_txt)
-            if remaining:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        "generator could not produce a valid bot after retry; "
-                        "remaining issues: " + " | ".join(remaining)
-                    ),
-                )
-
-        return {
-            "agent_name_suggestion": suggested,
-            "rationale": out.get("rationale") or "",
-            "bot_py": bot_py,
-            "requirements_txt": requirements_txt,
-            "model_used": getattr(resp, "model", model),
-            "tokens_in": getattr(getattr(resp, "usage", None), "input_tokens", None),
-            "tokens_out": getattr(getattr(resp, "usage", None), "output_tokens", None),
-        }
-    finally:
-        # Phase 12D follow-up (#1): record generation API spend on a Run
-        # row so /cost reflects it. We attribute to a synthetic
-        # `lightsei.system` agent — these aren't user bots, but the
-        # workspace did pay for the tokens. Filtered out of the agents
-        # list + constellation map below; surfaces in the cost rollup's
-        # by_agent breakdown so the user can see what generation cost
-        # them. Runs even on the error paths (HTTPException, APIError)
-        # because the API call already happened — Anthropic billed for
-        # whatever tokens loaded before the failure.
-        if token_log:
-            now_ts = utcnow()
-            ensure_agent(session, workspace_id, "lightsei.system", now_ts)
-            total_in = sum(t[1] for t in token_log)
-            total_out = sum(t[2] for t in token_log)
-            # All attempts use the same model; first entry's model is
-            # canonical (server may echo a more specific id like
-            # `claude-opus-4-7-20260101`, but the rate is the same).
-            cost_model = token_log[0][0]
-            delta = compute_cost_usd(cost_model, total_in, total_out)
-            run_row = Run(
-                id=str(uuid.uuid4()),
-                workspace_id=workspace_id,
-                agent_name="lightsei.system",
-                started_at=now_ts,
-                ended_at=now_ts,
-                cost_usd=Decimal(format(delta, ".6f")),
-            )
-            session.add(run_row)
+    return {"job_id": job_id, "status": "pending"}
 
 
 # ---------- Phase 12C.1: project-analysis endpoint ---------- #
 
 
-@app.post("/workspaces/me/teams/plan")
+@app.post("/workspaces/me/teams/plan", status_code=202)
 def plan_team(
     body: TeamPlanIn,
     session: Session = Depends(get_session),
     workspace_id: str = Depends(get_workspace_id),
 ) -> dict[str, Any]:
-    """Take a README / freeform description / GitHub repo and return a
-    proposed team of 3-7 bots wired into a constellation. The plan
-    feeds Phase 12C.2's review UI; 12C.3 generates each bot via 12B.1
-    and 12C.4 deploys them.
+    """Enqueue a team-plan job and return its id.
 
-    Pure analysis: no agents are created. The endpoint returns the
-    plan; the user reviews and accepts (later phase) before anything
-    lands. Cost goes against the workspace budget cap and lands on
-    `lightsei.system` for accounting.
+    Phase 12C.6: the synchronous Anthropic call (and the GitHub README
+    fetch) moved off the request path; both could push request time past
+    Railway's ~100s edge timeout, especially when paired with a
+    validation retry. The endpoint now validates input + pre-checks
+    workspace state, then writes a `pending` row to `generation_jobs`
+    and returns `{job_id, status: "pending"}`. The dashboard polls
+    `GET /workspaces/me/generation-jobs/{id}` until terminal.
+
+    Pre-checks that 4xx synchronously (not enqueued): missing project-info
+    input, no ANTHROPIC_API_KEY secret, malformed github_repo, or
+    workspace already over its monthly budget. Anything that can only
+    fail mid-run (Anthropic errors, GitHub fetch failures, validation
+    retry exhaustion) is recorded as `error` on the job row instead.
     """
-    import anthropic
-
-    import team_planner
+    import jobs
 
     # 1. Input gate: at least one source of project info.
     if not (body.readme_text or body.freeform_description or body.github_repo):
@@ -4529,7 +4316,7 @@ def plan_team(
             ),
         )
 
-    # 2. Workspace's Anthropic key + budget gate (same shape as 12B.1).
+    # 2. Workspace's Anthropic key gate (same shape as /agents/generate).
     secret_row = session.get(
         WorkspaceSecret, (workspace_id, "ANTHROPIC_API_KEY")
     )
@@ -4541,14 +4328,8 @@ def plan_team(
                 "/account before using the team planner."
             ),
         )
-    try:
-        anthropic_key = secrets_crypto.decrypt(secret_row.encrypted_value)
-    except Exception:
-        raise HTTPException(
-            status_code=500,
-            detail="failed to decrypt ANTHROPIC_API_KEY (server config issue)",
-        )
 
+    # 3. Budget gate.
     workspace = session.get(Workspace, workspace_id)
     if workspace and workspace.budget_usd_monthly is not None:
         cost = workspace_cost_mtd(session, workspace_id)
@@ -4563,181 +4344,25 @@ def plan_team(
                 ),
             )
 
-    # 3. Resolve README from GitHub if requested. `github_repo` accepts
-    # either `owner/name` or a full URL; we tolerate both.
-    readme_text = body.readme_text
-    if body.github_repo and not readme_text:
+    # 4. github_repo format validation: pre-parse so the user sees
+    # malformed-URL errors synchronously. The actual GitHub fetch
+    # happens in the handler so a slow network call is off the request
+    # path. We stash the parsed pair on the payload so the handler
+    # doesn't re-parse.
+    payload = body.model_dump(exclude_none=False)
+    if body.github_repo and not body.readme_text:
         owner, name = _parse_github_repo(body.github_repo)
-        # If the workspace has a GitHub integration matching this repo,
-        # use its PAT (so private repos work). Otherwise fall back to
-        # unauth (works for public repos at the unauth rate limit).
-        pat: Optional[str] = None
-        integ = session.execute(
-            select(GitHubIntegration).where(
-                GitHubIntegration.workspace_id == workspace_id,
-                GitHubIntegration.repo_owner == owner,
-                GitHubIntegration.repo_name == name,
-            )
-        ).scalar_one_or_none()
-        if integ is not None and integ.encrypted_pat:
-            try:
-                pat = secrets_crypto.decrypt(integ.encrypted_pat)
-            except Exception:
-                pat = None
-        try:
-            readme_text = github_api.fetch_readme(
-                repo_owner=owner,
-                repo_name=name,
-                branch=body.github_branch,
-                pat=pat,
-            )
-        except github_api.GitHubAPIError as e:
-            raise HTTPException(
-                status_code=400 if e.kind in ("auth", "not_found") else 502,
-                detail=f"GitHub: {e.message}",
-            )
+        payload["github_repo_parsed"] = [owner, name]
 
-    # 4. Snapshot the workspace's existing agents so the plan can wire
-    # to them rather than duplicate. Mirrors the agent_generator path.
-    agent_rows = session.execute(
-        select(Agent).where(Agent.workspace_id == workspace_id).order_by(Agent.name)
-    ).scalars().all()
-    existing_agents: list[dict[str, Any]] = []
-    reserved_names: set[str] = set()
-    for a in agent_rows:
-        # System agents (lightsei.*) are accounting buckets, not bots.
-        if a.name.startswith("lightsei."):
-            continue
-        reserved_names.add(a.name.strip().lower())
-        cmd_kinds: list[str] = []
-        for h in a.command_handlers or []:
-            kind = (h or {}).get("kind") if isinstance(h, dict) else None
-            if isinstance(kind, str):
-                cmd_kinds.append(kind)
-        existing_agents.append(
-            {
-                "name": a.name,
-                "role": a.role,
-                "command_kinds": cmd_kinds,
-            }
-        )
-
-    system_prompt = team_planner.build_system_prompt(
-        existing_agents=existing_agents,
-        reserved_names=reserved_names,
+    job_id = str(uuid.uuid4())
+    jobs.enqueue_job(
+        session,
+        job_id=job_id,
+        workspace_id=workspace_id,
+        kind="team_plan",
+        request_payload=payload,
     )
-    user_msg = team_planner.build_user_message(
-        readme_text=readme_text,
-        freeform_description=body.freeform_description,
-        github_repo=body.github_repo,
-    )
-
-    # 5. Call Claude with forced submit_team tool_choice. Track tokens
-    # across both attempts (initial + validation retry) so generation
-    # cost lands on `lightsei.system` even if the call ultimately fails.
-    # max_retries=5 (vs SDK default 2) covers Anthropic 529 / 5xx blips
-    # without surfacing to the user; the SDK handles exponential backoff.
-    client = anthropic.Anthropic(api_key=anthropic_key, max_retries=5)
-    model = "claude-opus-4-7"
-    token_log: list[tuple[str, int, int]] = []
-
-    def _ask(extra_user_msg: Optional[str] = None) -> Any:
-        messages: list[dict[str, Any]] = [{"role": "user", "content": user_msg}]
-        if extra_user_msg:
-            messages.append({"role": "user", "content": extra_user_msg})
-        resp = client.messages.create(
-            model=model,
-            max_tokens=8000,
-            system=system_prompt,
-            tools=[team_planner.SUBMIT_TEAM_TOOL],
-            tool_choice={"type": "tool", "name": "submit_team"},
-            messages=messages,
-        )
-        usage = getattr(resp, "usage", None)
-        if usage is not None:
-            token_log.append(
-                (
-                    getattr(resp, "model", None) or model,
-                    int(getattr(usage, "input_tokens", 0) or 0),
-                    int(getattr(usage, "output_tokens", 0) or 0),
-                )
-            )
-        return resp
-
-    def _extract(resp: Any) -> dict[str, Any]:
-        block = next(
-            (
-                b for b in resp.content
-                if getattr(b, "type", None) == "tool_use"
-                and getattr(b, "name", None) == "submit_team"
-            ),
-            None,
-        )
-        if block is None:
-            raise HTTPException(
-                status_code=502,
-                detail=(
-                    "model did not call submit_team "
-                    f"(stop_reason={getattr(resp, 'stop_reason', '?')})"
-                ),
-            )
-        return block.input
-
-    try:
-        try:
-            resp = _ask()
-            plan = _extract(resp)
-        except anthropic.APIError as e:
-            raise _anthropic_error_to_http(e)
-
-        # 6. Validate the plan. One retry with corrective feedback if
-        # there are problems; surface 422 with the remaining issues if
-        # the retry still fails.
-        problems = team_planner.validate_team_plan(plan, reserved_names)
-        if problems:
-            retry_msg = team_planner.build_validation_retry_message(problems)
-            try:
-                resp = _ask(extra_user_msg=retry_msg)
-                plan = _extract(resp)
-            except anthropic.APIError as e:
-                raise _anthropic_error_to_http(e)
-            remaining = team_planner.validate_team_plan(plan, reserved_names)
-            if remaining:
-                raise HTTPException(
-                    status_code=422,
-                    detail=(
-                        "team planner could not produce a valid plan after "
-                        "retry; remaining issues: " + " | ".join(remaining)
-                    ),
-                )
-
-        return {
-            "rationale": plan.get("rationale") or "",
-            "team": plan.get("team") or [],
-            "model_used": getattr(resp, "model", model),
-            "tokens_in": getattr(getattr(resp, "usage", None), "input_tokens", None),
-            "tokens_out": getattr(getattr(resp, "usage", None), "output_tokens", None),
-        }
-    finally:
-        # Phase 12D follow-up: server-side Anthropic spend lands on the
-        # `lightsei.system` agent so /cost reflects it. Same pattern as
-        # `generate_agent`. Runs even on error paths.
-        if token_log:
-            now_ts = utcnow()
-            ensure_agent(session, workspace_id, "lightsei.system", now_ts)
-            total_in = sum(t[1] for t in token_log)
-            total_out = sum(t[2] for t in token_log)
-            cost_model = token_log[0][0]
-            delta = compute_cost_usd(cost_model, total_in, total_out)
-            run_row = Run(
-                id=str(uuid.uuid4()),
-                workspace_id=workspace_id,
-                agent_name="lightsei.system",
-                started_at=now_ts,
-                ended_at=now_ts,
-                cost_usd=Decimal(format(delta, ".6f")),
-            )
-            session.add(run_row)
+    return {"job_id": job_id, "status": "pending"}
 
 
 def _parse_github_repo(s: str) -> tuple[str, str]:

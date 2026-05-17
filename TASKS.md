@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 12C.6: bulk-generate hardening — unblock the 12C.5 demo**
+> **Phase 12C.6.5: poll endpoint for generation_jobs**
 
-12C.5 ran partway against app.lightsei.com on 2026-05-16: team-plan worked, edit worked, bulk per-bot generate hard-fails (`net::ERR_FAILED`, no CORS header — connection killed before the backend can respond). Demo can't close until the bulk-generate path survives 4-7 concurrent 60-120s Opus + tool-call requests. Full triage and the punch list are in 12C.6 below. Once those land (or once Railway logs identify a different root cause), re-run 12C.5.
+12C.5 (the demo) is deferred until 12C.6 lands. The demo hit a hard blocker on 2026-05-16: `POST /agents/generate` on prod runs an Opus call with `max_retries=5` that can exceed Railway's edge timeout (~100s). The browser surfaces the killed connection as a CORS error (no `Access-Control-Allow-Origin` header on the gateway's error response), so all 4 bots come back "Failed to fetch" and the team can never deploy. Quick fixes (drop retries, serialize client) would mask the race rather than solve it; 12C.6 fixes it properly by moving the long calls off the request path.
 
-12C.1-12C.4 shipped (see Done Log). 12C.5 is still the gate to closing Phase 12C.
+12C.6.1-12C.6.4 are done (see Done Log): the `generation_jobs` table, the in-process runner, and both `/agents/generate` and `/teams/plan` now return 202 + job_id and run their Anthropic call off the request path. NOW is 12C.6.5: `GET /workspaces/me/generation-jobs/{id}` so the dashboard has a poll target. After that, 12C.6.6 / .7 wire the dashboard to poll, then 12C.6.8 covers tests, then the 12C.6 demo gates re-running 12C.5.
 
 ## Phase 12C: drop a README, get a team
 
@@ -70,21 +70,65 @@ Why this matters: the 12B v1 still requires the user to know what bots they want
 - Edit the team: rename one, remove one, add a "weekly digest" bot. Generate. Review one bot's code. Deploy.
 - Watch them all show up on the constellation. Push a commit. See the chain fan out across the new team.
 
-### 12C.6 Bulk-generate hardening (surfaced during the 12C.5 demo, 2026-05-16)
+**Deferred 2026-05-16:** blocked on edge-timeout / fake-CORS issue on `/agents/generate`. See 12C.6.
 
-The 12C.5 demo against app.lightsei.com got past `POST /workspaces/me/teams/plan` cleanly: Claude proposed a 4-bot team (argus / sirius / vela / vega → hermes), the constellation rendered, edits worked. The break point is 12C.3's bulk-generate step: every `POST /workspaces/me/agents/generate` dies with `net::ERR_FAILED` + missing `Access-Control-Allow-Origin`, the browser pattern that means "connection killed before headers came back." Fails identically in incognito (rules out extension), serialized one-at-a-time (rules out parallel-burst overload), and on retry (rules out transient Anthropic 529 — that path catches `anthropic.APIError` and returns a clean 502 with CORS headers). The team-plan call works because it makes one Anthropic round trip; the per-bot generator does up to two (initial + validation retry via `build_iteration_message`) and that crosses whatever proxy or pod-level limit Railway is enforcing on long requests.
+## Phase 12C.6: async generation (unblock the demo)
 
-This phase exists to make the bulk-generate path resilient enough for the demo to actually close. Do these in order; stop once the demo runs end-to-end.
+Both `/agents/generate` and `/teams/plan` make synchronous Anthropic Opus calls that can run longer than Railway's edge timeout (~100s, sometimes shorter under retry-pressure). Killed connections come back without CORS headers, so the dashboard sees them as CORS errors and the team-from-README flow can never deploy. Fix: move the long calls off the request path. Same pattern for both endpoints.
 
-- [ ] **Confirm the failure shape from the server side.** Pull Railway logs for `api.lightsei.com` around a known-failing click. Three branches: (a) FastAPI 5xx with traceback → code bug; (b) 502/504 from Railway's proxy → request-duration limit; (c) container restart / OOM → resource limit. The fix depends on which.
-- [ ] **Cap and stagger the dashboard's parallel burst.** `Promise.allSettled(team.map(runOneGenerate))` at `dashboard/app/agents/team-from-readme/page.tsx:267` fires N (3-7) concurrent 60-120s Opus calls. Replace with a concurrency-2 semaphore + 250-500ms jitter between starts. Same retry semantics, much smaller burst. Cheap win even if the root cause turns out to be (a) or (c).
-- [ ] **Make `/workspaces/me/agents/generate` stream / chunk progress** so the connection emits bytes during the long wait and intermediaries don't reap it as idle. SSE works; so does periodic `: keepalive\n\n` heartbeats on a `text/event-stream` response. Either lets the existing per-bot UI render `generating` confidently rather than betting on a single 90s+ round-trip surviving.
-- [ ] **Replace the in-request validation retry with a single-shot generator + a follow-up retry-on-demand endpoint.** Today `_ask()` can loop once via `build_iteration_message` inside the same request — that doubles the worst-case wall time and is exactly the thing that hits proxy timeouts. Return the first attempt (with the validation problems attached), let the dashboard call a `/workspaces/me/agents/generate/{id}/retry` endpoint with the corrective feedback if the user wants it. Smaller blast radius per request, same end result.
-- [ ] **Per-bot deploy log surfacing on the success view.** When a bot does deploy via 12C.4, the worker may still fail on first tick (missing secret, import error, etc.). 12C.4 already surfaces the missing-secrets checklist; extend it with a "first-tick log" tail per bot so the demo's "watch the chain fan out" beat doesn't silently swallow a runtime crash. Reuses `/deployments/{id}/logs`.
+The pattern is intentionally minimal: in-process background runner, single database table, no new worker process. Lightsei runs as one Railway service today, so a multi-instance job queue would be premature.
 
-### Alembic logger-mute root cause (surfaced + fixed 2026-05-16)
+### 12C.6.1 Job model + migration
 
-Both the "local-stack startup hang" and the "deployed backend silently failing on agents/generate" lines of investigation pointed at the same bug: `backend/alembic/env.py` was calling `logging.config.fileConfig(config.config_file_name)` without `disable_existing_loggers=False`. The default sets `disabled=True` on every logger that exists at the moment of the call — including `uvicorn`, `uvicorn.access`, `uvicorn.error`, `fastapi`, and our own `lightsei.*` loggers. The app kept serving requests; we just had zero post-startup logs in either local docker or Railway, so the failure shape on /workspaces/me/agents/generate was invisible. Fix is one-liner, committed in the same TASKS.md update window. With it, the access log for /openapi.json shows up locally within a second of the call. Re-deploying api.lightsei.com with this fix is the prerequisite for 12C.6.a finishing — we need real backend logs to see whether agents/generate is timing out, OOM'ing, or 5xx'ing.
+- New table `agent_generation_jobs` (or just `generation_jobs` — covers both kinds). Columns: `id` (uuid pk), `workspace_id` (fk, indexed), `kind` (`'agent_generate' | 'team_plan'`), `status` (`'pending' | 'running' | 'success' | 'failed'`), `request_payload` (jsonb), `result_payload` (jsonb, nullable), `error` (text, nullable), `created_at`, `started_at` (nullable), `finished_at` (nullable), `attempt_count` (int default 0).
+- Alembic migration + SQLAlchemy model in `backend/models.py`. Authz query is `workspace_id = current_workspace`.
+
+### 12C.6.2 In-process background runner
+
+- New `backend/jobs.py`. On FastAPI startup, spawn an asyncio task that polls for `status='pending'` jobs (LIMIT 1, FOR UPDATE SKIP LOCKED) and runs them serially.
+- Dispatch table: `kind -> handler(session, payload) -> dict | raises`. Each handler is a pure function refactored out of the current endpoint body.
+- Failure handling: catch all exceptions, write to `error`, mark `failed`, bump `attempt_count`. No auto-retry in v1 — surfacing the error is enough.
+- Graceful shutdown: on app stop, finish the current job before exiting (uvicorn already gives ~10s).
+
+### 12C.6.3 Refactor /agents/generate
+
+- Extract the body of `generate_agent` in `backend/main.py` into `agent_generator.run_generation(session, workspace_id, payload) -> dict` (or a similar pure function). Endpoint becomes: validate input + budget + key, insert a `generation_jobs` row with `kind='agent_generate'`, return `{job_id, status: 'pending'}` 202.
+- Preserve the cost accounting (the `lightsei.system` Run row) — runner writes it.
+
+### 12C.6.4 Refactor /teams/plan
+
+- Same pattern with `kind='team_plan'`. Logic moves to `team_planner.run_plan(...)`.
+
+### 12C.6.5 Poll endpoint
+
+- `GET /workspaces/me/generation-jobs/{id}` returns the row (status + result_payload + error). Authz: 404 if the job's workspace ≠ the caller's. No cleanup endpoint in v1 — rows are small, can be reaped later.
+
+### 12C.6.6 Dashboard: async generate
+
+- `generateAgent()` in `dashboard/app/api.ts`: POST to `/agents/generate`, get `{job_id}`, poll `GET /generation-jobs/{job_id}` with backoff (1s → 2s → 4s, cap 5s, total cap ~5 min). Resolve on terminal status. Surface backend `error` field as the thrown Error message.
+- `runOneGenerate` in team-from-readme/page.tsx and the existing /agents/generate page consume the new shape transparently (signature unchanged).
+
+### 12C.6.7 Dashboard: async plan
+
+- `fetchTeamPlan()` in `api.ts`: same kick-off-and-poll shape. team-from-readme/page.tsx shows the existing "thinking..." state while polling.
+
+### 12C.6.8 Tests
+
+- Job runner: state transitions, error capture, idempotent picks.
+- Endpoints: 202 shape on kick-off, status progresses, terminal state returned correctly.
+- Reuse the existing stubbed-Anthropic harness from `test_team_planner.py` and `test_agent_generator.py`.
+
+### Demo for 12C.6
+
+- Hit `/agents/team-from-readme` with the Lightsei README on prod. Confirm plan returns inside the timeout. Confirm bulk generate completes for all bots without CORS errors. Once green, NOW reverts to 12C.5.
+
+### Belt-and-suspenders fixes already landed (2026-05-16, upstream merge)
+
+These shipped on upstream while the async refactor was being drafted, and are preserved on top of it:
+
+- **Alembic logger-mute root cause** (`backend/alembic/env.py`). `logging.config.fileConfig(config.config_file_name)` was running without `disable_existing_loggers=False`, which silently set `disabled=True` on every logger that already existed when alembic's env.py ran at FastAPI startup. That muted uvicorn's banner + access logs + every `lightsei.*` logger, so the same failure shape was invisible in both local docker and Railway. With the one-liner fix, the access log for /openapi.json shows up locally within a second. This was the prerequisite to seeing any backend signal at all during the demo dig.
+- **Dashboard concurrency cap** (`dashboard/app/agents/team-from-readme/page.tsx`). The bulk-generate step replaced `Promise.allSettled(team.map(runOneGenerate))` with an inline 2-lane semaphore + 250-500ms jitter. With the async refactor, each per-call wait drops to a poll loop instead of a 60-120s Opus call, so the burst limit is no longer load-bearing, but it doesn't hurt and stays in.
+- **`LIGHTSEI_SECRETS_KEY` required in docker-compose** (`docker-compose.yml` + `.env.example`). Local stack was hitting "secrets store unavailable" the first time anyone added an ANTHROPIC_API_KEY from /account.
 
 ## Phase 12D: cost intelligence (Polaris is smart about spending)
 
@@ -570,6 +614,20 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-16 — Phase 12C.6.1-12C.6.4: async generation_jobs queue + endpoint refactors
+
+The "Failed to fetch" / fake-CORS shape on `/agents/generate` and `/teams/plan` was the synchronous Anthropic Opus call (with `max_retries=5` doubling worst-case wall time on the validation retry path) outrunning Railway's ~100s edge timeout. Killed connections come back without CORS headers, which the browser surfaces as CORS errors. Fix: move both long calls off the request path through a single in-process job queue, then poll for the result. Same pattern for both endpoints, no new worker process.
+
+- [x] **12C.6.1 — `generation_jobs` table + alembic migration + SQLAlchemy model.** One table for both kinds (`agent_generate` / `team_plan`); columns + JSONB request/result payloads matched 1:1 with the spec. Two indexes: `(status, created_at)` for the runner's pending-picker, `(workspace_id, created_at DESC)` for the poll/list path. FK to `workspaces` with `ON DELETE CASCADE`. Migration revision 0025; applied cleanly on local stack.
+- [x] **12C.6.2 — `backend/jobs.py` in-process runner.** Single asyncio task started on FastAPI startup. Claims one pending row at a time via `SELECT … FOR UPDATE SKIP LOCKED LIMIT 1`, dispatches by `kind` through a handler registry, runs the (sync) handler in `asyncio.to_thread` so the loop stays free, finalizes with `result_payload` on success / `error` text on failure. No auto-retry in v1; `attempt_count` bumps on each claim. Graceful cancel on shutdown.
+- [x] **12C.6.3 — `/agents/generate` refactored to enqueue + 202.** Body extracted into `agent_generator.run_agent_generation_job(session, workspace_id, payload)`; endpoint shrinks to "validate input, check secret + budget, insert pending row, return `{job_id, status: 'pending'}` 202." Pre-checks still 4xx synchronously (no secret, over budget); anything that can only fail mid-call (Anthropic errors, validation-retry exhaustion) is captured as `error` on the row. Cost accounting (`lightsei.system` Run row) moved into the handler with an explicit `session.commit()` so spend lands even when the handler raises.
+- [x] **12C.6.4 — `/teams/plan` refactored the same way.** Body extracted into `team_planner.run_team_plan_job(...)`. GitHub README fetch moved into the handler too so slow network calls don't sit on the request path; the endpoint still parses `github_repo` synchronously (via `_parse_github_repo`) so malformed-URL errors come back as 400 immediately and stashes the parsed `(owner, name)` on the payload so the handler doesn't re-parse. Handler registration goes through the same `_register()` + `import jobs; jobs.register_handler(...)` pattern as agent_generator.
+- [x] **Belt-and-suspenders from upstream merge.** `backend/alembic/env.py` got `disable_existing_loggers=False` (was silently muting uvicorn + lightsei.* loggers post-startup — the actual cause of the "no Railway logs" symptom during the demo dig). Dashboard `runWithConcurrencyLimit` cap stays in as a second line of defense even though the async refactor obviates the burst-timing concern. `LIGHTSEI_SECRETS_KEY` made required in docker-compose with a generation hint.
+
+**Verification:** Backend rebuilt + restarted locally. Migration 0025 applied cleanly (`\d generation_jobs` shows the table + both indexes). `POST /teams/plan` with no body returned 400 (input gate). With a body but no `ANTHROPIC_API_KEY`, returned 400 (secret gate). With a fake key seeded, returned `{"job_id": "...", "status": "pending"}` + HTTP 202 inside ~30ms. Two seconds later the row was `status=failed, started_at + finished_at populated, attempt_count=1, error="fastapi.exceptions.HTTPException: 502: Anthropic API error: Error code: 401..."` — the runner picked it up, the handler ran, Anthropic rejected the fake key, the error was mapped via `_anthropic_err_to_http` and persisted verbatim. End-to-end loop for `team_plan` confirmed; `agent_generate` shares the same plumbing.
+
+**What's left for 12C.6 to finish:** 12C.6.5 (`GET /workspaces/me/generation-jobs/{id}` poll endpoint — without this the dashboard can't see results), 12C.6.6 (dashboard `generateAgent()` polls instead of expecting the old sync shape — currently broken end-to-end through the UI), 12C.6.7 (dashboard `fetchTeamPlan()` polls), 12C.6.8 (tests for the runner state machine + endpoints). 12C.6 demo gates re-running 12C.5.
 
 ### 2026-05-12 — Phase 12C.4: bulk deploy + auto-approval rules + missing-secrets checklist
 
