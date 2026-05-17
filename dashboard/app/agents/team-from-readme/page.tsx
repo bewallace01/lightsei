@@ -60,6 +60,85 @@ type RulesResult = {
 const BULK_GENERATE_CONCURRENCY = 2;
 const BULK_GENERATE_JITTER_MS = 250;
 
+// ---------- Workspace-secrets guidance ---------- //
+//
+// Rendered inside the missing-secrets <details> on the deploy-success
+// view. Keyed on the secret name the team-planner LLM proposes; the
+// fallback handles secret names we haven't seen before (Claude can
+// invent reasonable ones for niche providers).
+//
+// Keep this short: one-line "what it is" + a hint about scopes /
+// permissions when relevant. The link goes to the page where the user
+// generates / copies the value.
+
+type SecretGuide = {
+  what: string;
+  where: string;
+  url: string;
+};
+
+const SECRET_GUIDANCE: Record<string, SecretGuide> = {
+  ANTHROPIC_API_KEY: {
+    what: "Used by bots that call Claude (Anthropic) for LLM responses.",
+    where:
+      "Anthropic Console → Settings → API Keys. Create a key, copy it (you only see it once), drop it on /account.",
+    url: "https://console.anthropic.com/settings/keys",
+  },
+  OPENAI_API_KEY: {
+    what: "Used by bots that call GPT / o-series models.",
+    where:
+      "OpenAI platform → API keys → Create new secret key. Project-scoped keys are fine; you only see the value once.",
+    url: "https://platform.openai.com/api-keys",
+  },
+  GOOGLE_API_KEY: {
+    what: "Used by bots that call Gemini.",
+    where:
+      "Google AI Studio → Get API key → Create API key in new project (or use an existing one).",
+    url: "https://aistudio.google.com/apikey",
+  },
+  GITHUB_TOKEN: {
+    what:
+      "Used by bots that read or write to GitHub (PRs, issues, repo contents, push status).",
+    where:
+      "GitHub → Settings → Developer settings → Personal access tokens → Fine-grained tokens. Grant only the repos + permissions the bots need (e.g. Contents: Read, Pull requests: Read & Write).",
+    url: "https://github.com/settings/personal-access-tokens/new",
+  },
+  SLACK_WEBHOOK_URL: {
+    what: "Posts messages to a single Slack channel.",
+    where:
+      "Slack → Apps → Incoming Webhooks → Add to Slack → pick the channel → copy the webhook URL (starts with https://hooks.slack.com/services/...).",
+    url: "https://api.slack.com/messaging/webhooks",
+  },
+  DISCORD_WEBHOOK_URL: {
+    what: "Posts messages to a single Discord channel.",
+    where:
+      "Discord channel → Edit Channel → Integrations → Webhooks → New Webhook → Copy Webhook URL.",
+    url: "https://support.discord.com/hc/en-us/articles/228383668-Intro-to-Webhooks",
+  },
+  LIGHTSEI_API_KEY: {
+    what:
+      "Your workspace's own Lightsei key. Bots use it to send telemetry + check policies. Usually auto-provided on the bot's runtime, but list it here if you're running a bot outside Lightsei's worker.",
+    where: "Lightsei → /account → API keys → Generate new key.",
+    url: "/account",
+  },
+};
+
+// Catch-all for whatever Claude decides to propose. Keeps the dropdown
+// useful even when the secret name isn't in SECRET_GUIDANCE — better
+// than a blank box.
+function guidanceFor(name: string): SecretGuide {
+  const exact = SECRET_GUIDANCE[name];
+  if (exact) return exact;
+  return {
+    what:
+      "A workspace secret one of the proposed bots expects. Lightsei doesn't have a built-in template for this one.",
+    where:
+      "Check the relevant provider's API key / token page, copy the value, then add it on /account with this exact name.",
+    url: "/account",
+  };
+}
+
+
 async function runWithConcurrencyLimit<T>(
   items: T[],
   limit: number,
@@ -1682,12 +1761,47 @@ function DeploySection({
                 haven&apos;t set yet. Without them, the relevant bots
                 will crash on first run.
               </p>
-              <ul className="space-y-1">
-                {missingSecrets.map((name) => (
-                  <li key={name} className="text-sm text-amber-900">
-                    <code className="font-mono">{name}</code>
-                  </li>
-                ))}
+              <ul className="space-y-2">
+                {missingSecrets.map((name) => {
+                  const g = guidanceFor(name);
+                  const isExternal = /^https?:\/\//.test(g.url);
+                  return (
+                    <li key={name}>
+                      <details className="group rounded border border-amber-200 bg-white/60 open:bg-white">
+                        <summary className="cursor-pointer list-none px-3 py-2 text-sm text-amber-900 flex items-center justify-between">
+                          <code className="font-mono">{name}</code>
+                          <span className="text-xs text-amber-700 group-open:hidden">
+                            where to get this →
+                          </span>
+                          <span className="text-xs text-amber-700 hidden group-open:inline">
+                            hide
+                          </span>
+                        </summary>
+                        <div className="px-3 pb-3 pt-1 text-xs text-amber-900 space-y-2">
+                          <p>{g.what}</p>
+                          <p>{g.where}</p>
+                          {isExternal ? (
+                            <a
+                              href={g.url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-block text-accent-600 hover:text-accent-700 font-medium"
+                            >
+                              open the page →
+                            </a>
+                          ) : (
+                            <Link
+                              href={g.url}
+                              className="inline-block text-accent-600 hover:text-accent-700 font-medium"
+                            >
+                              open {g.url} →
+                            </Link>
+                          )}
+                        </div>
+                      </details>
+                    </li>
+                  );
+                })}
               </ul>
               <Link
                 href="/account"
