@@ -55,6 +55,24 @@ def update_capabilities(client, capabilities: Optional[list[str]]) -> None:
     client._capabilities_loaded = True
 
 
+def update_sensitivity_level(client, level: Optional[str]) -> None:
+    """Phase 16.5: cache the agent's sensitivity_level so emit /
+    send_command can decide whether to auto-redact.
+
+    None / non-str / off-list values are silently ignored so a future
+    server bug can't crash the SDK's redaction path. Tolerating
+    missing values matches the fail-open contract used elsewhere in
+    the SDK."""
+    if level is None or not isinstance(level, str):
+        return
+    if level not in {"public", "internal", "sensitive", "pii"}:
+        logger.debug(
+            "lightsei sensitivity_level: ignoring unknown value %r", level,
+        )
+        return
+    client._sensitivity_level = level
+
+
 def has_capability(client, name: str) -> bool:
     """Pure check. Returns True when the gate is disabled (no cache
     loaded yet) so the SDK fails open before init() completes."""
@@ -106,6 +124,7 @@ def fetch_capabilities(client) -> None:
         return
     if isinstance(body, dict):
         update_capabilities(client, body.get("capabilities"))
+        update_sensitivity_level(client, body.get("sensitivity_level"))
 
 
 def is_lightsei_internal_url(client, url: object) -> bool:

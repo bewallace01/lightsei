@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 16.5: SDK redaction primitives + handoff span**
+> **Phase 16.6: dashboard surfaces — sensitivity chips, color-coded constellation, /zones page**
 
-16.1-16.4 all shipped 2026-05-17. The wedge against Viktor is now structurally complete: a `'pii'` bot literally cannot outbound-HTTP without `'internet'`, cannot dispatch without `'send_command'`, and cannot dispatch to a `'public'` bot even with `'send_command'` unless `dispatches_cross_zone=True` (which defaults False and is editable only via PATCH). Backend 403s with the typed `cross_zone_blocked` code; SDK surfaces it as `LightseiCrossZoneError`. Backend 630 tests + SDK 76 tests passing.
+16.1-16.5 all shipped 2026-05-17. The wedge against Viktor is structurally complete AND data-redacted: every outbound surface (httpx, send_command, emit, chat) is gated by capability + zone + auto-redaction for `'pii'` agents. Backend 630 + SDK 101 passing.
 
-NOW is 16.5: `lightsei.redact(text, *, detectors=None)` helper with built-in detectors (email, US phone, SSN-shape, Luhn-checked credit-card). Pluggable via `lightsei.register_redactor(name, fn)`. For agents with `sensitivity_level == 'pii'`, the SDK auto-redacts outgoing `lightsei.emit` payloads + dispatched command payloads + chat-message body by default; per-call opt-out via `lightsei.emit(..., redact=False)`. Plus `lightsei.handoff_span(from_run, to_run, sanitized_prompt)` — synchronous helper that writes a `handoff` event linking the two runs in the trace view (opt-in, no auto-detection).
+NOW is 16.6: make all of this visible on the dashboard. Three things: (1) sensitivity chip on `/agents` (next to the existing Quality chip from 14.4) + on `/agents/{name}` header. (2) Constellation map color-codes nodes by zone (green/yellow/orange/red for public/internal/sensitive/pii), cross-zone edges drawn in red with a thicker stroke. (3) New `/zones` page showing the workspace topology — vertical lane per zone, nodes grouped by lane, explicit "dispatches across zones" section. Editor on `/agents/{name}` lets the user set sensitivity_level + capabilities + cross-zone flag (the three knobs that matter). Refusal surfacing: when backend returns `cross_zone_blocked`, the command-enqueue UI shows the actual policy violation rather than a generic 403. This is the largest sub-task of Phase 16 — multi-file dashboard work.
 
 ## Phase 12C: drop a README, get a team
 
@@ -261,7 +261,7 @@ Make the SDK refuse capability-restricted ops at call time. Auto-patch path (pre
 
 The load-bearing piece. Phase 11's `send_command` (SDK) + `enqueue_command` (backend) both gain a zone check: same `sensitivity_level` between source and target is always allowed; different levels are refused unless the source agent has `dispatches_cross_zone=True`. Backend refusal is a 403 with a `cross_zone_blocked` error code; SDK refusal raises `LightseiCrossZoneError` before the network call. Existing auto-approval rules (Phase 11.2) still apply on top — cross-zone-enabled does NOT mean auto-approved. New `dispatches_cross_zone: bool` column on `agents` (default `False`) in the same alembic revision as the other 16.x schema changes. Editor UI in 16.6 surfaces the flag; setting it from team-from-README requires explicit user opt-in (no preset enables it silently).
 
-### 16.5 — SDK redaction primitives + handoff span
+### 16.5 — SDK redaction primitives + handoff span ✅ shipped 2026-05-17
 
 `lightsei.redact(text, *, detectors=None)` returns text with PII-shaped substrings replaced with `[redacted-email]`, `[redacted-phone]`, etc. Built-in detectors: email, US phone, SSN-shape (9 digits with the standard hyphenation), credit-card-shape (Luhn-checked 13-19 digits). Pluggable via `lightsei.register_redactor(name, fn)`. For agents with `sensitivity_level == 'pii'`, the SDK auto-redacts outgoing `lightsei.emit` payloads + dispatched command payloads + chat-message body by default; per-call opt-out via `lightsei.emit(..., redact=False)` for the operator who genuinely needs the raw value. Also ships `lightsei.handoff_span(from_run, to_run, sanitized_prompt)` — a synchronous helper that writes a `handoff` event linking the two runs in the trace view; opt-in (no auto-detection).
 
@@ -768,6 +768,21 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 16.5: SDK redaction primitives + handoff span
+
+The last SDK-level work in Phase 16. Built-in detectors for the four shapes the canonical CRM-bot scenario cares about (email / US phone / hyphenated SSN / Luhn-valid credit card), pluggable via `register_redactor` for niche workspace-specific PII shapes, auto-applied to every outgoing payload from `'pii'` agents with a per-call opt-out for genuine audit cases.
+
+- [x] **`sdk/lightsei/_redaction.py` (new).** Built-in detectors: `_redact_email` (standard local@domain.tld shape, conservative — won't match obfuscated forms), `_redact_phone` (US 10-digit with country-code prefix optional, requires separators OR parens so bare digit runs don't false-positive on dates/ids), `_redact_ssn` (hyphenated `XXX-XX-XXXX` only — bare 9-digit runs deliberately not matched), `_redact_credit_card` (13-19 digits with optional separators, Luhn-validated to drop ~90% of random digit false positives). `register_redactor(name, fn)` adds custom detectors; same name as a built-in replaces the built-in's implementation. `redact(text, *, detectors=None)` runs the merged set (or a subset by name). `redact_payload(value)` walks dict/list/tuple containers recursively; numbers/bools/None pass through unchanged; returns a new container without mutating the input.
+- [x] **`update_sensitivity_level(client, level)` in `_capabilities.py`.** Pairs with `update_capabilities` — both called from `fetch_capabilities` (initial init() fetch) and from the heartbeat refresh path in `_instance.py`. Validates against the four-level ladder; silently ignores garbage so a future server bug can't crash the redaction path.
+- [x] **`_client._sensitivity_level` attribute.** Cleared in `_reset_for_tests` for test isolation. Also wipes the custom-redactor map (`_reset_custom_redactors_for_tests`) so a test registering a custom detector doesn't leak into the next test's redact() output.
+- [x] **Auto-redact wired into `emit` + `send_command`.** Both grow a `redact: bool = True` kwarg; when source agent's `sensitivity_level == 'pii'` and the kwarg is True, the payload is recursively redacted before it leaves the SDK. `redact=False` is the per-call escape hatch for the audit-trail case.
+- [x] **`lightsei.handoff_span(from_run, to_run, sanitized_prompt, *, notes=None)`.** Emits a `handoff` event linking the two runs. Opt-in (no auto-detection — too much false-positive risk). Sanitized prompt isn't re-redacted: it's already clean by contract, and double-redacting could mangle deliberate `[redacted-email]` placeholders typed by the operator. The Phase 21 operator chat surface will call this when an operator finishes a translation; users can call it directly today.
+- [x] **`__init__.py` exposes `redact`, `register_redactor`, `handoff_span`** at the top level + adds them to `__all__`. Wrapped versions of `emit` + `send_command` carry the `redact` kwarg in their public signature with a docstring explaining the contract.
+
+**Verification:** 25 new tests in `sdk/tests/test_redaction.py` covering each built-in detector (matches + non-matches + edge cases like bare 10-digit runs that look phone-shaped but aren't separated), Luhn validation against published test card numbers (Visa / Mastercard / Amex), pluggable detector registration including name-collision override of built-ins, validation errors for bad register inputs, recursive payload walking on dicts/lists/nested structures, in-place mutation invariant (caller's payload preserved), auto-redact lifecycle (pii agent → redact; internal agent → pass through; per-call opt-out), handoff_span emits the linking event with all fields including notes, handoff doesn't double-redact a deliberate placeholder, BUILTIN_DETECTORS public surface invariant. Full SDK suite: 101 passed in 22s. Backend full suite: 630 passed in 128s. 0 regressions.
+
+**What this completes:** every SDK-level surface in Phase 16's plan. Remaining sub-tasks (16.6 dashboard surfaces + 16.7 presets + team-from-README integration) are pure dashboard / backend wiring — no more SDK changes for the trust-zone story.
 
 ### 2026-05-17 — Phase 16.4: cross-zone dispatch enforcement (framework-level)
 

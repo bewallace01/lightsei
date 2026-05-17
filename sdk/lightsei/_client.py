@@ -431,6 +431,16 @@ class _Client:
             # don't leak granted/denied state across runs.
             self._capabilities_cache = []
             self._capabilities_loaded = False
+            # Phase 16.5: sensitivity level drives auto-redact in
+            # emit + send_command. None = not loaded yet (treat as
+            # non-pii to fail open). Cleared between tests for the
+            # same isolation reason.
+            self._sensitivity_level = None
+            try:
+                from ._redaction import _reset_custom_redactors_for_tests
+                _reset_custom_redactors_for_tests()
+            except Exception:
+                pass
             self._event_rejected_count = 0
 
 

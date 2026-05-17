@@ -59,6 +59,9 @@ __all__ = [
     "get_cost_insights",
     "get_quality_signal",
     "get_run_id",
+    "handoff_span",
+    "redact",
+    "register_redactor",
     "get_secret",
     "on_command",
     "on_chat",
@@ -159,8 +162,81 @@ def emit(
     *,
     run_id: Optional[str] = None,
     agent_name: Optional[str] = None,
+    redact: bool = True,
 ) -> None:
+    """Emit a telemetry event.
+
+    Phase 16.5: when the agent's sensitivity_level is `'pii'`, the
+    payload is recursively redacted (email / phone / SSN / Luhn-
+    valid credit cards replaced with `[redacted-*]` placeholders)
+    before it leaves the SDK. Pass `redact=False` to opt out per-call
+    when the operator genuinely needs the raw value (e.g. an
+    audit-trail bot whose whole job is preserving exact input).
+    """
+    if (
+        redact
+        and payload is not None
+        and getattr(_client, "_sensitivity_level", None) == "pii"
+    ):
+        from ._redaction import redact_payload
+        payload = redact_payload(payload)
     _client.emit(kind, payload, run_id=run_id, agent_name=agent_name)
+
+
+def redact(text: str, *, detectors: Optional[list[str]] = None) -> str:
+    """Phase 16.5: redact a string with the built-in PII detectors
+    (email, US phone, SSN, Luhn-valid credit card) + any custom
+    detectors registered via `register_redactor`. Pass `detectors=`
+    a list to restrict which detectors run (default: all)."""
+    from ._redaction import redact as _impl
+    return _impl(text, detectors=detectors)
+
+
+def register_redactor(name: str, fn: Any) -> None:
+    """Phase 16.5: register a custom detector that runs alongside the
+    built-ins. Same `name` as a built-in replaces the built-in's
+    implementation for that detector. Detector signature: takes a
+    string, returns a string with the redacted substrings replaced
+    by a placeholder like `[redacted-mything]`."""
+    from ._redaction import register_redactor as _impl
+    _impl(name, fn)
+
+
+def handoff_span(
+    from_run: str,
+    to_run: str,
+    sanitized_prompt: str,
+    *,
+    notes: Optional[str] = None,
+) -> None:
+    """Phase 16.5: record a human-mediated handoff between two runs.
+
+    Emits a `handoff` event linking `from_run` (the upstream run the
+    operator read output from) to `to_run` (the downstream run the
+    operator wrote sanitized prompt into). Lets cross-zone chains be
+    reassembled in traces even though the actual data didn't cross
+    the boundary — the human was the translation layer.
+
+    Opt-in (no auto-detection). The Phase 21 operator chat surface
+    will call this when an operator finishes a translation; users
+    can call it directly today.
+
+    `sanitized_prompt` is recorded as-is (not re-redacted) since the
+    caller already sanitized it by definition. Pass `notes` for any
+    free-form context the operator wants to attach (why the
+    translation was needed, what they removed, etc.)."""
+    payload: dict[str, Any] = {
+        "from_run": from_run,
+        "to_run": to_run,
+        "sanitized_prompt": sanitized_prompt,
+    }
+    if notes is not None:
+        payload["notes"] = notes
+    # redact=False — `sanitized_prompt` is already clean by contract;
+    # redacting again could double-redact placeholders the operator
+    # deliberately typed (e.g. "[redacted-email]" as an explicit
+    # placeholder in the prompt).
+    _client.emit("handoff", payload)
 
 
 def check_policy(
@@ -284,6 +360,7 @@ def send_command(
     *,
     dispatch_chain_id: Optional[str] = None,
     source_agent: Optional[str] = None,
+    redact: bool = True,
 ) -> dict[str, Any]:
     """Enqueue a command for another agent. Returns the created command.
 
@@ -304,8 +381,23 @@ def send_command(
     explicitly to override (rare; only useful for tests or for joining a
     chain id from outside the SDK's normal flow).
 
-    Raises LightseiError on transport or non-2xx.
+    Phase 16.5: when the source agent's sensitivity_level is `'pii'`,
+    the dispatched payload is recursively redacted before it leaves
+    the SDK. Pass `redact=False` to opt out per-call. The capability
+    gate (Phase 16.3) + cross-zone gate (Phase 16.4) run regardless.
+
+    Raises LightseiError on transport or non-2xx. Raises
+    LightseiCapabilityError if `'send_command'` isn't granted.
+    Raises LightseiCrossZoneError if target's zone differs from
+    source's and the source isn't opted into cross-zone dispatch.
     """
+    if (
+        redact
+        and payload is not None
+        and getattr(_client, "_sensitivity_level", None) == "pii"
+    ):
+        from ._redaction import redact_payload
+        payload = redact_payload(payload)
     return _impl_send_command(
         _client,
         target_agent,

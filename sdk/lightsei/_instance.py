@@ -132,8 +132,14 @@ class _HeartbeatPoster:
             return
         if isinstance(body, dict):
             try:
-                from ._capabilities import update_capabilities
+                from ._capabilities import (
+                    update_capabilities,
+                    update_sensitivity_level,
+                )
                 update_capabilities(self._client, body.get("capabilities"))
+                update_sensitivity_level(
+                    self._client, body.get("sensitivity_level"),
+                )
             except Exception as e:
                 logger.debug(
                     "lightsei capability cache refresh failed: %s", e,
