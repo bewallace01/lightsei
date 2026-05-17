@@ -7,11 +7,14 @@ import {
   AGENT_PROVIDERS,
   Agent,
   AgentProvider,
+  AgentQualitySummary,
   ConstellationAgent,
   UnauthorizedError,
+  WorkspaceQuality,
   deleteAgent,
   fetchAgents,
   fetchConstellation,
+  fetchWorkspaceQuality,
   patchAgent,
 } from "../api";
 
@@ -51,6 +54,58 @@ function fmtInterval(s: number | null): string {
 }
 
 
+// Compact quality chip rendered in the /agents Quality column.
+// Tone follows the worst verdict present in the window: any `bad` →
+// red, any `borderline` → amber, all `good` → green. Empty pool
+// (no evals yet) → muted "—" pill so the user knows the eval cron
+// just hasn't sampled this agent yet rather than thinking the bot
+// is silently broken.
+function QualityChip({
+  q,
+}: {
+  q: AgentQualitySummary | null;
+}): JSX.Element {
+  if (q === null || q.total_evaluations === 0) {
+    return (
+      <span
+        className="inline-block px-2 py-0.5 rounded-full bg-gray-100 text-gray-500 text-[11px] font-medium"
+        title="no judge verdicts in the last 7 days yet"
+      >
+        —
+      </span>
+    );
+  }
+  const { good, borderline, bad } = q.verdict_counts;
+  let tone = "bg-green-100 text-green-800";
+  let label = `${good} good`;
+  if (bad > 0) {
+    tone = "bg-red-100 text-red-800";
+    label = `${bad} bad`;
+  } else if (borderline > 0) {
+    tone = "bg-amber-100 text-amber-800";
+    label = `${borderline} borderline`;
+  }
+  const arrow =
+    q.trend.direction === "up" ? " ↑"
+    : q.trend.direction === "down" ? " ↓"
+    : "";
+  const title =
+    `7d verdicts: ${good} good · ${borderline} borderline · ${bad} bad` +
+    (q.trend.direction === "unknown"
+      ? ""
+      : `\ntrend vs prior 7d: ${q.trend.delta_pp >= 0 ? "+" : ""}${q.trend.delta_pp}pp`);
+  return (
+    <span
+      className={`inline-block px-2 py-0.5 rounded-full ${tone} text-[11px] font-medium`}
+      title={title}
+    >
+      {label}
+      {arrow}
+    </span>
+  );
+}
+
+
 // Combined view of an agent: pin/config from /agents + status/activity from
 // /constellation. Constellation filters out fully-dormant agents (no events
 // in 24h, no recent heartbeat) so both lists' lengths can differ — we merge
@@ -69,6 +124,10 @@ type AgentRow = {
   tick_interval_s: number | null;
   description: string | null;
   last_event_at: string | null;
+  // Phase 14.4: judge-LLM verdict rollup for the last 7 days. null
+  // when the eval cron hasn't produced any verdicts for this agent
+  // yet (fresh deploy, no completed runs sampled).
+  quality: AgentQualitySummary | null;
 };
 
 
@@ -99,10 +158,20 @@ export default function AgentsPage() {
 
   const refresh = async () => {
     try {
-      const [agents, constellation] = await Promise.all([
+      // Quality is best-effort: a workspace with zero evals (fresh
+      // deploy, no completed runs sampled yet) shouldn't break the
+      // roster render. Catch + treat as empty.
+      const [agents, constellation, quality] = await Promise.all([
         fetchAgents(),
         fetchConstellation(),
+        fetchWorkspaceQuality().catch(() => null as WorkspaceQuality | null),
       ]);
+      const qualityByAgent = new Map<string, AgentQualitySummary>();
+      if (quality) {
+        for (const q of quality.per_agent) {
+          qualityByAgent.set(q.agent_name, q);
+        }
+      }
       const byName = new Map<string, AgentRow>();
       // Seed every agent that exists in the DB so dormant ones still show.
       for (const a of agents) {
@@ -118,6 +187,7 @@ export default function AgentsPage() {
           tick_interval_s: a.tick_interval_s,
           description: a.description,
           last_event_at: null,
+          quality: qualityByAgent.get(a.name) ?? null,
         });
       }
       // Layer in the constellation data (status, recent activity, role).
@@ -146,6 +216,7 @@ export default function AgentsPage() {
             tick_interval_s: null,
             description: null,
             last_event_at: c.last_event_at,
+            quality: qualityByAgent.get(c.name) ?? null,
           });
         }
       }
@@ -246,6 +317,7 @@ export default function AgentsPage() {
                 <th className="px-4 py-3 font-medium">Tick</th>
                 <th className="px-4 py-3 font-medium">Runs (24h)</th>
                 <th className="px-4 py-3 font-medium">Cost (24h)</th>
+                <th className="px-4 py-3 font-medium">Quality (7d)</th>
                 <th className="px-4 py-3 font-medium">Last seen</th>
                 <th className="px-4 py-3 font-medium text-right"></th>
               </tr>
@@ -318,6 +390,9 @@ export default function AgentsPage() {
                   </td>
                   <td className="px-4 py-3 font-mono text-xs text-gray-700 tabular-nums">
                     {fmtUsd(r.cost_24h_usd)}
+                  </td>
+                  <td className="px-4 py-3">
+                    <QualityChip q={r.quality} />
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-500">
                     {fmtRelative(r.last_event_at)}

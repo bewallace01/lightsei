@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 14.4: quality signal endpoints + dashboard surface**
+> **Phase 14.5: SDK helper for 12D.3 consumption**
 
-14.1 (sampler + judge prompt + schema), 14.2 (`run_evaluations` table + alembic 0026), and 14.3 (periodic eval job + cron) all shipped 2026-05-17 — see Done Log. Full backend suite at 560 passing in 118s. End-to-end: cron runs hourly, drops one `eval_runs` job per workspace, the existing generation_jobs runner claims it, the handler samples completed runs, calls Sonnet as the judge, persists verdicts to `run_evaluations`, attributes judge spend to `lightsei.system` so the workspace monthly cap covers it.
+14.1-14.4 all shipped 2026-05-17 — full pipeline live: sampler picks runs, judge writes verdicts, dashboard renders them inline as chips on /agents and a recent-bads breakdown on /agents/{name}. Full backend suite at 577 passing in 122s. The signal exists; the next thing that needs to read it is the auto-tuner that lands in 12D.3.
 
-NOW is 14.4: surface what the judge wrote. Two backend endpoints — `GET /workspaces/me/agents/{name}/quality?days=7` for one agent (verdict counts + recent bads with reasons + trend) and `GET /workspaces/me/quality` for the workspace rollup. Dashboard: a Quality column on /agents (green pill if all-good, amber if borderline present, red if any bad within the window) and a Quality section on /agents/{name} showing the verdict breakdown + the most recent bads so the user can see _why_ a bot got flagged.
+NOW is 14.5: ship `lightsei.get_quality_signal(agent_name, days=7)` in the SDK so 12D.3 (when it lands) can read the same shape the dashboard renders without reinventing the call. Same fail-open pattern as `lightsei.get_cost_insights` from 12D.2 — a SDK helper that just wraps the existing `/workspaces/me/agents/{name}/quality` endpoint with the workspace API key the bot already has on hand. After this, only 14.6 (additional tests if any) + 14.7 (the demo) remain before Phase 14 closes and 12D.3 is unblocked.
 
 ## Phase 12C: drop a README, get a team
 
@@ -210,7 +210,7 @@ New table backed by SQLAlchemy model in `backend/models.py`: `id` (uuid pk), `ru
 
 Register `eval_runs` as a new `kind` in `backend/jobs.py`'s dispatch registry (same SKIP LOCKED + asyncio.to_thread pattern from 12C.6.2). Handler calls `eval_sampler.pick_sample`, runs the judge for each, writes a `run_evaluations` row. Cron-style enqueue: at startup register an asyncio task that drops one `eval_runs` job per hour (configurable via `LIGHTSEI_EVAL_INTERVAL_S`, default 3600). Judge spend lands on `lightsei.system` like generation spend, so the workspace budget gate already applies; no separate cap in v1.
 
-### 14.4 — Quality signal endpoints + dashboard surface
+### 14.4 — Quality signal endpoints + dashboard surface ✅ shipped 2026-05-17
 
 Backend: `GET /workspaces/me/agents/{name}/quality?days=7` returns `{verdict_counts: {good, borderline, bad}, recent_bads: [{run_id, reasons, confidence, occurred_at}, ...], trend_7d}` for one agent; `GET /workspaces/me/quality` for the workspace rollup. Dashboard: new "Quality" column on /agents (green chip with count if all good, amber if any borderline, red if any bad in the window). New section on /agents/{name} showing the verdict breakdown + the most recent bad evaluations with their judge reasons, so the user can see _why_ the bot is flagged.
 
@@ -666,6 +666,20 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 14.4: quality signal endpoints + dashboard surface
+
+Surfaces what the Phase 14.3 judge wrote. End-to-end: cron picks runs → judge rates them → endpoints aggregate → dashboard renders inline on /agents (Quality chip per row) and on /agents/{name} (verdict breakdown + recent bads with reasons).
+
+- [x] **`backend/quality_signal.py` (new).** Pure module — no LLM calls, no writes. `agent_quality(session, ws, name, days=7)` and `workspace_quality(session, ws, days=7)` return verdict counts + recent bads + trend vs the prior window of the same length. `MAX_WINDOW_DAYS=90` clamps a misbehaving caller; `RECENT_BADS_LIMIT=5` caps the inline list. Trend uses a 1pp dead-band so small-sample noise doesn't flicker the arrow; returns `direction='unknown'` when either window has zero evals.
+- [x] **Two endpoints in `main.py`.** `GET /workspaces/me/quality?days=7` for the workspace rollup (per_agent list sorted alphabetically + workspace-wide rollup + top recent_bads); `GET /workspaces/me/agents/{name}/quality?days=7` for one agent (verdict counts + recent_bads with judge reasons + trend). Both pure reads; safe to poll.
+- [x] **Dashboard `api.ts`.** New types: `Verdict`, `VerdictCounts`, `QualityTrend`, `RecentBad`, `AgentQualitySummary`, `AgentQuality`, `WorkspaceQuality`. New helpers: `fetchWorkspaceQuality(days=7)`, `fetchAgentQuality(name, days=7)`. tsc --noEmit clean.
+- [x] **/agents Quality column.** New `Quality (7d)` header. New `QualityChip` component picks tone from the worst verdict present (any `bad` → red, any `borderline` → amber, all `good` → green; empty pool → muted "—" with hover hint so the user knows the cron just hasn't sampled yet rather than thinking the bot is broken). Hover title shows the full breakdown + the trend delta. `fetchWorkspaceQuality` runs in parallel with `fetchAgents` + `fetchConstellation`; failure is swallowed (page render isn't gated on a fresh-deploy workspace having eval data).
+- [x] **/agents/{name} Quality section.** Renders above System Prompt. Hidden entirely when `total_evaluations === 0` so dormant agents don't show empty sections. Shows three colored verdict-count chips, the total, the trend pill (↑/↓/→ + pp delta), and a "Recent bads" list with the judge's reasons + confidence + run_id link.
+
+**Verification:** 17 new tests in `backend/tests/test_quality_signal.py` covering pure-module math (verdict counts, window clamping, recent-bads ordering + limit, trend up/flat/unknown, system-agent filtering, workspace-rollup sums, alphabetical per_agent ordering) + the two endpoints (response shape, cross-workspace isolation, 401 unauthenticated). Full backend suite: 577 passed in 122s; 0 regressions. Dashboard tsc --noEmit clean.
+
+**Not done in this slice:** 14.5 (SDK helper for 12D.3 consumption — `lightsei.get_quality_signal`), 14.6 (additional tests), 14.7 (Phase 14 demo).
 
 ### 2026-05-17 — Phase 14.3: periodic eval job + cron enqueuer
 

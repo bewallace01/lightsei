@@ -9,6 +9,7 @@ import {
   AgentInstance,
   AgentManifest,
   AgentProvider,
+  AgentQuality,
   cancelCommand,
   Command,
   Deployment,
@@ -16,6 +17,7 @@ import {
   fetchAgent,
   fetchAgentInstances,
   fetchAgentManifest,
+  fetchAgentQuality,
   fetchCommands,
   fetchDeployments,
   patchAgent,
@@ -56,6 +58,7 @@ export default function AgentPage({ params }: { params: { name: string } }) {
   const [agent, setAgent] = useState<Agent | null>(null);
   const [instances, setInstances] = useState<AgentInstance[]>([]);
   const [deployments, setDeployments] = useState<Deployment[]>([]);
+  const [quality, setQuality] = useState<AgentQuality | null>(null);
   const [systemPromptDraft, setSystemPromptDraft] = useState("");
   const [systemPromptSaving, setSystemPromptSaving] = useState(false);
   const [systemPromptSavedAt, setSystemPromptSavedAt] = useState<number | null>(null);
@@ -67,17 +70,19 @@ export default function AgentPage({ params }: { params: { name: string } }) {
 
   const load = async () => {
     try {
-      const [cmds, mf, ag, inst, deps] = await Promise.all([
+      const [cmds, mf, ag, inst, deps, q] = await Promise.all([
         fetchCommands(agentName),
         fetchAgentManifest(agentName),
         fetchAgent(agentName).catch(() => null),
         fetchAgentInstances(agentName).catch(() => []),
         fetchDeployments(agentName).catch(() => [] as Deployment[]),
+        fetchAgentQuality(agentName).catch(() => null as AgentQuality | null),
       ]);
       setCommands(cmds);
       setManifest(mf);
       setInstances(inst);
       setDeployments(deps);
+      setQuality(q);
       if (ag) {
         setAgent(ag);
         // Only sync the draft if the user hasn't typed since last load.
@@ -374,6 +379,95 @@ export default function AgentPage({ params }: { params: { name: string } }) {
                 </div>
               </div>
             ))}
+          </div>
+        </section>
+      )}
+
+      {/* Phase 14.4: judge-LLM quality verdicts. Renders the verdict
+          breakdown for the last 7 days + the most-recent bads with
+          their judge reasons so the user can see _why_ a bot is
+          flagged without an extra fetch. Hidden entirely on agents
+          with no eval data yet (fresh deploys before the cron has
+          sampled anything). */}
+      {quality && quality.total_evaluations > 0 && (
+        <section className="mb-10">
+          <h2 className="text-[11px] font-semibold text-gray-500 mb-4 uppercase tracking-wider">
+            Quality (last {quality.days}d, judge: {
+              quality.recent_bads[0]?.judge_model ?? "claude-sonnet-4-6"
+            })
+          </h2>
+          <div className="rounded-lg border border-gray-200 p-4 bg-white">
+            <div className="flex items-center gap-3 flex-wrap mb-3">
+              <span className="inline-block px-2.5 py-1 rounded-full bg-green-100 text-green-800 text-xs font-medium">
+                {quality.verdict_counts.good} good
+              </span>
+              <span className="inline-block px-2.5 py-1 rounded-full bg-amber-100 text-amber-800 text-xs font-medium">
+                {quality.verdict_counts.borderline} borderline
+              </span>
+              <span className="inline-block px-2.5 py-1 rounded-full bg-red-100 text-red-800 text-xs font-medium">
+                {quality.verdict_counts.bad} bad
+              </span>
+              <span className="text-xs text-gray-500 ml-2">
+                {quality.total_evaluations} total
+              </span>
+              {quality.trend.direction !== "unknown" && (
+                <span
+                  className={
+                    "text-xs ml-2 " +
+                    (quality.trend.direction === "up"
+                      ? "text-green-700"
+                      : quality.trend.direction === "down"
+                        ? "text-red-700"
+                        : "text-gray-500")
+                  }
+                  title="Good-rate change vs the prior 7d window"
+                >
+                  {quality.trend.direction === "up" && "↑ "}
+                  {quality.trend.direction === "down" && "↓ "}
+                  {quality.trend.direction === "flat" && "→ "}
+                  {quality.trend.delta_pp >= 0 ? "+" : ""}
+                  {quality.trend.delta_pp}pp vs prior {quality.days}d
+                </span>
+              )}
+            </div>
+            {quality.recent_bads.length > 0 ? (
+              <div className="mt-3 border-t border-gray-100 pt-3">
+                <h3 className="text-xs font-semibold text-gray-700 mb-2">
+                  Recent bads
+                </h3>
+                <ul className="space-y-2">
+                  {quality.recent_bads.map((b) => (
+                    <li
+                      key={b.run_id}
+                      className="rounded border border-red-100 bg-red-50/50 px-3 py-2"
+                    >
+                      <div className="flex items-center justify-between text-xs text-red-900 mb-1">
+                        <span>
+                          <span className="font-mono">
+                            run {b.run_id.slice(0, 8)}…
+                          </span>
+                          {" · "}
+                          {fmt(b.run_started_at ?? b.created_at)}
+                        </span>
+                        <span className="text-red-700">
+                          confidence {Math.round(b.confidence * 100)}%
+                        </span>
+                      </div>
+                      <ul className="text-xs text-red-900 list-disc pl-5">
+                        {b.reasons.map((r, i) => (
+                          <li key={i}>{r}</li>
+                        ))}
+                      </ul>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <p className="text-xs text-gray-500 mt-2">
+                No bad verdicts in the last {quality.days} days. Nothing
+                to investigate.
+              </p>
+            )}
           </div>
         </section>
       )}

@@ -510,6 +510,74 @@ export async function fetchAgent(name: string): Promise<Agent> {
   )) as Agent;
 }
 
+
+// ---------- Phase 14.4: quality signal ---------- //
+//
+// Reads against `run_evaluations` populated by the Phase 14.3 eval
+// runner. The /agents Quality column polls `fetchWorkspaceQuality`;
+// /agents/{name}'s Quality section polls `fetchAgentQuality` for
+// the recent-bads reasons it renders inline.
+
+export type Verdict = "good" | "borderline" | "bad";
+
+export type VerdictCounts = {
+  good: number;
+  borderline: number;
+  bad: number;
+};
+
+export type QualityTrend = {
+  delta_pp: number;
+  direction: "up" | "down" | "flat" | "unknown";
+};
+
+export type RecentBad = {
+  run_id: string;
+  agent_name: string;
+  reasons: string[];
+  confidence: number;
+  judge_model: string;
+  created_at: string;
+  run_started_at: string | null;
+};
+
+export type AgentQualitySummary = {
+  agent_name: string;
+  verdict_counts: VerdictCounts;
+  total_evaluations: number;
+  trend: QualityTrend;
+};
+
+export type AgentQuality = AgentQualitySummary & {
+  days: number;
+  recent_bads: RecentBad[];
+};
+
+export type WorkspaceQuality = {
+  days: number;
+  verdict_counts: VerdictCounts;
+  total_evaluations: number;
+  per_agent: AgentQualitySummary[];
+  recent_bads: RecentBad[];
+};
+
+export async function fetchWorkspaceQuality(
+  days = 7,
+): Promise<WorkspaceQuality> {
+  return (await authedJson(
+    `/workspaces/me/quality?days=${days}`,
+  )) as WorkspaceQuality;
+}
+
+export async function fetchAgentQuality(
+  name: string,
+  days = 7,
+): Promise<AgentQuality> {
+  return (await authedJson(
+    `/workspaces/me/agents/${encodeURIComponent(name)}/quality?days=${days}`,
+  )) as AgentQuality;
+}
+
 export async function patchAgent(
   name: string,
   patch: Partial<{

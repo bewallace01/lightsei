@@ -1219,6 +1219,43 @@ def get_cost_insights(
     return _ci.all_insights(session, workspace_id)
 
 
+@app.get("/workspaces/me/quality")
+def get_workspace_quality(
+    days: int = 7,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 14.4: workspace-wide quality rollup.
+
+    Pure read over `run_evaluations` (filled by Phase 14.3's eval
+    runner). Per-agent verdict counts + trend + workspace-wide
+    aggregate + the top recent-bads list. Safe to poll on every
+    /agents page load.
+    """
+    import quality_signal
+    return quality_signal.workspace_quality(session, workspace_id, days=days)
+
+
+@app.get("/workspaces/me/agents/{agent_name}/quality")
+def get_agent_quality(
+    agent_name: str,
+    days: int = 7,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 14.4: per-agent quality summary.
+
+    Powers /agents/{name}'s Quality section: verdict_counts,
+    total_evaluations, trend vs the prior window of the same length,
+    and the most-recent bad evaluations with their judge reasons so
+    the user can see _why_ a bot is flagged without an extra fetch.
+    """
+    import quality_signal
+    return quality_signal.agent_quality(
+        session, workspace_id, agent_name, days=days,
+    )
+
+
 @app.get("/workspaces/me/pulse")
 def get_workspace_pulse(
     session: Session = Depends(get_session),
