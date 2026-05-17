@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 16.1: sensitivity-level field on agents + runs + alembic migration**
+> **Phase 16.2: declarative capability model + backend storage**
 
-Phase 16 spec session shipped 2026-05-17: rough 7-item shape converted into 16.1-16.8 sub-tasks + design choices locked + demo concrete. See Phase 16 section below. Implementation starts at 16.1.
+16.1 shipped 2026-05-17 — `sensitivity_level` column landed on both `agents` and `runs` via alembic 0027, default `'internal'`, with `_VALID_SENSITIVITY_LEVELS` + `is_valid_sensitivity_level` helpers in `backend/models.py`. 11 new tests cover the validator, default behavior, round-trip, alembic backfill, and the NOT NULL constraint. Full backend suite 588 passing.
 
-16.1 is the schema backbone every other 16.x sub-task assumes. Single alembic migration: add `sensitivity_level String(16) NOT NULL DEFAULT 'internal'` to `agents` + `runs` tables, backfill existing rows with `'internal'`, expose on the SQLAlchemy models with a `_VALID_LEVELS` enum-tight validator (`{'public', 'internal', 'sensitive', 'pii'}`). No endpoints in this sub-task — the CRUD wiring lands in 16.6 when the editor UI lands; 16.1's job is purely to make the column exist so 16.2 (capability model, same migration) and 16.4 (cross-zone dispatch enforcement, reads this column) have something to point at. Tests cover model validation + the backfill landed clean.
+NOW is 16.2: add the `capabilities: list[str]` JSONB column to `agents` (alembic 0028 — separate from 0027 because the capability model needs its own validator vocabulary that's bigger than the sensitivity ladder), build `backend/capabilities.py` as the pure module owning `KNOWN_CAPABILITIES`, `validate_capability_list(names)`, `presets_for_level(level)`. CRUD endpoint `PATCH /workspaces/me/agents/{name}/capabilities` (workspace-authz). **No SDK enforcement yet** — that's 16.3; 16.2's job is purely storage + validation so the next sub-task has something to gate on.
 
 ## Phase 12C: drop a README, get a team
 
@@ -245,7 +245,7 @@ Operationalizes the trust-zone work that landed as P0 in the 2026-05-17 strategi
 - **Handoff span: opt-in, SDK-only.** No automatic detection of human-mediated handoffs (too much false positive risk); the operator chat surface (Phase 21) will call `lightsei.handoff_span(from_run, to_run, sanitized_prompt)` explicitly. Switch trigger: handoff usage proves common enough that auto-detection from chat-thread metadata becomes worth the false-positive cost.
 - **Three presets (not four, not "configurable").** "Open team", "Standard team", "Compliance team" — wired into team-from-README + manual `/zones` setup. Anything more is a paid-tier feature later. Switch trigger: customers want a "Compliance + outbound email" variant or similar — second wave of presets, not arbitrary customization.
 
-### 16.1 — Sensitivity-level field on agents + runs + alembic migration
+### 16.1 — Sensitivity-level field on agents + runs + alembic migration ✅ shipped 2026-05-17
 
 Add `sensitivity_level` to the `agents` table (`String(16)`, NOT NULL, default `'internal'`) and to `runs` (same column, default inherited from agent at run-create time so historical analytics don't have to JOIN). SQLAlchemy models + alembic 0027. Backfill existing rows with `'internal'`. Validation at the model layer: enum-tight string in `_VALID_LEVELS`. The backbone for everything else in the phase — every other 16.x sub-task assumes this column exists.
 
@@ -768,6 +768,19 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 16.1: sensitivity_level schema backbone
+
+The schema everything else in Phase 16 depends on. Single alembic migration adds the column to both `agents` (configuration knob) and `runs` (denormalized snapshot so historical analytics stay correct after a relabel).
+
+- [x] **alembic 0027** adds `sensitivity_level String(16) NOT NULL DEFAULT 'internal'` to `agents` and `runs`. Backfills existing rows to `'internal'` (belt-and-suspenders UPDATE after the ADD COLUMN — Postgres already backfills with the server_default for literal defaults, but the explicit UPDATE survives any future migration that drops the default). No new indexes — 16.4's cross-zone check uses the existing PKs; 16.6's /zones page scans a tiny per-workspace table where a seq scan is fine.
+- [x] **SQLAlchemy models** carry the column on both `Agent` and `Run` with `server_default=DEFAULT_SENSITIVITY_LEVEL` so existing test fixtures and any call site that doesn't yet pass the field land on `'internal'` automatically.
+- [x] **`_VALID_SENSITIVITY_LEVELS` + `is_valid_sensitivity_level` + `DEFAULT_SENSITIVITY_LEVEL`** at the top of `backend/models.py`. Frozenset to prevent runtime mutation. Helper rejects None / non-str / off-list with no exceptions thrown — endpoint + SDK code decides whether to 4xx or default.
+- [x] **String column not Postgres enum** so a future fifth level ('regulated', 'export-controlled', whatever) is a code-only change. Validation lives in the helper + the API/SDK layer; DB constraint is just NOT NULL.
+
+**Verification:** 11 new tests in `backend/tests/test_sensitivity_level.py` covering the validator (all four valid levels, off-list rejected, non-string inputs rejected, default-in-set invariant), the Agent + Run default behavior, explicit-level round-trip, the alembic backfill landed (raw SQL query bypassing the ORM to assert what actually got stored), and the NOT NULL constraint catches a NULL write. Full backend suite: 588 passed in 123s, 0 regressions outside the new file.
+
+**What this unblocks:** 16.2 (capability model, separate migration), 16.4 (cross-zone dispatch enforcement reads this column), 16.5 (auto-redaction for `'pii'` agents reads this column), 16.6 (sensitivity chips on the dashboard read this column). Every other 16.x sub-task assumed this existed; now it does.
 
 ### 2026-05-17 — Phase 14 closed: continuous-eval pipeline running on prod
 

@@ -23,6 +23,25 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 DEFAULT_WORKSPACE_ID = "00000000-0000-0000-0000-000000000001"
 
 
+# Phase 16.1: trust-zone sensitivity ladder. Same vocabulary used on
+# agents (the configuration knob) and runs (denormalized at run-create
+# time so analytics over historical runs don't have to JOIN agents).
+#
+# Order is meaningful: public < internal < sensitive < pii. Phase 16.4's
+# cross-zone dispatch check + 16.5's redaction defaults both look at
+# the ladder position, not just the string equality.
+_VALID_SENSITIVITY_LEVELS: frozenset[str] = frozenset(
+    {"public", "internal", "sensitive", "pii"}
+)
+DEFAULT_SENSITIVITY_LEVEL = "internal"
+
+
+def is_valid_sensitivity_level(level: object) -> bool:
+    """Helper for endpoint + SDK input validation. None / non-str / off-list
+    all return False; the caller decides whether to default or 4xx."""
+    return isinstance(level, str) and level in _VALID_SENSITIVITY_LEVELS
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -90,6 +109,14 @@ class Run(Base):
     # pass runs.
     cost_usd: Mapped[Decimal] = mapped_column(
         Numeric(12, 6), nullable=False, server_default="0"
+    )
+    # Phase 16.1: snapshot of the agent's sensitivity_level at run-create
+    # time. Denormalized so analytics queries (verdict rollups by zone,
+    # cost rollups by zone, etc.) don't have to JOIN agents and lose
+    # historical correctness if a user later changes an agent's level.
+    # server_default 'internal' for the alembic backfill of existing rows.
+    sensitivity_level: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=DEFAULT_SENSITIVITY_LEVEL,
     )
 
     __table_args__ = (
@@ -216,6 +243,15 @@ class Agent(Base):
     # rationale when the bot is generated via 12B; hand-deployed bots
     # start null until the user writes one.
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Phase 16.1: trust-zone sensitivity ladder. See
+    # `_VALID_SENSITIVITY_LEVELS` at the top of this module. 16.3 (SDK
+    # capability gate), 16.4 (cross-zone dispatch enforcement), and 16.5
+    # (auto-redaction for `'pii'`) all read this column. server_default
+    # 'internal' so the alembic backfill is a no-op for new installs
+    # and the existing-row backfill in 0027 has a sensible target.
+    sensitivity_level: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=DEFAULT_SENSITIVITY_LEVEL,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
