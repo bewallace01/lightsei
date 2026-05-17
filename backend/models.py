@@ -232,6 +232,44 @@ class User(Base):
     )
 
 
+class OAuthPendingState(Base):
+    """Phase 17.3: short-lived state + PKCE store for the Google OAuth
+    authorization-code flow.
+
+    The /auth/google/start endpoint inserts a row before redirecting
+    the user to Google; /auth/google/callback looks it up by state,
+    pulls the code_verifier, exchanges the code for tokens, and deletes
+    the row. 10-minute TTL covers the user's hop out to Google's
+    consent screen + back. Left-behind rows from abandoned flows expire
+    harmlessly — the next start always inserts a fresh row.
+    """
+
+    __tablename__ = "oauth_pending_states"
+
+    state: Mapped[str] = mapped_column(String(128), primary_key=True)
+    code_verifier: Mapped[str] = mapped_column(String(128), nullable=False)
+    # Where the dashboard wanted the user to land after signin. Lets
+    # /auth/google/start be invoked from any signed-out page (login,
+    # marketing site CTA, expired-session redirect) without losing the
+    # original destination through the OAuth hop.
+    redirect_after: Mapped[Optional[str]] = mapped_column(
+        String(512), nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_oauth_pending_states_expires_at",
+            "expires_at",
+        ),
+    )
+
+
 class EmailSigninToken(Base):
     """Phase 17.1: single-use, 15-minute TTL token for the magic-link
     sign-in flow (Phase 17.2 consumes it).

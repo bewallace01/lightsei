@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 17.3: Google OAuth backend (auth-code + PKCE flow + new-user-creates-workspace path)**
+> **Phase 17.4: Stripe integration (customer-on-workspace-create + checkout-session + webhook + portal)**
 
-17.1 + 17.2 shipped 2026-05-17. Magic-link is the first dashboard-side auth surface: a fresh user types their email, gets a Resend-delivered link, clicks, lands on /  signed in with a fresh workspace + $5 free credits. Existing API-key signup users get promoted to email_verified on first magic-link consume. Backend at 688 tests passing.
+17.1 + 17.2 + 17.3 shipped 2026-05-17. Both dashboard-side auth paths are live: magic link (Resend) and Google OAuth (PKCE flow, stubbed in tests, needs real Google Cloud OAuth client config for prod). Both paths create the same User + Workspace pair with `plan_tier='free'` + $5 free credits. Backend at 707 tests passing.
 
-NOW is 17.3: Google OAuth backend. Standard OAuth 2.0 authorization-code flow with PKCE so a leaked redirect-URL can't be replayed. Two endpoints: (a) `GET /auth/google/start` — generates a PKCE verifier + state, stores both in a short-lived signed cookie or table, returns a redirect to Google's auth endpoint with the configured client_id + scopes; (b) `GET /auth/google/callback?code&state` — verifies the state, exchanges the code for tokens, fetches userinfo for `sub` + `email` + `email_verified`, matches a returning user by `google_user_id` (exact) or falls back to verified-email match; on no match creates a fresh user+workspace pair (`auth_provider='google_oauth'`, `email_verified=True` iff Google says so). Configured via `LIGHTSEI_GOOGLE_CLIENT_ID` + `LIGHTSEI_GOOGLE_CLIENT_SECRET` env vars.
+NOW is 17.4: Stripe integration. Three pieces: (a) create a Stripe Customer when a fresh Workspace is created in 17.2/17.3 (best-effort during the auth flow; if Stripe is down the user still signs in — Stripe customer can be back-filled later); (b) `POST /workspaces/me/billing/checkout` endpoint that creates a Stripe Checkout Session for the $50/mo subscription (configured up front as a Stripe Product + Price; price id read from env), returns the session URL the dashboard redirects to; (c) `POST /webhooks/stripe` that verifies the signature and handles `customer.subscription.{created,updated,deleted}` + `invoice.payment_failed` to keep `workspaces.stripe_subscription_id` + `workspaces.plan_tier` in sync; (d) `POST /workspaces/me/billing/portal` creates a Stripe Customer Portal session so users self-serve plan / card / cancel without us building any of that UI. Configured via `LIGHTSEI_STRIPE_SECRET_KEY` + `LIGHTSEI_STRIPE_WEBHOOK_SECRET` + `LIGHTSEI_STRIPE_PRICE_ID` env vars; needs the Stripe dashboard set up with the Product + Price + webhook endpoint registered before the prod flow works end-to-end.
 
 ## Phase 12C: drop a README, get a team
 
@@ -316,7 +316,7 @@ Two endpoints + the Resend integration in `backend/email.py` (new pure module).
 - `POST /auth/magic-link/consume {token}` — looks up by hashed token, checks not consumed + not expired, marks consumed, either signs in the matching user OR creates a new user + workspace pair if the email is new. Returns a session token (existing `keys.generate_session_token` + `Session` row).
 - New-user creation sets `auth_provider='magic_link'`, `email_verified=true`, free workspace name (`"{email_local_part}'s workspace"`), `free_credits_remaining_usd=5.00`, `plan_tier='free'`.
 
-### 17.3 — Google OAuth backend
+### 17.3 — Google OAuth backend ✅ shipped 2026-05-17
 
 Two endpoints implementing the standard OAuth 2.0 authorization-code flow with PKCE.
 
@@ -868,6 +868,22 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 17.3: Google OAuth backend
+
+Second dashboard-side auth surface — the one-click signin path for users already logged into Google. Standard OAuth 2.0 authorization-code flow with PKCE so a leaked redirect URL can't be replayed. Same new-user-creates-workspace pattern as 17.2; same sign-in-existing-user pattern with a smart returning-user match priority.
+
+- [x] **alembic 0031** adds the `oauth_pending_states` table (state PK, code_verifier, redirect_after, created_at, expires_at, index on expires_at for future reaping). 10-minute TTL covers the user's hop out to Google's consent screen + back. Rows survive a backend restart so an interrupted callback can complete; small enough volume that abandoned-flow rows expiring harmlessly is fine.
+- [x] **`backend/google_oauth.py` (new).** Pure module owning the OAuth shape so request handlers stay thin. `new_pkce_pair()` returns (verifier, sha256-base64url-stripped challenge). `new_state()` returns 32 bytes urlsafe. `build_authorization_url(...)` assembles the redirect with `prompt=select_account` so returning users see the account picker (better UX than silently picking the last one). `exchange_code_for_userinfo(code, code_verifier, redirect_uri)` does the back-channel token exchange + userinfo fetch, returns `{sub, email, email_verified, name}`. Configured via `LIGHTSEI_GOOGLE_CLIENT_ID` + `LIGHTSEI_GOOGLE_CLIENT_SECRET` + `LIGHTSEI_GOOGLE_REDIRECT_URI`. `is_configured()` for the 503-on-unconfigured shape. `GoogleOAuthError` for the failure path.
+- [x] **`GET /auth/google/start`.** 503 when not configured (fail loud rather than redirecting the user into a half-configured flow). Generates verifier + state, persists to `oauth_pending_states`, returns `{authorization_url, state}` — dashboard navigates the browser to authorization_url. `redirect_after` query param threads through so the callback can hand the dashboard the original target page.
+- [x] **`GET /auth/google/callback?code&state`.** Validates state, single-use (deletes the pending row before exchange so parallel callbacks can't both succeed), exchanges code → tokens → userinfo via the pure helper. Returning-user match priority: `google_user_id` exact (sub-matched returning user even if they renamed their Google email), then verified-email fallback (links Google to an existing magic-link / apikey user). When email is unverified AND already taken by an existing user → 400 `email_already_in_use` (don't let an unverified Google email claim an existing account). New-user path mirrors 17.2's structure (Workspace with 17.1 defaults + seeded validators, User with `auth_provider='google_oauth'`). Surfaces user cancellation (`?error=access_denied`) as a clean 400 the dashboard can render. Returns the same shape 17.2's consume returns + `redirect_after` from the pending row.
+- [x] **`OAuthPendingState`** model added to `backend/models.py`.
+
+**Verification:** 19 new tests in `backend/tests/test_google_oauth.py` covering the pure helpers (PKCE round-trip via sha256-base64url-stripped, state entropy, `is_configured` env-driven, authorization URL has all required params + default scopes), start endpoint (503 unconfigured, returns URL + persists state with 10-min TTL, threads `redirect_after`), callback endpoint (creates new user + workspace with 17.1 defaults, signs in returning user by google_user_id even when email changed, links to existing email user when Google says verified, refuses 400 `email_already_in_use` when unverified email collides with existing user, rejects unknown state, rejects expired state, single-use per state, surfaces user cancellation as 400 access_denied, 400 on missing params, 400 on Google token-exchange failure, returned session_token authenticates against /auth/me). Tests stub httpx.post + httpx.get inside the google_oauth module so they don't hit Google — same shape as the SDK tests stubbing Anthropic. Full backend suite: 707 passed in 143s (was 688, +19 new). 0 regressions.
+
+**Real bug surfaced + fixed during this sub-task:** the unverified-email path originally fell through to new-user creation, which crashed on the unique-email constraint with a 500. Now explicitly 400s with `email_already_in_use` so the existing user stays intact and the message is actionable.
+
+**What this unblocks:** 17.6 (dashboard signup UI) wires the Google OAuth button against `GET /auth/google/start`. Production requires the Google Cloud OAuth client + consent screen + redirect URI configured before the prod flow works end-to-end — code is ready and tested when that lands.
 
 ### 2026-05-17 — Phase 17.2: magic-link auth backend
 

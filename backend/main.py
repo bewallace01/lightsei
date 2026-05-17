@@ -56,6 +56,7 @@ from models import (
     GitHubIntegration,
     NotificationChannel,
     NotificationDelivery,
+    OAuthPendingState,
     Run,
     Session as SessionRow,
     Thread,
@@ -3831,6 +3832,227 @@ def consume_magic_link(
         "session_token": sess_plain,
         "session_expires_at": sess_row.expires_at.isoformat(),
         "is_new_user": is_new_user,
+    }
+
+
+# ---------- Phase 17.3: Google OAuth ---------- #
+
+
+# How long the (state, code_verifier) row in oauth_pending_states is
+# valid. Has to cover the user's hop out to Google's consent screen +
+# back. 10 minutes is generous; reduce later if abandoned-flow rows
+# pile up.
+OAUTH_STATE_TTL = timedelta(minutes=10)
+
+
+@app.get("/auth/google/start")
+def google_oauth_start(
+    redirect_after: Optional[str] = None,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 17.3: kick off Google OAuth.
+
+    Returns `{authorization_url, state}` — the dashboard navigates the
+    browser to authorization_url. State + PKCE verifier are persisted
+    so /auth/google/callback can rebind on return.
+
+    503 if the Google OAuth client isn't configured (env vars not set);
+    fail loud rather than redirecting the user into a half-configured
+    flow that errors out on Google's end with a less actionable message.
+
+    `redirect_after` is where the dashboard wants the user to land
+    post-signin (e.g. the page they tried to reach signed-out). Optional;
+    default is `/`.
+    """
+    import google_oauth as _g
+
+    if not _g.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Google OAuth is not configured on this backend. Set "
+                "LIGHTSEI_GOOGLE_CLIENT_ID + LIGHTSEI_GOOGLE_CLIENT_SECRET."
+            ),
+        )
+
+    now = utcnow()
+    verifier, challenge = _g.new_pkce_pair()
+    state = _g.new_state()
+
+    session.add(OAuthPendingState(
+        state=state,
+        code_verifier=verifier,
+        redirect_after=redirect_after,
+        created_at=now,
+        expires_at=now + OAUTH_STATE_TTL,
+    ))
+    session.flush()
+
+    return {
+        "authorization_url": _g.build_authorization_url(
+            state=state, challenge=challenge,
+        ),
+        "state": state,
+    }
+
+
+@app.get("/auth/google/callback")
+def google_oauth_callback(
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 17.3: complete Google OAuth.
+
+    Validates state, exchanges code for tokens, fetches userinfo,
+    matches a returning user (by google_user_id exact, fallback to
+    verified-email) or creates a fresh user+workspace pair.
+
+    Error paths return 400 with a JSON body the dashboard's callback
+    page can render directly. Unknown / expired state → 400 (treats
+    the same so we don't leak which one).
+    """
+    import google_oauth as _g
+
+    if error:
+        # Google can hand back ?error=access_denied if the user cancelled
+        # on the consent screen. Surface a clean 400; the dashboard
+        # callback page renders "Sign-in cancelled" and links back to
+        # /login.
+        raise HTTPException(
+            status_code=400,
+            detail={"error": error, "message": "Google sign-in was cancelled or refused."},
+        )
+
+    if not code or not state:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "missing_params", "message": "missing code or state"},
+        )
+
+    pending = session.get(OAuthPendingState, state)
+    now = utcnow()
+    if pending is None or pending.expires_at <= now:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_state",
+                "message": "OAuth state is unknown or expired — start the sign-in flow again.",
+            },
+        )
+
+    # Single-use: delete the pending row before doing the exchange so
+    # a parallel callback with the same state can't double-consume.
+    verifier = pending.code_verifier
+    redirect_after = pending.redirect_after or "/"
+    session.delete(pending)
+    session.flush()
+
+    try:
+        claims = _g.exchange_code_for_userinfo(
+            code=code, code_verifier=verifier,
+        )
+    except _g.GoogleOAuthError as exc:
+        # Logged inside the helper; surface a user-friendly 400.
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "exchange_failed",
+                "message": "Google sign-in didn't complete. Try again.",
+                "_debug": str(exc),
+            },
+        )
+
+    sub = claims["sub"]
+    email = claims["email"]
+    email_verified = claims["email_verified"]
+
+    # Match priority: google_user_id exact → verified-email → new user.
+    user = session.execute(
+        select(User).where(User.google_user_id == sub)
+    ).scalar_one_or_none()
+
+    if user is None and email_verified:
+        # Returning email-known user (e.g. signed up via magic-link or
+        # apikey first, now connecting Google). Link the google_user_id
+        # so future logins skip the email-match path.
+        user = session.execute(
+            select(User).where(User.email == email)
+        ).scalar_one_or_none()
+        if user is not None:
+            user.google_user_id = sub
+
+    is_new_user = user is None
+
+    if user is None:
+        # Before creating: if the email is already in use by a user
+        # that DIDN'T match by sub OR verified-email (i.e. we got here
+        # because Google said the email is unverified and the existing
+        # user is a different identity), refuse cleanly instead of
+        # crashing on the unique-email constraint. Forces the user to
+        # sign in via the path that originally created the account
+        # (which is the right user-facing behavior — we don't want
+        # an unverified Google email to take over a real account).
+        existing_with_email = session.execute(
+            select(User).where(User.email == email)
+        ).scalar_one_or_none()
+        if existing_with_email is not None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "email_already_in_use",
+                    "message": (
+                        "An account with this email already exists, but "
+                        "the email on your Google account isn't verified. "
+                        "Sign in with the original method (magic link or "
+                        "password), then connect Google from /account."
+                    ),
+                },
+            )
+
+        ws = Workspace(
+            id=str(uuid.uuid4()),
+            name=_workspace_name_for_signup_email(email),
+            created_at=now,
+            plan_tier="free",
+            free_credits_remaining_usd=Decimal("5.00"),
+        )
+        session.add(ws)
+        session.flush()
+        seed_default_validators(session, ws.id, now)
+
+        user = User(
+            id=str(uuid.uuid4()),
+            email=email,
+            # No password — OAuth-only users can't fall back to
+            # /auth/login. Same placeholder pattern magic-link uses.
+            password_hash="oauth-only:no-password",
+            workspace_id=ws.id,
+            created_at=now,
+            email_verified=email_verified,
+            auth_provider="google_oauth",
+            google_user_id=sub,
+        )
+        session.add(user)
+        session.flush()
+    else:
+        # Existing user signing in via Google — promote to verified if
+        # Google says the email is verified. Doesn't rewrite the
+        # original auth_provider.
+        if email_verified and not user.email_verified:
+            user.email_verified = True
+
+    sess_row, sess_plain = _create_session(session, user)
+    ws = session.get(Workspace, user.workspace_id)
+
+    return {
+        "user": _serialize_user(user),
+        "workspace": _serialize_workspace(ws) if ws else None,
+        "session_token": sess_plain,
+        "session_expires_at": sess_row.expires_at.isoformat(),
+        "is_new_user": is_new_user,
+        "redirect_after": redirect_after,
     }
 
 
