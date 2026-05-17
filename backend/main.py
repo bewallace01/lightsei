@@ -1546,6 +1546,7 @@ def get_workspace_constellation(
                 a.name,
                 a.role,
                 a.system_prompt,
+                a.sensitivity_level,
                 COALESCE(
                     (
                         SELECT MAX(ai.last_heartbeat_at)
@@ -1635,6 +1636,8 @@ def get_workspace_constellation(
             "last_heartbeat_at": (
                 last_hb.isoformat() if last_hb else None
             ),
+            # Phase 16.6: drives node coloring on the constellation map.
+            "sensitivity_level": r.sensitivity_level or "internal",
         })
 
     # Dispatch edges: pairs of (source, target) with at least one

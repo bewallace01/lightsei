@@ -9,6 +9,7 @@ import {
   AgentProvider,
   AgentQualitySummary,
   ConstellationAgent,
+  SensitivityLevel,
   UnauthorizedError,
   WorkspaceQuality,
   deleteAgent,
@@ -17,6 +18,7 @@ import {
   fetchWorkspaceQuality,
   patchAgent,
 } from "../api";
+import { SensitivityChip } from "../sensitivity";
 
 
 function fmtUsd(n: number): string {
@@ -128,6 +130,9 @@ type AgentRow = {
   // when the eval cron hasn't produced any verdicts for this agent
   // yet (fresh deploy, no completed runs sampled).
   quality: AgentQualitySummary | null;
+  // Phase 16.6: trust-zone sensitivity. Drives the chip on the
+  // /agents roster + the color on the constellation map.
+  sensitivity_level: SensitivityLevel;
 };
 
 
@@ -188,6 +193,7 @@ export default function AgentsPage() {
           description: a.description,
           last_event_at: null,
           quality: qualityByAgent.get(a.name) ?? null,
+          sensitivity_level: a.sensitivity_level,
         });
       }
       // Layer in the constellation data (status, recent activity, role).
@@ -217,6 +223,7 @@ export default function AgentsPage() {
             description: null,
             last_event_at: c.last_event_at,
             quality: qualityByAgent.get(c.name) ?? null,
+            sensitivity_level: c.sensitivity_level,
           });
         }
       }
@@ -318,6 +325,7 @@ export default function AgentsPage() {
                 <th className="px-4 py-3 font-medium">Runs (24h)</th>
                 <th className="px-4 py-3 font-medium">Cost (24h)</th>
                 <th className="px-4 py-3 font-medium">Quality (7d)</th>
+                <th className="px-4 py-3 font-medium">Zone</th>
                 <th className="px-4 py-3 font-medium">Last seen</th>
                 <th className="px-4 py-3 font-medium text-right"></th>
               </tr>
@@ -393,6 +401,9 @@ export default function AgentsPage() {
                   </td>
                   <td className="px-4 py-3">
                     <QualityChip q={r.quality} />
+                  </td>
+                  <td className="px-4 py-3">
+                    <SensitivityChip level={r.sensitivity_level} />
                   </td>
                   <td className="px-4 py-3 text-xs text-gray-500">
                     {fmtRelative(r.last_event_at)}

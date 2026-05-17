@@ -485,6 +485,16 @@ export const AGENT_PROVIDERS: AgentProvider[] = [
   "cohere",
 ];
 
+// Phase 16.1: trust-zone sensitivity ladder.
+export type SensitivityLevel = "public" | "internal" | "sensitive" | "pii";
+
+export const SENSITIVITY_LEVELS: readonly SensitivityLevel[] = [
+  "public",
+  "internal",
+  "sensitive",
+  "pii",
+];
+
 export type Agent = {
   name: string;
   daily_cost_cap_usd: number | null;
@@ -500,6 +510,16 @@ export type Agent = {
   // Auto-populated from the LLM rationale when the bot is generated
   // via /agents/generate; hand-deployed bots start null.
   description: string | null;
+  // Phase 16.1: trust-zone sensitivity. Drives the dashboard chip
+  // color + the SDK's auto-redaction default (Phase 16.5).
+  sensitivity_level: SensitivityLevel;
+  // Phase 16.2: per-agent capability allow-list. Empty list = default-
+  // deny; the SDK (Phase 16.3) refuses any gated op not on the list.
+  capabilities: string[];
+  // Phase 16.4: opt-in for cross-zone dispatch. False = same-zone-only
+  // dispatches; True allows the source agent to target a different zone
+  // (auto-approval rules still apply on top).
+  dispatches_cross_zone: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -587,6 +607,9 @@ export async function patchAgent(
     model: string | null;
     tick_interval_s: number | null;
     description: string | null;
+    // Phase 16: trust-zone knobs editable through the existing patch endpoint.
+    sensitivity_level: SensitivityLevel;
+    dispatches_cross_zone: boolean;
   }>,
 ): Promise<Agent> {
   return (await authedJson(`/agents/${encodeURIComponent(name)}`, {
@@ -600,6 +623,24 @@ export async function deleteAgent(name: string): Promise<void> {
   await authedJson(`/agents/${encodeURIComponent(name)}`, {
     method: "DELETE",
   });
+}
+
+
+// Phase 16.2: replace an agent's capability allow-list.
+// Returns 422 with {"detail": {"problems": [...]}} on validation
+// errors so the caller can render per-entry messages.
+export async function patchAgentCapabilities(
+  name: string,
+  capabilities: string[],
+): Promise<Agent> {
+  return (await authedJson(
+    `/agents/${encodeURIComponent(name)}/capabilities`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ capabilities }),
+    },
+  )) as Agent;
 }
 
 
@@ -1331,6 +1372,8 @@ export type ConstellationAgent = {
   cost_24h_usd: number;
   last_event_at: string | null;
   last_heartbeat_at: string | null;
+  // Phase 16.6: drives node color on the constellation map.
+  sensitivity_level: SensitivityLevel;
 };
 
 export type ConstellationEdge = {

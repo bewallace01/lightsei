@@ -35,6 +35,7 @@ import {
   fetchConstellation,
   UnauthorizedError,
 } from "./api";
+import { SENSITIVITY_TONE } from "./sensitivity";
 import { sparklePath, tintForAgent } from "./stars";
 
 // ---- Layout constants. ---- //
@@ -249,7 +250,13 @@ export default function Constellation() {
       agent: a,
       pos: positionFor(a, all),
       size: starSize(a),
-      tint: tintForAgent(a.name),
+      // Phase 16.6: color nodes by trust-zone. Falls back to the
+      // per-agent tint when sensitivity_level is unknown (older
+      // backend or constellation row that predates the column).
+      tint: (
+        SENSITIVITY_TONE[a.sensitivity_level]?.node
+        ?? tintForAgent(a.name)
+      ),
     }));
   }, [data]);
 

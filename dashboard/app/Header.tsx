@@ -55,6 +55,11 @@ const NAV: NavItem[] = [
         label: "deployments",
         hint: "What the worker is running, plus history",
       },
+      {
+        href: "/zones",
+        label: "trust zones",
+        hint: "Workspace topology by sensitivity level",
+      },
     ],
   },
   {

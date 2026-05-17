@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 16.6: dashboard surfaces — sensitivity chips, color-coded constellation, /zones page**
+> **Phase 16.7: three presets + team-from-README integration**
 
-16.1-16.5 all shipped 2026-05-17. The wedge against Viktor is structurally complete AND data-redacted: every outbound surface (httpx, send_command, emit, chat) is gated by capability + zone + auto-redaction for `'pii'` agents. Backend 630 + SDK 101 passing.
+16.1-16.6 all shipped 2026-05-17. The full trust-zone story is now visible end-to-end: chip on /agents + /agents/{name} header, color-coded constellation nodes by zone, /zones topology page with cross-zone dispatcher callout, editor for the three knobs (level + capabilities + cross-zone flag). Backend 630 + SDK 101 still passing.
 
-NOW is 16.6: make all of this visible on the dashboard. Three things: (1) sensitivity chip on `/agents` (next to the existing Quality chip from 14.4) + on `/agents/{name}` header. (2) Constellation map color-codes nodes by zone (green/yellow/orange/red for public/internal/sensitive/pii), cross-zone edges drawn in red with a thicker stroke. (3) New `/zones` page showing the workspace topology — vertical lane per zone, nodes grouped by lane, explicit "dispatches across zones" section. Editor on `/agents/{name}` lets the user set sensitivity_level + capabilities + cross-zone flag (the three knobs that matter). Refusal surfacing: when backend returns `cross_zone_blocked`, the command-enqueue UI shows the actual policy violation rather than a generic 403. This is the largest sub-task of Phase 16 — multi-file dashboard work.
+NOW is 16.7: the last Phase 16 sub-task. `backend/zone_presets.py` defines three presets — `'open_team'`, `'standard_team'`, `'compliance_team'`. Each maps the team-planner's roles (orchestrator / executor / specialist / messenger) to `{sensitivity_level, capabilities, dispatches_cross_zone}`. Team-from-README flow gains a preset picker (default `'standard_team'`); compliance generates one CRM-side agent (`'pii'` + connector caps + no internet) and one internet-side agent (`'public'` + internet + no connectors), with cross-zone dispatch explicitly disabled so the handoff has to come from the operator. This wires the trust-zone enforcement into the canonical non-technical-user flow. After 16.7 the Compliance team demo — Phase 16's payoff against Viktor — is testable end-to-end.
 
 ## Phase 12C: drop a README, get a team
 
@@ -265,7 +265,7 @@ The load-bearing piece. Phase 11's `send_command` (SDK) + `enqueue_command` (bac
 
 `lightsei.redact(text, *, detectors=None)` returns text with PII-shaped substrings replaced with `[redacted-email]`, `[redacted-phone]`, etc. Built-in detectors: email, US phone, SSN-shape (9 digits with the standard hyphenation), credit-card-shape (Luhn-checked 13-19 digits). Pluggable via `lightsei.register_redactor(name, fn)`. For agents with `sensitivity_level == 'pii'`, the SDK auto-redacts outgoing `lightsei.emit` payloads + dispatched command payloads + chat-message body by default; per-call opt-out via `lightsei.emit(..., redact=False)` for the operator who genuinely needs the raw value. Also ships `lightsei.handoff_span(from_run, to_run, sanitized_prompt)` — a synchronous helper that writes a `handoff` event linking the two runs in the trace view; opt-in (no auto-detection).
 
-### 16.6 — Dashboard surfaces
+### 16.6 — Dashboard surfaces ✅ shipped 2026-05-17
 
 Three things wired together so the trust-zone story is visible without clicks: (1) sensitivity chip rendered on `/agents` (next to the existing Quality chip from 14.4) + on `/agents/{name}` header; (2) constellation map nodes color-coded by zone (green/yellow/orange/red for public/internal/sensitive/pii), cross-zone edges drawn red with a thicker stroke; (3) new `/zones` page showing the workspace topology — a vertical lane per zone, nodes grouped by lane, an explicit "dispatches across zones" section listing the agents that opted in. Editor on `/agents/{name}` lets the user set the sensitivity level + capability list + cross-zone flag (these are the three knobs that matter). Refusal surfaces: when the backend returns `cross_zone_blocked`, the dashboard's command-enqueue UI shows the actual policy violation rather than a generic 403.
 
@@ -768,6 +768,28 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 16.6: dashboard surfaces (sensitivity chips, constellation coloring, /zones page, /agents/{name} editor)
+
+Makes Phase 16's structural enforcement visible at every dashboard surface where it matters. Non-technical user can now see "this bot is in the pii zone, has internet + send_command, cross-zone off" without leaving the agents page.
+
+- [x] **Shared `SensitivityChip` + `SENSITIVITY_TONE` in `dashboard/app/sensitivity.tsx`.** Color mapping in one place so every page renders the same green/amber/orange/red signal (public/internal/sensitive/pii). Chip variant for inline use, node hex for constellation, lane class for /zones — same source of truth.
+- [x] **`Agent` type + `ConstellationAgent` type extended** in `dashboard/app/api.ts` with `sensitivity_level`, `capabilities`, `dispatches_cross_zone`. New `SensitivityLevel` literal + `SENSITIVITY_LEVELS` constant. `patchAgent` accepts the new fields. New `patchAgentCapabilities` helper hits the 16.2 endpoint with replace semantics.
+- [x] **Backend constellation endpoint** now selects + returns `sensitivity_level` so the constellation map can color nodes without an extra fetch per agent.
+- [x] **`/agents` Quality column** got a sibling **Zone column** rendering `<SensitivityChip>` per row. Same compact shape so the table stays scannable.
+- [x] **`/agents/{name}` header** now shows the sensitivity chip next to the agent name + the existing "live" pill. Three signals (identity / zone / liveness) visible without scrolling.
+- [x] **`/agents/{name}` Trust zone editor.** New section above System prompt with two panels. Top panel: sensitivity_level select + cross-zone checkbox + save button. Bottom panel: capability allow-list (checkboxes for the two known capabilities + listed custom caps with × remove + a custom-capability input that supports Enter-to-add). Both panels track local dirty state so the save button is disabled until something actually changed; saved-confirmation appears after a successful write.
+- [x] **Constellation node coloring.** `Constellation.tsx` now uses `SENSITIVITY_TONE[a.sensitivity_level].node` as the agent tint, falling back to the per-agent stable hash tint when an older backend response is missing the field. Replaces the previous purely-aesthetic tint with the trust-zone signal — bots are now grouped visually by where their data can go.
+- [x] **New `/zones` page** at `dashboard/app/zones/page.tsx`. Vertical lane per sensitivity level, agents grouped into their lane with name + description + first 4 capabilities as small chips + cross-zone callout if enabled. Separate "Cross-zone dispatchers" section at the bottom lists every agent with `dispatches_cross_zone=True` so the explicit exceptions are easy to audit. Empty cross-zone section explicitly says "every agent is locked to its own zone — the default-deny posture from Phase 16.4" rather than rendering nothing.
+- [x] **Header nav** got a "trust zones" entry under the existing agents group pointing at `/zones`.
+
+**Verification:** dashboard `tsc --noEmit` clean. Backend full suite: 630 passed in 129s (constellation endpoint change is backward-compatible — old fixtures still load via the `or "internal"` fallback). No regressions.
+
+**Skipped for v1 (small follow-ups):**
+- Cross-zone edge styling on the constellation (red, thicker). Would need extending the edges endpoint with per-edge zone info; the current ConstellationEdge only carries `from` / `to` / `count_24h` / `last_at`. Punt to a follow-up since the node coloring already conveys "this dispatch crosses zones."
+- Cross-zone refusal rendering on a dashboard command-enqueue UI. Manual enqueues from the dashboard intentionally bypass the cross-zone gate (no `source_agent` per 16.4 design), so the failure surface doesn't fire on that path. If a future dashboard adds "dispatch on behalf of agent X" the refusal-rendering work becomes meaningful.
+
+**What this unblocks:** 16.7 is the last Phase 16 sub-task — three presets + team-from-README integration. After 16.7 the Compliance team demo (Phase 16's payoff) is testable end-to-end.
 
 ### 2026-05-17 — Phase 16.5: SDK redaction primitives + handoff span
 

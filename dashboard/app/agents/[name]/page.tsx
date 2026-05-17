@@ -13,6 +13,8 @@ import {
   cancelCommand,
   Command,
   Deployment,
+  SENSITIVITY_LEVELS,
+  SensitivityLevel,
   enqueueCommand,
   fetchAgent,
   fetchAgentInstances,
@@ -21,10 +23,12 @@ import {
   fetchCommands,
   fetchDeployments,
   patchAgent,
+  patchAgentCapabilities,
   redeployDeployment,
   stopDeployment,
   UnauthorizedError,
 } from "../../api";
+import { SensitivityChip } from "../../sensitivity";
 
 function fmt(iso: string | null): string {
   if (!iso) return "—";
@@ -167,6 +171,7 @@ export default function AgentPage({ params }: { params: { name: string } }) {
         <h1 className="text-2xl font-semibold tracking-tight">
           <span className="font-mono">{agentName}</span>
         </h1>
+        {agent && <SensitivityChip level={agent.sensitivity_level} size="md" />}
         {(() => {
           const activeCount = instances.filter((i) => i.status === "active").length;
           if (activeCount > 0) {
@@ -470,6 +475,18 @@ export default function AgentPage({ params }: { params: { name: string } }) {
             )}
           </div>
         </section>
+      )}
+
+      {/* Phase 16.6: trust-zone editor. Three knobs that matter —
+          sensitivity_level, capabilities, dispatches_cross_zone — in
+          one section so the user sees the security posture as a unit
+          rather than chasing settings around. */}
+      {agent && (
+        <TrustZoneEditor
+          agent={agent}
+          onSaved={setAgent}
+          onError={setError}
+        />
       )}
 
       <section className="mb-10">
@@ -1059,6 +1076,246 @@ function DescriptionSection({
         {savedAt && Date.now() - savedAt < 4000 && (
           <span className="text-xs text-green-700">saved.</span>
         )}
+      </div>
+    </section>
+  );
+}
+
+
+// ---------- Phase 16.6: trust-zone editor ---------- //
+//
+// Three knobs in one panel — sensitivity_level, capabilities,
+// dispatches_cross_zone — because non-technical users think about
+// "what trust zone is this bot in" as one decision, not three.
+// Backend still treats them as three separate columns so the gates
+// can do their independent jobs (16.3 reads capabilities, 16.4
+// reads sensitivity_level + dispatches_cross_zone, 16.5 reads
+// sensitivity_level for auto-redact).
+
+// Well-known capabilities the user can toggle directly. Anything not
+// on this list still gets persisted if the user types it as a
+// "custom capability" — the backend validator accepts the connector:
+// prefix forward-compatibly.
+const KNOWN_CAPABILITIES = ["internet", "send_command"];
+
+function TrustZoneEditor({
+  agent,
+  onSaved,
+  onError,
+}: {
+  agent: Agent;
+  onSaved: (updated: Agent) => void;
+  onError: (msg: string) => void;
+}): JSX.Element {
+  const [level, setLevel] = useState<SensitivityLevel>(agent.sensitivity_level);
+  const [crossZone, setCrossZone] = useState<boolean>(agent.dispatches_cross_zone);
+  const [capabilities, setCapabilities] = useState<string[]>(agent.capabilities);
+  const [customCap, setCustomCap] = useState("");
+  const [savingZone, setSavingZone] = useState(false);
+  const [savingCaps, setSavingCaps] = useState(false);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+
+  // If the agent prop changes (refresh from elsewhere on the page),
+  // reset local state so we don't show stale edits as drafts.
+  useEffect(() => {
+    setLevel(agent.sensitivity_level);
+    setCrossZone(agent.dispatches_cross_zone);
+    setCapabilities(agent.capabilities);
+  }, [
+    agent.sensitivity_level,
+    agent.dispatches_cross_zone,
+    agent.capabilities,
+  ]);
+
+  const zoneDirty =
+    level !== agent.sensitivity_level
+    || crossZone !== agent.dispatches_cross_zone;
+  const capsDirty =
+    capabilities.length !== agent.capabilities.length
+    || capabilities.some((c, i) => c !== agent.capabilities[i]);
+
+  const toggleCap = (cap: string) => {
+    setCapabilities((prev) =>
+      prev.includes(cap) ? prev.filter((c) => c !== cap) : [...prev, cap],
+    );
+  };
+
+  const addCustomCap = () => {
+    const trimmed = customCap.trim();
+    if (!trimmed) return;
+    if (capabilities.includes(trimmed)) {
+      setCustomCap("");
+      return;
+    }
+    setCapabilities([...capabilities, trimmed]);
+    setCustomCap("");
+  };
+
+  const onSaveZone = async () => {
+    setSavingZone(true);
+    try {
+      const updated = await patchAgent(agent.name, {
+        sensitivity_level: level,
+        dispatches_cross_zone: crossZone,
+      });
+      onSaved(updated);
+      setSavedAt(Date.now());
+    } catch (e) {
+      onError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setSavingZone(false);
+    }
+  };
+
+  const onSaveCaps = async () => {
+    setSavingCaps(true);
+    try {
+      const updated = await patchAgentCapabilities(agent.name, capabilities);
+      onSaved(updated);
+      setSavedAt(Date.now());
+    } catch (e) {
+      onError(String(e instanceof Error ? e.message : e));
+    } finally {
+      setSavingCaps(false);
+    }
+  };
+
+  return (
+    <section className="mb-10">
+      <h2 className="text-[11px] font-semibold text-gray-500 mb-4 uppercase tracking-wider">
+        Trust zone
+      </h2>
+      <p className="text-xs text-gray-500 mb-4">
+        Controls what this bot is allowed to do and who it&apos;s allowed to
+        talk to. The framework enforces these at runtime — see Phase 16 in
+        the docs for the SDK gate, cross-zone rules, and auto-redaction
+        behavior for <code className="font-mono">pii</code>-tagged bots.
+      </p>
+
+      <div className="rounded-lg border border-gray-200 p-4 mb-4">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h3 className="text-sm font-semibold text-gray-700">
+              Sensitivity level
+            </h3>
+            <p className="text-xs text-gray-500 mt-1">
+              Drives constellation color, auto-redaction on outgoing
+              payloads (when <code className="font-mono">pii</code>), and
+              the cross-zone dispatch check below.
+            </p>
+          </div>
+          <SensitivityChip level={level} size="md" />
+        </div>
+        <div className="flex items-center gap-3 flex-wrap">
+          <select
+            value={level}
+            onChange={(e) => setLevel(e.target.value as SensitivityLevel)}
+            className="border border-gray-300 rounded-md px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-accent-500/30 focus:border-accent-500"
+          >
+            {SENSITIVITY_LEVELS.map((lvl) => (
+              <option key={lvl} value={lvl}>{lvl}</option>
+            ))}
+          </select>
+          <label className="inline-flex items-center gap-2 text-sm text-gray-700">
+            <input
+              type="checkbox"
+              checked={crossZone}
+              onChange={(e) => setCrossZone(e.target.checked)}
+              className="rounded"
+            />
+            allow cross-zone dispatch
+            <span
+              className="text-xs text-gray-500 ml-1"
+              title="When off, this agent's send_command calls are refused if the target is in a different zone. Auto-approval rules still apply on top."
+            >
+              (i)
+            </span>
+          </label>
+          <button
+            type="button"
+            disabled={savingZone || !zoneDirty}
+            onClick={onSaveZone}
+            className="ml-auto px-3 py-2 bg-accent-600 hover:bg-accent-700 text-white rounded-md text-sm font-medium disabled:opacity-50 transition-colors"
+          >
+            {savingZone ? "saving…" : "save zone"}
+          </button>
+        </div>
+      </div>
+
+      <div className="rounded-lg border border-gray-200 p-4">
+        <h3 className="text-sm font-semibold text-gray-700 mb-1">
+          Capabilities
+        </h3>
+        <p className="text-xs text-gray-500 mb-3">
+          Default-deny allow-list. The SDK refuses outbound HTTP without{" "}
+          <code className="font-mono">internet</code>, refuses dispatches
+          without <code className="font-mono">send_command</code>. Connector
+          capabilities use the <code className="font-mono">connector:&lt;name&gt;</code>{" "}
+          prefix; they&apos;re accepted today and gated when Phase 20 ships.
+        </p>
+        <div className="space-y-2 mb-3">
+          {KNOWN_CAPABILITIES.map((cap) => (
+            <label key={cap} className="flex items-center gap-2 text-sm">
+              <input
+                type="checkbox"
+                checked={capabilities.includes(cap)}
+                onChange={() => toggleCap(cap)}
+                className="rounded"
+              />
+              <code className="font-mono">{cap}</code>
+            </label>
+          ))}
+          {capabilities
+            .filter((c) => !KNOWN_CAPABILITIES.includes(c))
+            .map((cap) => (
+              <div key={cap} className="flex items-center gap-2 text-sm">
+                <button
+                  type="button"
+                  onClick={() => toggleCap(cap)}
+                  className="text-red-600 hover:text-red-700 text-xs"
+                  title="Remove"
+                >
+                  ✕
+                </button>
+                <code className="font-mono">{cap}</code>
+              </div>
+            ))}
+        </div>
+        <div className="flex items-center gap-2 mb-3">
+          <input
+            value={customCap}
+            onChange={(e) => setCustomCap(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") {
+                e.preventDefault();
+                addCustomCap();
+              }
+            }}
+            placeholder="connector:hubspot"
+            className="flex-1 border border-gray-300 rounded-md px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-accent-500/30 focus:border-accent-500"
+          />
+          <button
+            type="button"
+            onClick={addCustomCap}
+            disabled={!customCap.trim()}
+            className="px-3 py-2 text-sm border border-gray-300 rounded-md disabled:opacity-50 hover:bg-gray-50"
+          >
+            add
+          </button>
+        </div>
+        <div className="flex items-center justify-end gap-3">
+          {savedAt && Date.now() - savedAt < 4000 && (
+            <span className="text-xs text-green-700">saved.</span>
+          )}
+          <button
+            type="button"
+            disabled={savingCaps || !capsDirty}
+            onClick={onSaveCaps}
+            className="px-3 py-2 bg-accent-600 hover:bg-accent-700 text-white rounded-md text-sm font-medium disabled:opacity-50 transition-colors"
+          >
+            {savingCaps ? "saving…" : "save capabilities"}
+          </button>
+        </div>
       </div>
     </section>
   );
