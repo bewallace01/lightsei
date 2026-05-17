@@ -4122,6 +4122,264 @@ def revoke_session(
     return _serialize_session(row, current=False)
 
 
+# ---------- Phase 17.4: Stripe billing endpoints ---------- #
+
+
+@app.post("/workspaces/me/billing/checkout")
+def billing_create_checkout(
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 17.4: create a Stripe Checkout session for the workspace.
+
+    Lazy customer creation: most workspaces never upgrade, so we only
+    call stripe.Customer.create the first time the user clicks
+    "upgrade." Subsequent clicks reuse the stored customer_id.
+
+    Returns `{checkout_url}`. The dashboard navigates the browser to it;
+    on success Stripe redirects back to /account?upgrade=success, and
+    the dashboard polls /auth/me until plan_tier flips to 'paid' (the
+    webhook handler below lands within seconds).
+    """
+    import stripe_billing as _sb
+
+    if not _sb.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Billing is not configured on this backend. Set "
+                "LIGHTSEI_STRIPE_SECRET_KEY + LIGHTSEI_STRIPE_PRICE_ID."
+            ),
+        )
+    if auth.user is None:
+        raise HTTPException(
+            status_code=400,
+            detail="billing requires a logged-in user (not an API key)",
+        )
+
+    ws = session.get(Workspace, auth.workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    if ws.plan_tier == "paid":
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "already_paid",
+                "message": "Workspace already has an active subscription. Use /workspaces/me/billing/portal to manage it.",
+            },
+        )
+
+    try:
+        if not ws.stripe_customer_id:
+            ws.stripe_customer_id = _sb.create_customer(
+                email=auth.user.email, workspace_id=ws.id,
+            )
+            session.flush()
+        result = _sb.create_checkout_session(
+            customer_id=ws.stripe_customer_id, workspace_id=ws.id,
+        )
+    except _sb.StripeNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except _sb.StripeApiError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "stripe_error",
+                "message": "Billing is temporarily unavailable. Try again in a moment.",
+                "_debug": str(exc),
+            },
+        )
+
+    return {"checkout_url": result["url"], "session_id": result["id"]}
+
+
+@app.post("/workspaces/me/billing/portal")
+def billing_create_portal(
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 17.4: create a Stripe Customer Portal session.
+
+    Used by /account's "manage subscription" button on paid workspaces.
+    400 if the workspace has never been to Checkout (no stripe_customer_id)
+    so the dashboard can show "upgrade first" instead of a broken link.
+    """
+    import stripe_billing as _sb
+
+    if not _sb.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Billing is not configured on this backend. Set "
+                "LIGHTSEI_STRIPE_SECRET_KEY + LIGHTSEI_STRIPE_PRICE_ID."
+            ),
+        )
+    if auth.user is None:
+        raise HTTPException(
+            status_code=400,
+            detail="billing requires a logged-in user (not an API key)",
+        )
+
+    ws = session.get(Workspace, auth.workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    if not ws.stripe_customer_id:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "no_customer",
+                "message": "Workspace has no billing history yet. Upgrade first.",
+            },
+        )
+
+    try:
+        result = _sb.create_portal_session(customer_id=ws.stripe_customer_id)
+    except _sb.StripeNotConfiguredError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except _sb.StripeApiError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "stripe_error",
+                "message": "Billing is temporarily unavailable. Try again in a moment.",
+                "_debug": str(exc),
+            },
+        )
+
+    return {"portal_url": result["url"], "session_id": result["id"]}
+
+
+# Subscription lifecycle events we react to. Any other event types
+# Stripe sends are acknowledged with 200 + ignored — we don't want
+# Stripe retrying forever for events we genuinely don't care about.
+_HANDLED_WEBHOOK_EVENTS = {
+    "checkout.session.completed",
+    "customer.subscription.created",
+    "customer.subscription.updated",
+    "customer.subscription.deleted",
+    "invoice.payment_failed",
+}
+
+
+@app.post("/billing/stripe/webhook")
+async def stripe_webhook(request: Request, session: Session = Depends(get_session)) -> dict[str, Any]:
+    """Phase 17.4: Stripe webhook handler.
+
+    Verifies the Stripe-Signature header against the configured signing
+    secret, then flips plan_tier on the affected workspace based on the
+    event type.
+
+    Returns 200 on success (Stripe stops retrying). 400 on bad signature
+    or unknown workspace (also stops retries). 5xx is reserved for
+    transient infra failures where we WANT Stripe to retry.
+
+    Idempotency: Stripe can deliver the same event twice. We re-derive
+    plan_tier from the event's subscription status on every delivery,
+    so duplicate delivery is a no-op (writes the same value twice).
+    """
+    import stripe_billing as _sb
+
+    if not _sb.is_webhook_configured():
+        # Shouldn't happen in a properly-configured deployment, but if
+        # it does, log loud + return 400 so Stripe doesn't pile up
+        # retries against a misconfigured endpoint.
+        import logging as _logging
+        _logging.getLogger("lightsei.billing").warning(
+            "stripe webhook hit but LIGHTSEI_STRIPE_WEBHOOK_SECRET is not set"
+        )
+        raise HTTPException(
+            status_code=400, detail="webhook secret not configured"
+        )
+
+    payload = await request.body()
+    signature = request.headers.get("stripe-signature", "")
+
+    try:
+        event = _sb.construct_webhook_event(
+            payload=payload, signature_header=signature,
+        )
+    except _sb.WebhookSignatureError as exc:
+        raise HTTPException(status_code=400, detail=f"bad signature: {exc}")
+
+    event_type = event.get("type") or ""
+    if event_type not in _HANDLED_WEBHOOK_EVENTS:
+        # Acknowledge + ignore. Common case for events we subscribe to
+        # implicitly via the endpoint config (Stripe lets you select
+        # specific events, but if the user picks "all events" we don't
+        # want to 4xx the ones we don't care about).
+        return {"status": "ignored", "type": event_type}
+
+    obj = (event.get("data") or {}).get("object") or {}
+
+    # Pull workspace_id off the event. checkout.session.completed has it
+    # in client_reference_id; subscription events carry it in metadata
+    # because we copied it onto subscription_data.metadata at checkout
+    # creation time.
+    workspace_id = (
+        obj.get("client_reference_id")
+        or (obj.get("metadata") or {}).get("workspace_id")
+    )
+    if not workspace_id:
+        # Fallback: look up by stripe_customer_id. Covers older
+        # subscriptions created before we started stamping the metadata.
+        customer_id = obj.get("customer")
+        if customer_id:
+            ws = session.execute(
+                select(Workspace).where(Workspace.stripe_customer_id == customer_id)
+            ).scalar_one_or_none()
+            if ws is not None:
+                workspace_id = ws.id
+
+    if not workspace_id:
+        import logging as _logging
+        _logging.getLogger("lightsei.billing").warning(
+            "stripe webhook %s: no workspace_id in event %s",
+            event_type, event.get("id"),
+        )
+        # Return 200 so Stripe stops retrying; the event is for a
+        # workspace we don't recognize (likely a test event or a
+        # workspace deleted on our side after subscription creation).
+        return {"status": "ignored", "reason": "unknown_workspace"}
+
+    ws = session.get(Workspace, workspace_id)
+    if ws is None:
+        return {"status": "ignored", "reason": "workspace_not_found"}
+
+    if event_type == "checkout.session.completed":
+        # Subscription is freshly created. The subscription id is on
+        # the checkout session.
+        sub_id = obj.get("subscription")
+        if sub_id:
+            ws.stripe_subscription_id = sub_id
+        ws.plan_tier = "paid"
+    elif event_type in ("customer.subscription.created", "customer.subscription.updated"):
+        # Set plan_tier based on the subscription's current status.
+        # 'active' + 'trialing' are paid; everything else (past_due,
+        # unpaid, canceled, incomplete) downgrades to free so the
+        # paywall starts firing again until they fix payment.
+        status = obj.get("status") or ""
+        ws.stripe_subscription_id = obj.get("id") or ws.stripe_subscription_id
+        ws.plan_tier = "paid" if status in ("active", "trialing") else "free"
+    elif event_type == "customer.subscription.deleted":
+        # Subscription cancelled (either by the user via the Portal or
+        # by Stripe after exhausted dunning). Drop to free; they keep
+        # whatever free credits remain.
+        ws.plan_tier = "free"
+        ws.stripe_subscription_id = None
+    elif event_type == "invoice.payment_failed":
+        # First failure: log it but don't change plan_tier yet —
+        # subscription.updated with status='past_due' will follow and
+        # do the downgrade. This branch is mostly here for telemetry.
+        import logging as _logging
+        _logging.getLogger("lightsei.billing").warning(
+            "stripe webhook: invoice payment failed for workspace %s",
+            workspace_id,
+        )
+
+    session.flush()
+    return {"status": "ok", "type": event_type, "workspace_id": workspace_id}
+
+
 def _serialize_command(c: Command) -> dict[str, Any]:
     return {
         "id": c.id,

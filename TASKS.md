@@ -7,11 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 17.7: dashboard billing UI on /account (depends on 17.4)**
+> **Phase 17.7: dashboard billing UI on /account**
 
-17.5 + 17.6 shipped 2026-05-17 — magic-link + Google sign-in UI is live, the paywall fires when free credits run out. The whole non-technical-user demo arc works EXCEPT for the upgrade-to-paid step, which needs 17.4 (Stripe).
+17.4 backend code shipped 2026-05-17 with STRIPE_SETUP.md walkthrough — all three endpoints (`/checkout`, `/portal`, webhook) wired + 20 tests passing. The endpoints stay 503 until Stripe console config is done (product, webhook endpoint, signing secret); see STRIPE_SETUP.md for the dashboard-side work, which is the only thing standing between us and a live upgrade flow.
 
-17.4 (Stripe integration) is the next blocker. 17.7 (billing UI on /account) hangs off 17.4's endpoints. Once 17.4 lands, 17.7 is a small UI sub-task (credits-remaining + upgrade button + manage-subscription button). NOW points at 17.4 since it's the one with external setup work (Stripe dashboard configuration, webhook signing secret, customer-portal config).
+17.5 + 17.6 shipped 2026-05-17 — magic-link + Google sign-in UI is live; the paywall fires when free credits run out. With 17.4 code in place, the whole non-technical-user demo arc is code-complete pending Stripe console config + 17.7's billing UI on `/account`.
+
+NOW is 17.7 — the small UI sub-task that surfaces credits-remaining + an upgrade button + a manage-subscription button on `/account`. With 17.4's endpoints already responding, 17.7 is a pure-frontend task: type a few API helpers, render the panel, handle the polling-on-redirect-back-to-account race.
 
 ## Phase 12C: drop a README, get a team
 
@@ -324,15 +326,16 @@ Two endpoints implementing the standard OAuth 2.0 authorization-code flow with P
 - `GET /auth/google/callback?code&state` — verifies state, exchanges the code for tokens, fetches the userinfo endpoint for `sub` + `email` + `email_verified`, either signs in the matching user (`google_user_id` exact match → preferred; otherwise `email` match if email_verified) OR creates a new user + workspace pair (`auth_provider='google_oauth'`).
 - Configuration: `LIGHTSEI_GOOGLE_CLIENT_ID` + `LIGHTSEI_GOOGLE_CLIENT_SECRET` env vars + Railway-side OAuth consent setup. New-user shape matches 17.2's pattern.
 
-### 17.4 — Stripe integration
+### 17.4 — Stripe integration ✅ shipped 2026-05-17 (code-complete pending Stripe console config)
 
-`backend/stripe_integration.py` (new) + endpoints + webhook handler.
+`backend/stripe_billing.py` (new helper module, mirrors `google_oauth.py` shape) + three endpoints + STRIPE_SETUP.md walkthrough.
 
-- On workspace-create (both new flows from 17.2 + 17.3): create a Stripe Customer with the workspace's email, store the customer_id on `workspaces.stripe_customer_id`.
-- `POST /workspaces/me/billing/checkout` — creates a Checkout Session for the $50/mo subscription (configured as a Stripe Product / Price up front), returns the session URL the dashboard redirects to.
-- `POST /webhooks/stripe` — verifies signature, handles `customer.subscription.created`, `customer.subscription.updated`, `customer.subscription.deleted`, `invoice.payment_failed`. Updates `workspaces.stripe_subscription_id` + `workspaces.plan_tier` accordingly.
-- `POST /workspaces/me/billing/portal` — creates a Stripe Customer Portal session, returns the URL. Lets the user manage their subscription, swap card, cancel, view invoices without us building any of that UI.
-- Configuration: `LIGHTSEI_STRIPE_SECRET_KEY` + `LIGHTSEI_STRIPE_WEBHOOK_SECRET` + `LIGHTSEI_STRIPE_PRICE_ID` env vars.
+- Lazy customer creation: `stripe.Customer.create` only fires the first time a workspace clicks Upgrade (most workspaces never will, so eager creation would waste API calls). Customer id persisted on `workspaces.stripe_customer_id`.
+- `POST /workspaces/me/billing/checkout` — creates a Stripe Checkout Session in subscription mode against the configured price id. Returns `{checkout_url, session_id}`. 503 when Stripe env vars are unset, 502 on Stripe API failure, 400 when workspace is already paid.
+- `POST /workspaces/me/billing/portal` — creates a Customer Portal session. Returns `{portal_url, session_id}`. 400 when workspace has no `stripe_customer_id` yet (so dashboard can render "upgrade first" rather than a broken link).
+- `POST /billing/stripe/webhook` — verifies `stripe-signature` header against `LIGHTSEI_STRIPE_WEBHOOK_SECRET`, flips `plan_tier` based on event type. Handles `checkout.session.completed` (→ paid), `customer.subscription.updated` (status-aware: active/trialing → paid, anything else → free), `customer.subscription.deleted` (→ free), `invoice.payment_failed` (telemetry only; the subscription.updated that follows does the downgrade). Idempotent on duplicate delivery; unknown events get 200 + ignored (Stripe stops retrying). Bad signature / missing secret → 400 (never 5xx).
+- Configuration: `LIGHTSEI_STRIPE_SECRET_KEY` + `LIGHTSEI_STRIPE_PRICE_ID` + `LIGHTSEI_STRIPE_WEBHOOK_SECRET` + `LIGHTSEI_DASHBOARD_BASE_URL` env vars.
+- STRIPE_SETUP.md (new, in repo root) — step-by-step dashboard walkthrough (product + price, Customer Portal config, webhook endpoint, env vars on Railway, stripe-cli local-dev pattern). The endpoints stay 503 until the env vars are set, so deploying code first + configuring Stripe later doesn't break anything.
 
 ### 17.5 — Paywall middleware ✅ shipped 2026-05-17 (out of order; 17.4 deferred)
 
@@ -869,6 +872,28 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 17.4: Stripe integration (code-complete pending Stripe console config)
+
+Backend code for the full Stripe billing flow is wired, tested, and documented. Endpoints stay 503 until the env vars in STRIPE_SETUP.md are populated, so the code ships to prod safely without breaking anything. Once the Stripe dashboard is configured + env vars set, the upgrade-to-paid path lights up end-to-end.
+
+- **`backend/stripe_billing.py`** (new) — pure helper module mirroring `google_oauth.py` shape. Five surfaces: `is_configured()`, `is_webhook_configured()` (checked separately because webhook secret is a different dashboard step), `create_customer()`, `create_checkout_session()`, `create_portal_session()`, `construct_webhook_event()` (delegates signature verification to `stripe.Webhook.construct_event`). Two error types: `StripeNotConfiguredError` (handlers → 503), `StripeApiError` (handlers → 502 with generic message; raw exception only in `_debug`), `WebhookSignatureError` (handler → 400, never 5xx so Stripe stops retrying).
+- **`backend/main.py`** — three new endpoints right after the `/auth/...` block:
+  - `POST /workspaces/me/billing/checkout` — lazy `stripe.Customer.create` on first call (most workspaces never upgrade, so eager creation on signup would waste API calls). Stamps the new customer id onto the workspace row. 400 when already paid (route them to the portal instead). 502 on Stripe API failure with a clean "billing temporarily unavailable" message.
+  - `POST /workspaces/me/billing/portal` — 400 when workspace has no `stripe_customer_id` yet, so the dashboard can render "upgrade first" instead of a broken link.
+  - `POST /billing/stripe/webhook` — verifies signature, maps event types to workspace state. `checkout.session.completed` → `plan_tier='paid'` + stamps the subscription id. `customer.subscription.updated` is status-aware: `active`/`trialing` → paid, everything else (past_due, unpaid, canceled, incomplete) → free so the paywall resumes firing until payment is fixed. `customer.subscription.deleted` → `plan_tier='free'` + clear the subscription id. `invoice.payment_failed` is logged only (the subscription.updated that follows handles the downgrade). Unknown event types are 200-acked + ignored so Stripe stops retrying. Idempotency: handler re-derives plan_tier from the event on every delivery, so duplicate delivery writes the same value.
+- **`backend/requirements.txt`** — `stripe==15.1.0` (used for SDK + signature verification).
+- **`STRIPE_SETUP.md`** (new, repo root) — step-by-step dashboard walkthrough: create the $50/mo product + recurring price, configure the Customer Portal (enable card updates + invoice history + cancel-at-period-end), create the webhook endpoint with the five event types we handle, copy the signing secret, set the four env vars on Railway, end-to-end smoke test (use Stripe test card 4242 4242 4242 4242), and the `stripe listen` CLI pattern for local-dev webhook forwarding.
+
+**Verification:** `backend/tests/test_stripe_billing.py` (new, 20 tests) covering:
+- `is_configured` and `is_webhook_configured` env-var detection (true/false matrices).
+- Checkout endpoint: creates customer + returns URL on first call; reuses existing customer on subsequent calls; 503 when not configured; 400 when already paid; 502 on Stripe API error.
+- Portal endpoint: returns URL; 400 when no customer yet.
+- Webhook handler: `checkout.session.completed` flips to paid + stamps sub id; `subscription.deleted` downgrades + clears sub id; `subscription.updated` with `past_due` status downgrades; bad signature → 400 (not 5xx); duplicate delivery is idempotent (same payload twice → same end state); unknown event type → 200 + ignored; unknown workspace → 200 + ignored; falls back to `stripe_customer_id` lookup when `metadata.workspace_id` is missing (covers older subscriptions); missing webhook secret → 400.
+
+Full backend suite: **744 passed in 143s** (was 724, +20 new). 0 regressions.
+
+**What this unblocks:** the upgrade-to-paid step in the Phase 17 demo arc. Once Stripe console is configured + env vars set on Railway, a user can hit the paywall, click upgrade, complete Checkout, and have their workspace flip to `plan_tier='paid'` via webhook within seconds. 17.7 is the dashboard UI sub-task that surfaces this flow on `/account`.
 
 ### 2026-05-17 — Phase 17.6: dashboard signup + login UI
 

@@ -13,3 +13,5 @@ jsonschema==4.23.0
 httpx==0.27.2
 # Phase 12B.1: backend calls Claude for the agent generator.
 anthropic>=0.40.0
+# Phase 17.4: Stripe-hosted Checkout + Customer Portal + webhook signing.
+stripe==15.1.0
