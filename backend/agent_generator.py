@@ -704,7 +704,7 @@ def run_agent_generation_job(
     import secrets_crypto
     from cost import workspace_cost_mtd
     from db import ensure_agent
-    from models import Agent, Run, WorkspaceSecret
+    from models import Agent, Run, Workspace, WorkspaceSecret
     from pricing import compute_cost_usd
 
     # Local copy of main._anthropic_error_to_http so this module doesn't
@@ -741,6 +741,19 @@ def run_agent_generation_job(
                 "enqueue and run. Re-add it on /account and retry."
             ),
         )
+    workspace = session.get(Workspace, workspace_id)
+    if workspace and workspace.budget_usd_monthly is not None:
+        cost = workspace_cost_mtd(session, workspace_id)
+        used = float(cost.get("mtd_usd") or 0)
+        cap = float(workspace.budget_usd_monthly)
+        if cap > 0 and used >= cap:
+            raise HTTPException(
+                status_code=429,
+                detail=(
+                    f"workspace MTD spend ${used:.2f} >= budget ${cap:.2f}; "
+                    "bump the budget on /account to keep generating."
+                ),
+            )
     try:
         anthropic_key = secrets_crypto.decrypt(secret_row.encrypted_value)
     except Exception:
