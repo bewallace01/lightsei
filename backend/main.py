@@ -821,6 +821,11 @@ def _serialize_agent(a: Agent) -> dict[str, Any]:
         # Per-agent tick interval (seconds). null = use the bot's env default.
         "tick_interval_s": a.tick_interval_s,
         "description": a.description,
+        # Phase 16.1: trust-zone sensitivity ladder.
+        "sensitivity_level": a.sensitivity_level,
+        # Phase 16.2: per-agent capability allow-list (default-deny).
+        # SDK gate in 16.3 refuses ops not on this list.
+        "capabilities": list(a.capabilities or []),
         "created_at": a.created_at.isoformat(),
         "updated_at": a.updated_at.isoformat(),
     }
@@ -918,6 +923,55 @@ def patch_agent(
         else:
             a.description = body.description.strip()
     a.updated_at = now
+    session.flush()
+    return _serialize_agent(a)
+
+
+# ---------- Phase 16.2: per-agent capability allow-list ---------- #
+
+
+class AgentCapabilitiesPatchIn(BaseModel):
+    """Body for PATCH /agents/{name}/capabilities.
+
+    `capabilities` is the full new allow-list (replace, not patch).
+    Tiny enough to send whole; avoids the add-one-remove-one merge
+    semantics we'd otherwise need.
+    """
+    capabilities: list[str]
+
+
+@app.patch("/agents/{agent_name}/capabilities")
+def patch_agent_capabilities(
+    agent_name: str,
+    body: AgentCapabilitiesPatchIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 16.2: replace an agent's capability allow-list.
+
+    Validates against `backend/capabilities.py`'s vocabulary; 422s with
+    the problems list on any invalid entry so the dashboard can render
+    inline errors per-line. Dedupes before persisting so two-entry
+    lists with the same capability twice become one.
+
+    No SDK enforcement yet — that's Phase 16.3 (capability gate on
+    outbound ops). This endpoint just makes the storage exist so 16.3
+    has something to gate against.
+    """
+    import capabilities as _caps
+
+    problems = _caps.validate_capability_list(body.capabilities)
+    if problems:
+        raise HTTPException(
+            status_code=422,
+            detail={"problems": problems},
+        )
+
+    a = session.get(Agent, (workspace_id, agent_name))
+    if a is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+    a.capabilities = _caps.normalize_capability_list(body.capabilities)
+    a.updated_at = utcnow()
     session.flush()
     return _serialize_agent(a)
 

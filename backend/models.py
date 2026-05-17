@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -251,6 +252,15 @@ class Agent(Base):
     # and the existing-row backfill in 0027 has a sensible target.
     sensitivity_level: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default=DEFAULT_SENSITIVITY_LEVEL,
+    )
+    # Phase 16.2: per-agent capability allow-list. Default-deny — an
+    # empty list means the SDK (Phase 16.3) refuses every gated op.
+    # Vocabulary + validation live in `backend/capabilities.py`. JSONB
+    # rather than String[] so we have room to grow each capability
+    # into a dict (per-capability rate limits, etc.) without another
+    # schema change.
+    capabilities: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False

@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 16.2: declarative capability model + backend storage**
+> **Phase 16.3: SDK enforcement — capability gate on outbound ops**
 
-16.1 shipped 2026-05-17 — `sensitivity_level` column landed on both `agents` and `runs` via alembic 0027, default `'internal'`, with `_VALID_SENSITIVITY_LEVELS` + `is_valid_sensitivity_level` helpers in `backend/models.py`. 11 new tests cover the validator, default behavior, round-trip, alembic backfill, and the NOT NULL constraint. Full backend suite 588 passing.
+16.1 + 16.2 shipped 2026-05-17 — schema backbone (`sensitivity_level` on agents + runs) and capability model (`capabilities` JSONB on agents, `backend/capabilities.py` pure module, `PATCH /agents/{name}/capabilities` endpoint with 422-with-problems shape, presets per sensitivity level with `'pii'` default-deny). 40 new tests cover both sub-tasks (11 + 29). Full backend suite 617 passing in 125s.
 
-NOW is 16.2: add the `capabilities: list[str]` JSONB column to `agents` (alembic 0028 — separate from 0027 because the capability model needs its own validator vocabulary that's bigger than the sensitivity ladder), build `backend/capabilities.py` as the pure module owning `KNOWN_CAPABILITIES`, `validate_capability_list(names)`, `presets_for_level(level)`. CRUD endpoint `PATCH /workspaces/me/agents/{name}/capabilities` (workspace-authz). **No SDK enforcement yet** — that's 16.3; 16.2's job is purely storage + validation so the next sub-task has something to gate on.
+NOW is 16.3: make the SDK actually refuse capability-restricted ops. The load-bearing piece that makes the gate real — until 16.3 the capability list is documentation, not enforcement. Auto-patch path (preferred): wrap `httpx`'s sync + async clients via the Phase 1 OpenAI-patch pattern so `httpx.get(...)` in bot code raises `LightseiCapabilityError` if `'internet'` isn't in the agent's capability list. Same wrapping for `lightsei.send_command` (checks `'send_command'`). SDK fetches the capability list on `init()`, caches it, refreshes on every heartbeat so dashboard edits propagate within a tick. Bot-author ergonomics: the wrapped ops feel identical to the unwrapped ones; only forbidden calls raise. Connector capabilities (`'connector:*'`) accepted by the validator but not enforced until Phase 20 wires the connector SDK.
 
 ## Phase 12C: drop a README, get a team
 
@@ -249,7 +249,7 @@ Operationalizes the trust-zone work that landed as P0 in the 2026-05-17 strategi
 
 Add `sensitivity_level` to the `agents` table (`String(16)`, NOT NULL, default `'internal'`) and to `runs` (same column, default inherited from agent at run-create time so historical analytics don't have to JOIN). SQLAlchemy models + alembic 0027. Backfill existing rows with `'internal'`. Validation at the model layer: enum-tight string in `_VALID_LEVELS`. The backbone for everything else in the phase — every other 16.x sub-task assumes this column exists.
 
-### 16.2 — Declarative capability model + backend storage
+### 16.2 — Declarative capability model + backend storage ✅ shipped 2026-05-17
 
 Add `capabilities: list[str]` to the `agents` table (`JSONB`, NOT NULL, default `[]`). Pure module `backend/capabilities.py` owns the vocabulary: `KNOWN_CAPABILITIES` set, `validate_capability_list(names)` returning the same kind of `problems` list the team-planner validators use, `presets_for_level(level)` returning the default capability set for a sensitivity rung. CRUD endpoint `PATCH /workspaces/me/agents/{name}/capabilities` (workspace-authz). Alembic migration in the same revision as 16.1 since they're one-shot together. **No SDK enforcement yet** — that's 16.3; this sub-task is purely storage + validation so the next sub-task has something to read.
 
@@ -768,6 +768,19 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 16.2: capability model + storage + PATCH endpoint
+
+The vocabulary the SDK gate in 16.3 will refuse ops against. Pure module + JSONB column + thin endpoint, same shape as 16.1 — storage and validation only, no enforcement yet.
+
+- [x] **alembic 0028** adds `capabilities` JSONB column to `agents`, NOT NULL DEFAULT `'[]'::jsonb`. Default-deny is the safe posture for a new bot; explicit grants required. Kept separate from 0027 (sensitivity ladder) because the capability vocabulary lives in its own module and grows independently — rolling back one shouldn't disturb the other.
+- [x] **`backend/capabilities.py` (new).** Owns the vocabulary + validators. `KNOWN_CAPABILITIES` frozenset = `{'internet', 'send_command'}` (the two enforced by 16.3). `connector:<name>` prefix accepted by `is_valid_capability` so workspaces can future-proof config today even though Phase 20 hasn't wired connector enforcement. `validate_capability_list(names)` returns the same problems-list shape the team-planner validators use, aggregating multiple problems so the user can fix the whole list in one pass. `normalize_capability_list` dedups preserving order. `presets_for_level(level)` returns the default capability set per sensitivity rung — `public` gets `[internet, send_command]`, `internal` gets `[send_command]`, `sensitive` and `pii` start with `[]` so every grant on a compliance bot is an explicit user choice. Module-level assert keeps the preset keys in sync with `_VALID_SENSITIVITY_LEVELS` to catch drift at import time.
+- [x] **`PATCH /agents/{agent_name}/capabilities` endpoint.** Replace-not-merge semantics (capabilities are small; whole-list updates avoid add-one-remove-one merge complexity). 200 with serialized agent on valid input. 422 with `{"problems": [...]}` on invalid so the dashboard can render line-level errors. 404 on missing agent + cross-workspace. 401 unauthenticated. Normalizes the list (dedup) before persisting.
+- [x] **`_serialize_agent` updated** to include `sensitivity_level` (from 16.1) and `capabilities` (this sub-task) so `GET /agents/{name}` + the agents roster return the new fields. Dashboard wiring lands in 16.6.
+
+**Verification:** 29 new tests in `backend/tests/test_capabilities.py` covering the validator (known-set, connector prefix, empty-suffix rejection, unknown-rejection, non-string-rejection, length cap, frozenset invariant), `validate_capability_list` (empty valid, all-known valid, non-list rejected, unknown-with-index, duplicate detection, per-agent cap of 50, multiple-problem aggregation), `normalize_capability_list` (dedup preserves order), `presets_for_level` (default-deny for sensitive/pii, open-research for public, middle-ground for internal, garbage-fallback to default, fresh-copy invariant), schema default (`[]`), and the PATCH endpoint (replace, 422-with-problems, dedup, 404 missing, cross-workspace 404, 401 unauthenticated, clear-to-empty as valid revocation, GET response shape). Full backend suite: 617 passed in 125s, 0 regressions outside the new files.
+
+**What this unblocks:** 16.3 (SDK gate reads `capabilities` from the agent), 16.7 (team-from-README presets call `presets_for_level` to seed each role's capability list).
 
 ### 2026-05-17 — Phase 16.1: sensitivity_level schema backbone
 
