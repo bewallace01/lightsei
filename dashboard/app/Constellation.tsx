@@ -35,7 +35,6 @@ import {
   fetchConstellation,
   UnauthorizedError,
 } from "./api";
-import { SENSITIVITY_TONE } from "./sensitivity";
 import { sparklePath, tintForAgent } from "./stars";
 
 // ---- Layout constants. ---- //
@@ -250,13 +249,14 @@ export default function Constellation() {
       agent: a,
       pos: positionFor(a, all),
       size: starSize(a),
-      // Phase 16.6: color nodes by trust-zone. Falls back to the
-      // per-agent tint when sensitivity_level is unknown (older
-      // backend or constellation row that predates the column).
-      tint: (
-        SENSITIVITY_TONE[a.sensitivity_level]?.node
-        ?? tintForAgent(a.name)
-      ),
+      // Per-agent identity color (stable hash → tint). The 16.6 spec
+      // originally called for zone-coloring the nodes here, but it
+      // washed out the visual identity of the constellation (every
+      // non-orchestrator star looked the same). Zone info lives on
+      // the /agents Zone column, the /agents/{name} header chip, and
+      // the /zones topology page — the constellation keeps its
+      // per-bot identity.
+      tint: tintForAgent(a.name),
     }));
   }, [data]);
 
