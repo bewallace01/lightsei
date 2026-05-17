@@ -7,11 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 17.4: Stripe integration (customer-on-workspace-create + checkout-session + webhook + portal)**
+> **Phase 17.4: Stripe integration (customer-on-workspace-create + checkout-session + webhook + portal) — deferred**
 
-17.1 + 17.2 + 17.3 shipped 2026-05-17. Both dashboard-side auth paths are live: magic link (Resend) and Google OAuth (PKCE flow, stubbed in tests, needs real Google Cloud OAuth client config for prod). Both paths create the same User + Workspace pair with `plan_tier='free'` + $5 free credits. Backend at 707 tests passing.
+17.5 shipped out of order to keep momentum while 17.4 sits parked (Stripe integration genuinely benefits from fresh attention given signing-secret verification, webhook idempotency, and customer-portal session work). 17.5 + the magic-link / OAuth signin paths already give a usable demo: a fresh user signs up, gets $5 of free credits, runs through team-from-readme, hits a clean 402 when exhausted. Stripe lands when there's a paying customer to charge.
 
-NOW is 17.4: Stripe integration. Three pieces: (a) create a Stripe Customer when a fresh Workspace is created in 17.2/17.3 (best-effort during the auth flow; if Stripe is down the user still signs in — Stripe customer can be back-filled later); (b) `POST /workspaces/me/billing/checkout` endpoint that creates a Stripe Checkout Session for the $50/mo subscription (configured up front as a Stripe Product + Price; price id read from env), returns the session URL the dashboard redirects to; (c) `POST /webhooks/stripe` that verifies the signature and handles `customer.subscription.{created,updated,deleted}` + `invoice.payment_failed` to keep `workspaces.stripe_subscription_id` + `workspaces.plan_tier` in sync; (d) `POST /workspaces/me/billing/portal` creates a Stripe Customer Portal session so users self-serve plan / card / cancel without us building any of that UI. Configured via `LIGHTSEI_STRIPE_SECRET_KEY` + `LIGHTSEI_STRIPE_WEBHOOK_SECRET` + `LIGHTSEI_STRIPE_PRICE_ID` env vars; needs the Stripe dashboard set up with the Product + Price + webhook endpoint registered before the prod flow works end-to-end.
+17.1-17.3 + 17.5 shipped 2026-05-17 (schema, both auth paths, paywall). Backend at 724 tests passing.
+
+NOW is 17.6 — the dashboard signup + login UI — since 17.4 is the next-blocker for that work (the upgrade-to-paid button needs the Checkout session endpoint to exist). 17.6 wires the magic-link request form + Google OAuth button + the magic-link / Google callback pages against the 17.2 + 17.3 backend endpoints; the existing API-key signup form moves to /login/advanced with a pointer to the SDK init flow.
 
 ## Phase 12C: drop a README, get a team
 
@@ -334,7 +336,7 @@ Two endpoints implementing the standard OAuth 2.0 authorization-code flow with P
 - `POST /workspaces/me/billing/portal` — creates a Stripe Customer Portal session, returns the URL. Lets the user manage their subscription, swap card, cancel, view invoices without us building any of that UI.
 - Configuration: `LIGHTSEI_STRIPE_SECRET_KEY` + `LIGHTSEI_STRIPE_WEBHOOK_SECRET` + `LIGHTSEI_STRIPE_PRICE_ID` env vars.
 
-### 17.5 — Paywall middleware
+### 17.5 — Paywall middleware ✅ shipped 2026-05-17 (out of order; 17.4 deferred)
 
 Reuses the existing budget-gate pattern. New helper `_assert_billing_active(session, workspace_id)` raises `HTTPException(402, detail={"error": "out_of_credits", "remaining_usd": 0.0, "upgrade_url": "/account#billing"})` when:
 
@@ -868,6 +870,20 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 17.5: paywall middleware + credit decrement (shipped out of order)
+
+Shipped ahead of 17.4 (Stripe) to keep momentum — 17.5 is the smaller, self-contained sub-task that doesn't depend on external provider setup. With auth + paywall in place, a fresh user can sign up, get $5 of free credits, run through team-from-readme until exhausted, and hit a clean 402. The Stripe upgrade path follows when 17.4 lands.
+
+- [x] **`backend/billing_gate.py` (new).** Pure module with two helpers. `assert_billing_active(session, workspace_id)` raises HTTPException(402) when free-tier workspace has `free_credits_remaining_usd <= 0`; paid workspaces fly through (Stripe handles their accounting separately); missing workspace no-ops (caller's existing 404/500 surfaces it). `decrement_free_credits(session, workspace_id, amount_usd)` subtracts from the pool, floored at 0; no-op on paid; liberal in input type (accepts Decimal, float, string). 402 detail body matches the shape the dashboard's billing UI (17.7) will render: error code + remaining-credits + upgrade-URL hint.
+- [x] **Wired into agent_generator.run_agent_generation_job.** Pre-check: `assert_billing_active` runs BEFORE the workspace secret check, so a paywall'd workspace 402s before any Anthropic call. Post-spend: `decrement_free_credits` runs in the finally block alongside the existing Run row write for `lightsei.system`.
+- [x] **Wired into team_planner.run_team_plan_job.** Same shape — pre-check at the top of the handler, post-decrement in the finally block.
+- [x] **Wired into eval_runner.run_eval_job.** Pre-check returns a clean skip summary (`skipped_reason='out_of_credits'`) rather than raising 402 — eval is background work, raising would just mark the job 'failed' with no actionable signal. Matches the existing `over_budget` skip shape. Post-decrement when total tokens > 0.
+- [x] **Wired into cost.add_run_cost_from_event.** The bot-run path (events flowing in from deployed bots) decrements the same free-credit pool as the server-side LLM call sites. Wrapped in try/except since cost ingest shouldn't crash if billing has a bug. Single source of truth for "all LLM spend in the workspace decrements one pool."
+
+**Verification:** 17 new tests in `backend/tests/test_billing_gate.py` covering: pure-module helpers (free-with-credits no-op, paid no-op even when credits zero, free-exhausted raises 402, tiny remaining still passes, missing workspace no-op, decrement subtracts + floors at zero + no-ops on paid/missing/zero-amount + accepts float/string), end-to-end wiring on the bot-run path (add_run_cost decrements credits; no-op on paid), end-to-end wiring on the three handler call sites (generator + planner raise 402 before touching Anthropic when paywall'd; eval returns skip summary; paid workspace bypasses all three even with $0 credits). Full backend suite: 724 passed in 141s (was 707, +17 new). 0 regressions.
+
+**What this unblocks:** the demo arc Phase 17 was specced around — a fresh user signs up via magic link or Google, gets $5 of credits, runs through team-from-readme, hits the paywall when exhausted. The Stripe upgrade button on /account (17.7) needs 17.4 to function, but everything else in the user-facing flow is now wired.
 
 ### 2026-05-17 — Phase 17.3: Google OAuth backend
 

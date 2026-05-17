@@ -70,6 +70,24 @@ def run_eval_job(
     # import-time circulars when the runner spawns this on a thread.
     import anthropic
 
+    # Phase 17.5: paywall gate. Eval is background work — return a
+    # clean skip summary rather than raising 402 (which would just
+    # mark the job 'failed' with no actionable signal). Same shape as
+    # the over_budget skip below.
+    from models import Workspace as _Workspace
+    _ws = session.get(_Workspace, workspace_id)
+    if (
+        _ws is not None
+        and _ws.plan_tier == "free"
+        and (_ws.free_credits_remaining_usd or Decimal("0")) <= Decimal("0")
+    ):
+        return {
+            "sampled": 0,
+            "evaluated": 0,
+            "errored": 0,
+            "skipped_reason": "out_of_credits",
+        }
+
     # 1. Workspace's Anthropic key.
     secret_row = session.get(WorkspaceSecret, (workspace_id, "ANTHROPIC_API_KEY"))
     if secret_row is None:
@@ -224,6 +242,11 @@ def run_eval_job(
                 ended_at=now_ts,
                 cost_usd=Decimal(format(total_cost, ".6f")),
             )
+        )
+        # Phase 17.5: free credits decrement.
+        import billing_gate as _bg
+        _bg.decrement_free_credits(
+            session, workspace_id, Decimal(format(total_cost, ".6f")),
         )
 
     session.commit()

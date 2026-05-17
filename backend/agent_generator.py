@@ -732,6 +732,13 @@ def run_agent_generation_job(
     # 1. Re-read the workspace secret. Endpoint already gated on its
     # presence, but a race (user revoked it between enqueue and run) is
     # possible — fail clean.
+    # Phase 17.5: paywall gate. Free workspaces with exhausted
+    # credits 402 here BEFORE we touch the LLM. Paid workspaces fly
+    # through. Existing budget_usd_monthly cap (Phase 11B.1) still
+    # applies below.
+    import billing_gate
+    billing_gate.assert_billing_active(session, workspace_id)
+
     secret_row = session.get(WorkspaceSecret, (workspace_id, "ANTHROPIC_API_KEY"))
     if secret_row is None:
         raise HTTPException(
@@ -946,6 +953,14 @@ def run_agent_generation_job(
                 cost_usd=Decimal(format(delta, ".6f")),
             )
             session.add(run_row)
+            # Phase 17.5: free credits decrement on every Run row write.
+            # Server-side LLM spend (generation here, judge in
+            # eval_runner) + bot-run spend (add_run_cost_from_event)
+            # all come out of the same pool. No-op on paid workspaces.
+            import billing_gate
+            billing_gate.decrement_free_credits(
+                session, workspace_id, Decimal(format(delta, ".6f")),
+            )
             session.commit()
 
 

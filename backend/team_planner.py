@@ -483,6 +483,14 @@ def run_team_plan_job(
             )
         return HTTPException(status_code=502, detail=f"Anthropic API error: {exc}")
 
+    # Phase 17.5: paywall gate before any LLM spend. Same shape as
+    # agent_generator.run_agent_generation_job — free workspaces with
+    # exhausted credits 402 here BEFORE the Anthropic call. Paid
+    # workspaces fly through; existing budget_usd_monthly cap still
+    # applies separately.
+    import billing_gate
+    billing_gate.assert_billing_active(session, workspace_id)
+
     # 1. Re-read the workspace secret. Endpoint already gated on its
     # presence; a race (revoked between enqueue and run) is possible.
     secret_row = session.get(WorkspaceSecret, (workspace_id, "ANTHROPIC_API_KEY"))
@@ -683,6 +691,11 @@ def run_team_plan_job(
                 cost_usd=Decimal(format(delta, ".6f")),
             )
             session.add(run_row)
+            # Phase 17.5: free credits decrement on every Run write.
+            import billing_gate
+            billing_gate.decrement_free_credits(
+                session, workspace_id, Decimal(format(delta, ".6f")),
+            )
             session.commit()
 
 

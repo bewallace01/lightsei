@@ -279,9 +279,18 @@ def add_run_cost_from_event(
     # Decimal + float won't auto-coerce in SQLAlchemy; build a Decimal
     # from the float string repr so we don't get binary-float drift.
     from decimal import Decimal as _Decimal
-    run.cost_usd = (run.cost_usd or _Decimal("0")) + _Decimal(
-        format(delta, ".6f")
-    )
+    delta_decimal = _Decimal(format(delta, ".6f"))
+    run.cost_usd = (run.cost_usd or _Decimal("0")) + delta_decimal
+    # Phase 17.5: bot-run spend comes out of the same free-credit pool
+    # as server-side LLM spend (agent_generator + team_planner +
+    # eval_runner all decrement on their own Run row writes; this is
+    # the bot-side path). No-op on paid-tier workspaces.
+    try:
+        from billing_gate import decrement_free_credits
+        decrement_free_credits(session, run.workspace_id, delta_decimal)
+    except Exception:  # belt-and-suspenders; bot-run accounting
+        # shouldn't crash event ingest if the billing path has a bug
+        pass
     return delta
 
 
