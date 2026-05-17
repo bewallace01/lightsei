@@ -130,6 +130,33 @@ Phase 5 is "PaaS for agents": user runs `lightsei deploy ./bot`, Lightsei hosts 
 - Uploaded zips live in a `deployment_blobs` BYTEA column for v1 (cap 10 MB). Move to Cloudflare R2 in Phase 5B if/when the DB feels bloated.
 - Logs land in a `deployment_logs` table (worker streams lines, dashboard polls). Same future pivot to object storage for archival.
 
+## Async-job queue decision (2026-05-16)
+
+Phase 12C.6 needed to move `POST /agents/generate` and `POST /teams/plan` off the request path (Opus + tool-call round trips outran Railway's ~100s edge timeout). Options on the table: Celery + Redis, RQ, an external queue (SQS / Cloud Tasks), or a custom in-process runner.
+
+**Picked: single in-process asyncio runner backed by one `generation_jobs` Postgres table.** Reasoning:
+
+- Lightsei runs as one Railway service. A multi-instance queue would be premature.
+- We already use Postgres for everything; adding Redis just for a queue doubles ops surface for one feature.
+- The work is bounded: only the two LLM-call endpoints need this today. Async-job ergonomics for the rest of the codebase aren't a goal yet.
+- SKIP LOCKED on the claim query means a future second instance (or a stray reload) can't double-process the same row, so we don't have to redesign when we eventually scale out.
+- Reference projects all land in this same neighborhood for v1: Langfuse uses its DB for queueing before introducing Redis; PostHog ran on Postgres queues for years.
+
+**Pattern, briefly:**
+- Endpoints validate input synchronously, insert a `generation_jobs` row (`status='pending'`), return `{job_id, status: 'pending'}` 202.
+- `backend/jobs.py` runs one asyncio task started in FastAPI's lifespan. It claims one row at a time via `SELECT … FOR UPDATE SKIP LOCKED LIMIT 1`, dispatches by `kind` through a handler registry, runs the (sync) handler in `asyncio.to_thread`, finalizes with `result_payload` (success) or `error` text (failure).
+- Handlers register themselves on import via `jobs.register_handler(kind, fn)`. No central dispatch table to keep in sync.
+- No auto-retry in v1. `attempt_count` bumps on each claim; the dashboard surfaces `error` and the user retries from the UI (which enqueues a fresh row).
+- Dashboard's `api.ts` hides the kick-off-and-poll loop behind the same signatures the rest of the dashboard already calls (`pollGenerationJob(jobId)` helper).
+
+**Switch trigger.** Reopen this when ANY of these is true:
+- We add a second backend instance (the in-process runner becomes a per-instance picker and we want fewer pickers per row).
+- We need scheduled / delayed jobs (cron-shaped work, not just "as soon as possible").
+- We need real durability for failures (retry-with-backoff, dead-letter handling, etc.).
+- Sustained queue depth becomes a thing (steady >1 job in flight for >1 minute regularly), at which point the single-task serial runner gets in the way.
+
+If we cross any of those, the most likely next pivot is: keep `generation_jobs` as the source of truth, but introduce Celery or RQ workers consuming it (they treat the row as the unit of work) so we don't have to migrate every handler at once.
+
 ## Reference projects
 
 When stuck on architecture, look at these:
