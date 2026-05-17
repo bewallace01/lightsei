@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 16.4: cross-zone dispatch enforcement (framework-level)**
+> **Phase 16.5: SDK redaction primitives + handoff span**
 
-16.1-16.3 all shipped 2026-05-17. The gate is real: bots without `'internet'` literally can't `httpx.get()` to external hosts, bots without `'send_command'` can't dispatch via `lightsei.send_command()`. SDK fetches the capability list on init() and refreshes on every heartbeat response so dashboard edits propagate within ~10s. 23 new SDK tests + the backend's existing 617 still passing.
+16.1-16.4 all shipped 2026-05-17. The wedge against Viktor is now structurally complete: a `'pii'` bot literally cannot outbound-HTTP without `'internet'`, cannot dispatch without `'send_command'`, and cannot dispatch to a `'public'` bot even with `'send_command'` unless `dispatches_cross_zone=True` (which defaults False and is editable only via PATCH). Backend 403s with the typed `cross_zone_blocked` code; SDK surfaces it as `LightseiCrossZoneError`. Backend 630 tests + SDK 76 tests passing.
 
-NOW is 16.4: the load-bearing cross-zone piece. Same-zone dispatch (source.sensitivity_level == target.sensitivity_level) is always allowed; different-level requires `dispatches_cross_zone=True` on the source agent. Enforcement at both layers — SDK raises `LightseiCrossZoneError` before the network call, backend 403s with `cross_zone_blocked` error code as defense-in-depth. Existing auto-approval rules (Phase 11.2) still apply on top — cross-zone-enabled does NOT mean auto-approved. New `dispatches_cross_zone: bool` column on `agents` (default `False`) in alembic 0029. Editor UI surfaces the flag in 16.6; setting from team-from-README requires explicit user opt-in (no preset enables it silently). This is the wedge that makes "the CRM bot literally cannot exfiltrate to the internet bot" actually true — until 16.4 ships, a bot with both `'send_command'` and `'internet'` can route around the sensitivity boundary.
+NOW is 16.5: `lightsei.redact(text, *, detectors=None)` helper with built-in detectors (email, US phone, SSN-shape, Luhn-checked credit-card). Pluggable via `lightsei.register_redactor(name, fn)`. For agents with `sensitivity_level == 'pii'`, the SDK auto-redacts outgoing `lightsei.emit` payloads + dispatched command payloads + chat-message body by default; per-call opt-out via `lightsei.emit(..., redact=False)`. Plus `lightsei.handoff_span(from_run, to_run, sanitized_prompt)` — synchronous helper that writes a `handoff` event linking the two runs in the trace view (opt-in, no auto-detection).
 
 ## Phase 12C: drop a README, get a team
 
@@ -257,7 +257,7 @@ Add `capabilities: list[str]` to the `agents` table (`JSONB`, NOT NULL, default 
 
 Make the SDK refuse capability-restricted ops at call time. Auto-patch path (preferred): wrap `httpx`'s sync + async clients via the same pattern Phase 1 used for OpenAI, so `httpx.get(...)` in user code raises `LightseiCapabilityError` if `'internet'` isn't in the agent's capability list. Same wrapping for `lightsei.send_command` (checks `'send_command'` capability OR the source agent's allow-list of dispatch targets). Connector capabilities (`'connector:hubspot'`, etc.) checked when the connector SDK ships in Phase 20 — for now the gate machinery exists but only `'internet'` and `'send_command'` are enforced. SDK fetches the capability list on `init()` and caches it; refresh on every heartbeat so updates from the dashboard propagate within a tick. Bot-author ergonomics: the wrapped ops feel identical to the unwrapped ones; only forbidden calls raise.
 
-### 16.4 — Cross-zone dispatch enforcement (framework-level)
+### 16.4 — Cross-zone dispatch enforcement (framework-level) ✅ shipped 2026-05-17
 
 The load-bearing piece. Phase 11's `send_command` (SDK) + `enqueue_command` (backend) both gain a zone check: same `sensitivity_level` between source and target is always allowed; different levels are refused unless the source agent has `dispatches_cross_zone=True`. Backend refusal is a 403 with a `cross_zone_blocked` error code; SDK refusal raises `LightseiCrossZoneError` before the network call. Existing auto-approval rules (Phase 11.2) still apply on top — cross-zone-enabled does NOT mean auto-approved. New `dispatches_cross_zone: bool` column on `agents` (default `False`) in the same alembic revision as the other 16.x schema changes. Editor UI in 16.6 surfaces the flag; setting it from team-from-README requires explicit user opt-in (no preset enables it silently).
 
@@ -768,6 +768,22 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 16.4: cross-zone dispatch enforcement (framework-level)
+
+The wedge against Viktor is now structurally complete. A `'pii'` agent can't dispatch to a `'public'` agent even when both have `'send_command'` unless the source explicitly opts in via `dispatches_cross_zone=True`. Backend gate is the load-bearing one (data never leaves Lightsei mid-call so SDK pre-flight is less urgent for send_command than for httpx); SDK surfaces the backend's typed 403 as `LightseiCrossZoneError`.
+
+- [x] **alembic 0029** adds `dispatches_cross_zone Boolean NOT NULL DEFAULT false` to `agents`. Default-deny: every existing agent stays in the safer same-zone-only posture until the user explicitly opts an agent in. Belt-and-suspenders UPDATE pass alongside the ADD COLUMN.
+- [x] **SQLAlchemy model** carries the new column on `Agent` with `server_default=text("false")` so existing call sites that don't pass the field land on False automatically.
+- [x] **`_serialize_agent`** returns `dispatches_cross_zone` so GET /agents + /agents/{name} expose the field for the dashboard editor in 16.6.
+- [x] **PATCH /agents/{name} extended** with `dispatches_cross_zone` + `sensitivity_level` fields on `AgentPatchIn`. sensitivity_level validates against `_VALID_SENSITIVITY_LEVELS` with a 422 + helpful message on invalid input. dispatches_cross_zone is a straight bool update; None means no-op.
+- [x] **Backend cross-zone gate in `enqueue_command`.** Only fires when `source_agent` is set (user-initiated dashboard dispatches skip the gate — the user made an explicit decision). Compares source's `sensitivity_level` vs target's; refuses with `HTTPException(403, detail={"error": "cross_zone_blocked", ...})` carrying source/target agent + zone + a clear message. Auto-approval rules from Phase 11.2 still apply on top — cross-zone-enabled does NOT mean auto-approved.
+- [x] **SDK `LightseiCrossZoneError` in `errors.py`** with `source_agent` / `source_zone` / `target_agent` / `target_zone` attributes + a helpful default message that names the missing `dispatches_cross_zone` flag.
+- [x] **SDK `send_command` surfaces the backend's 403.** When the backend returns 403 with `detail.error == "cross_zone_blocked"`, the SDK re-raises as `LightseiCrossZoneError` (typed) so user code can catch the trust-zone violation specifically. Other 403s + malformed bodies fall through to the generic `LightseiError` so the typed exception stays unambiguous.
+
+**Verification:** 13 new backend tests in `test_cross_zone_dispatch.py` covering the schema default, same-zone-always-allowed (including pii↔pii), cross-zone refusal in both directions, internal↔sensitive (not just public↔pii extremes), opt-in unblocks the gate, opt-in must be on source not target, user-initiated dispatches bypass the gate, PATCH updates dispatches_cross_zone + sensitivity_level with 422 on invalid, GET response shape, cross-workspace isolation. 6 new SDK tests in `test_cross_zone_gate.py` covering the error class (attributes + helpful message + custom-message override + LightseiError subclass invariant) and the send_command surfacing path (typed re-raise on cross_zone_blocked, fall-through to generic LightseiError on other 403s including malformed bodies). Backend full suite: 630 passed in 132s. SDK full suite: 76 passed in 18s. 0 regressions.
+
+**What this unblocks:** Phase 16's structural wedge is complete — 16.5 (redaction + handoff span) is the last SDK-level work; 16.6 (dashboard surfaces) makes everything visible; 16.7 (presets) wires it into team-from-README. After 16.7 the Compliance team demo (16's payoff) is testable end-to-end.
 
 ### 2026-05-17 — Phase 16.3: SDK capability gate (httpx + send_command + heartbeat refresh)
 

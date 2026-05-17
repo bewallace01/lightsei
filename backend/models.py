@@ -262,6 +262,15 @@ class Agent(Base):
     capabilities: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb"), default=list,
     )
+    # Phase 16.4: opt-in flag for cross-zone dispatch. Default False —
+    # same-zone-only is the safer posture for a new agent. Setting
+    # True allows this agent's send_command calls to target agents in
+    # different sensitivity zones. Auto-approval rules from Phase 11.2
+    # still apply on top — cross-zone-enabled does NOT mean
+    # auto-approved.
+    dispatches_cross_zone: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"), default=False,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )

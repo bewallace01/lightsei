@@ -133,6 +133,12 @@ class AgentPatchIn(BaseModel):
     tick_interval_s: Optional[int] = None
     # Short freeform description shown on the /agents roster. null clears.
     description: Optional[str] = Field(default=None, max_length=2000)
+    # Phase 16.1: trust-zone sensitivity. Validated against
+    # _VALID_SENSITIVITY_LEVELS in the handler.
+    sensitivity_level: Optional[str] = None
+    # Phase 16.4: opt-in for cross-zone dispatch. None = leave unchanged;
+    # True/False updates the column.
+    dispatches_cross_zone: Optional[bool] = None
     # Distinguish "field not provided" from "explicitly null". Pydantic v2:
     # we'll detect via model_fields_set.
 
@@ -826,6 +832,10 @@ def _serialize_agent(a: Agent) -> dict[str, Any]:
         # Phase 16.2: per-agent capability allow-list (default-deny).
         # SDK gate in 16.3 refuses ops not on this list.
         "capabilities": list(a.capabilities or []),
+        # Phase 16.4: opt-in for cross-zone dispatch. False = same-zone-only
+        # dispatches; True = source can target agents in different zones
+        # (but auto-approval rules still apply on top).
+        "dispatches_cross_zone": bool(a.dispatches_cross_zone),
         "created_at": a.created_at.isoformat(),
         "updated_at": a.updated_at.isoformat(),
     }
@@ -922,6 +932,26 @@ def patch_agent(
             a.description = None
         else:
             a.description = body.description.strip()
+    if "sensitivity_level" in fields:
+        from models import is_valid_sensitivity_level
+        if body.sensitivity_level is None:
+            # null = no-op rather than 'reset to default'; the existing
+            # value stays. Forces the user to pick a valid level
+            # explicitly if they want to change it.
+            pass
+        elif not is_valid_sensitivity_level(body.sensitivity_level):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"sensitivity_level must be one of "
+                    f"public / internal / sensitive / pii "
+                    f"(got {body.sensitivity_level!r})"
+                ),
+            )
+        else:
+            a.sensitivity_level = body.sensitivity_level
+    if "dispatches_cross_zone" in fields and body.dispatches_cross_zone is not None:
+        a.dispatches_cross_zone = bool(body.dispatches_cross_zone)
     a.updated_at = now
     session.flush()
     return _serialize_agent(a)
@@ -3785,6 +3815,37 @@ def enqueue_command(
                     f"commands in the last 24h, exceeding its "
                     f"max_dispatch_per_day = {source.max_dispatch_per_day}"
                 ),
+            )
+        # Phase 16.4: cross-zone dispatch enforcement. The load-bearing
+        # piece. Same sensitivity level always allowed; different
+        # levels refused unless the source agent has
+        # dispatches_cross_zone=True. Only applies when source_agent is
+        # set (user-initiated dispatches via the dashboard skip this —
+        # the user is making an explicit cross-zone decision). Auto-
+        # approval rules from Phase 11.2 still apply on top.
+        target = session.get(Agent, (workspace_id, agent_name))
+        if (
+            target is not None
+            and source.sensitivity_level != target.sensitivity_level
+            and not source.dispatches_cross_zone
+        ):
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "cross_zone_blocked",
+                    "source_agent": body.source_agent,
+                    "source_zone": source.sensitivity_level,
+                    "target_agent": agent_name,
+                    "target_zone": target.sensitivity_level,
+                    "message": (
+                        f"{body.source_agent!r} ({source.sensitivity_level!r}) "
+                        f"cannot dispatch to {agent_name!r} "
+                        f"({target.sensitivity_level!r}) — set "
+                        f"dispatches_cross_zone=True on the source agent "
+                        f"to permit cross-zone dispatches "
+                        f"(auto-approval rules still apply on top)."
+                    ),
+                },
             )
     else:
         depth = 0  # user / off-platform enqueue is a chain root

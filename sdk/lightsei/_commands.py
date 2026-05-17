@@ -301,6 +301,25 @@ def send_command(
     except Exception as e:
         raise LightseiError(f"send_command transport error: {e}") from e
     if r.status_code >= 400:
+        # Phase 16.4: surface the backend's cross_zone_blocked code as
+        # the typed LightseiCrossZoneError so user code can catch the
+        # trust-zone violation specifically. Other 4xx/5xx falls
+        # through to the generic LightseiError.
+        if r.status_code == 403:
+            from .errors import LightseiCrossZoneError
+            try:
+                body_json = r.json()
+            except Exception:
+                body_json = {}
+            detail = body_json.get("detail") if isinstance(body_json, dict) else None
+            if isinstance(detail, dict) and detail.get("error") == "cross_zone_blocked":
+                raise LightseiCrossZoneError(
+                    source_agent=detail.get("source_agent") or source_agent,
+                    source_zone=detail.get("source_zone"),
+                    target_agent=detail.get("target_agent") or target_agent,
+                    target_zone=detail.get("target_zone"),
+                    message=detail.get("message"),
+                )
         raise LightseiError(
             f"send_command failed: {r.status_code} {r.text[:200]}"
         )

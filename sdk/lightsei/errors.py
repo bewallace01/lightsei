@@ -14,6 +14,48 @@ class LightseiPolicyError(LightseiError):
         super().__init__(reason)
 
 
+class LightseiCrossZoneError(LightseiError):
+    """Raised when a dispatch crosses sensitivity zones without the
+    source agent having `dispatches_cross_zone=True`.
+
+    Phase 16.4: the load-bearing piece that makes the trust-zone
+    boundary actually one-way. A `'pii'` bot can't dispatch to a
+    `'public'` bot just because both have `'send_command'` — the
+    framework refuses the call. Backend returns 403 with the
+    `cross_zone_blocked` error code; the SDK surfaces it as this
+    exception so user code can catch the trust-zone violation
+    specifically rather than a generic LightseiError.
+
+    Attributes:
+        source_agent: who tried to dispatch.
+        source_zone: source agent's sensitivity_level.
+        target_agent: dispatch target.
+        target_zone: target's sensitivity_level.
+    """
+
+    def __init__(
+        self,
+        source_agent: Optional[str],
+        source_zone: Optional[str],
+        target_agent: Optional[str],
+        target_zone: Optional[str],
+        message: Optional[str] = None,
+    ):
+        self.source_agent = source_agent
+        self.source_zone = source_zone
+        self.target_agent = target_agent
+        self.target_zone = target_zone
+        super().__init__(
+            message
+            or (
+                f"cross-zone dispatch refused: "
+                f"{source_agent!r} ({source_zone!r}) → "
+                f"{target_agent!r} ({target_zone!r}). "
+                "Set dispatches_cross_zone=True on the source agent to allow."
+            ),
+        )
+
+
 class LightseiCapabilityError(LightseiError):
     """Raised when an op requires a capability the agent doesn't have.
 
