@@ -23,6 +23,10 @@ import {
   UnauthorizedError,
   WorkspaceSecretMeta,
 } from "../api";
+import {
+  SUGGESTED_SECRET_ORDER,
+  guidanceFor,
+} from "../secret_guidance";
 
 function fmt(iso: string | null): string {
   if (!iso) return "—";
@@ -341,7 +345,99 @@ export default function AccountPage() {
           <code className="font-mono">lightsei.get_secret(&quot;NAME&quot;)</code>.
         </p>
 
-        <form onSubmit={onSaveSecret} className="grid grid-cols-12 gap-3 mb-5">
+        {/* Suggested secrets — common ones bots in this workspace are
+            likely to want. Expand a row to see what the secret is for +
+            where to get it; click "use this name" to prefill the form
+            below with the exact name. */}
+        <div className="mb-5 rounded-lg border border-gray-200 bg-gray-50/60 p-4">
+          <div className="flex items-baseline justify-between mb-3">
+            <h3 className="text-sm font-semibold text-gray-700">
+              Suggested secrets
+            </h3>
+            <span className="text-[11px] text-gray-500">
+              {(() => {
+                const haveSet = new Set(secrets.map((s) => s.name));
+                const setCount = SUGGESTED_SECRET_ORDER.filter((n) =>
+                  haveSet.has(n),
+                ).length;
+                return `${setCount} of ${SUGGESTED_SECRET_ORDER.length} set`;
+              })()}
+            </span>
+          </div>
+          <p className="text-xs text-gray-500 mb-3">
+            Common API keys + webhooks bots reach for. Expand any row to
+            see where to get the value.
+          </p>
+          <ul className="space-y-2">
+            {SUGGESTED_SECRET_ORDER.map((name) => {
+              const isSet = secrets.some((s) => s.name === name);
+              const g = guidanceFor(name);
+              const isExternal = /^https?:\/\//.test(g.url);
+              return (
+                <li key={name}>
+                  <details className="group rounded border border-gray-200 bg-white open:shadow-sm">
+                    <summary className="cursor-pointer list-none px-3 py-2 text-sm flex items-center gap-3">
+                      <code className="font-mono text-gray-800 flex-1">{name}</code>
+                      {isSet ? (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-800 text-[11px] font-medium">
+                          ✓ set
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-800 text-[11px] font-medium">
+                          not set
+                        </span>
+                      )}
+                      <span className="text-xs text-gray-500 group-open:hidden">
+                        details →
+                      </span>
+                      <span className="text-xs text-gray-500 hidden group-open:inline">
+                        hide
+                      </span>
+                    </summary>
+                    <div className="px-3 pb-3 pt-1 text-xs text-gray-700 space-y-2 border-t border-gray-100">
+                      <p>{g.what}</p>
+                      <p>{g.where}</p>
+                      <div className="flex items-center gap-4 pt-1">
+                        {isExternal ? (
+                          <a
+                            href={g.url}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-accent-600 hover:text-accent-700 font-medium"
+                          >
+                            open the page →
+                          </a>
+                        ) : null}
+                        {!isSet ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSecretName(name);
+                              // Scroll the form into view so the
+                              // password field is the next thing the
+                              // user sees after clicking.
+                              document
+                                .getElementById("secret-form")
+                                ?.scrollIntoView({
+                                  behavior: "smooth",
+                                  block: "center",
+                                });
+                            }}
+                            className="text-accent-600 hover:text-accent-700 font-medium"
+                          >
+                            use this name in the form below →
+                          </button>
+                        ) : null}
+                      </div>
+                    </div>
+                  </details>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+
+        <form id="secret-form" onSubmit={onSaveSecret} className="grid grid-cols-12 gap-3 mb-5">
           <div className="col-span-4">
             <label className="block text-sm font-medium text-gray-700 mb-1.5">
               Name
