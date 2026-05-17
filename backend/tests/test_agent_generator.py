@@ -21,7 +21,11 @@ from agent_generator import (
     is_valid_star_name,
     render_star_dictionary_for_prompt,
 )
-from tests.conftest import auth_headers
+from tests.conftest import (
+    GenerationJobFailed,
+    auth_headers,
+    kick_and_wait_for_job,
+)
 
 
 # ---------- Pure-module unit tests ---------- #
@@ -183,15 +187,14 @@ def test_generate_returns_bot_with_dictionary_name(client, alice, monkeypatch):
     )
     monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
 
-    r = client.post(
-        "/workspaces/me/agents/generate",
-        headers=auth_headers(api_key),
-        json={
+    body = kick_and_wait_for_job(
+        client,
+        auth_headers(api_key),
+        path="/workspaces/me/agents/generate",
+        body={
             "description": "Build a code review bot that posts findings via hermes.",
         },
     )
-    assert r.status_code == 200, r.text
-    body = r.json()
     assert body["agent_name_suggestion"] == "vega"
     assert "lightsei.init" in body["bot_py"]
     assert "def main" in body["bot_py"]
@@ -230,13 +233,13 @@ def test_generate_retries_when_name_off_dictionary(client, alice, monkeypatch):
     fake.messages.create = fake_create
     monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
 
-    r = client.post(
-        "/workspaces/me/agents/generate",
-        headers=auth_headers(api_key),
-        json={"description": "Build a code review bot."},
+    body = kick_and_wait_for_job(
+        client,
+        auth_headers(api_key),
+        path="/workspaces/me/agents/generate",
+        body={"description": "Build a code review bot."},
     )
-    assert r.status_code == 200
-    assert r.json()["agent_name_suggestion"] == "vega"
+    assert body["agent_name_suggestion"] == "vega"
     assert calls["n"] == 2  # one retry happened
 
 
@@ -248,13 +251,14 @@ def test_generate_422_when_retry_also_off_dictionary(client, alice, monkeypatch)
     fake.messages.create = lambda **kw: _fake_response(agent_name="invented-name")
     monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
 
-    r = client.post(
-        "/workspaces/me/agents/generate",
-        headers=auth_headers(api_key),
-        json={"description": "Build a hello-world bot."},
-    )
-    assert r.status_code == 422
-    assert "valid star name" in r.json()["detail"].lower()
+    with pytest.raises(GenerationJobFailed) as exc:
+        kick_and_wait_for_job(
+            client,
+            auth_headers(api_key),
+            path="/workspaces/me/agents/generate",
+            body={"description": "Build a hello-world bot."},
+        )
+    assert "valid star name" in exc.value.error.lower()
 
 
 def test_generate_retries_when_name_already_taken(client, alice, monkeypatch):
@@ -283,13 +287,13 @@ def test_generate_retries_when_name_already_taken(client, alice, monkeypatch):
     fake.messages.create = fake_create
     monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
 
-    r = client.post(
-        "/workspaces/me/agents/generate",
-        headers=auth_headers(api_key),
-        json={"description": "Build a planner."},
+    body = kick_and_wait_for_job(
+        client,
+        auth_headers(api_key),
+        path="/workspaces/me/agents/generate",
+        body={"description": "Build a planner."},
     )
-    assert r.status_code == 200
-    assert r.json()["agent_name_suggestion"] == "vega"
+    assert body["agent_name_suggestion"] == "vega"
     assert calls["n"] == 2
 
 
@@ -394,14 +398,14 @@ def test_generate_retries_when_validation_fails(client, alice, monkeypatch):
     fake.messages.create = fake_create
     monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
 
-    r = client.post(
-        "/workspaces/me/agents/generate",
-        headers=auth_headers(api_key),
-        json={"description": "Build a code review bot."},
+    body = kick_and_wait_for_job(
+        client,
+        auth_headers(api_key),
+        path="/workspaces/me/agents/generate",
+        body={"description": "Build a code review bot."},
     )
-    assert r.status_code == 200
     assert calls["n"] == 2  # one retry happened
-    assert "def main" in r.json()["bot_py"]
+    assert "def main" in body["bot_py"]
 
 
 def test_generate_422_when_validation_retry_also_fails(client, alice, monkeypatch):
@@ -415,13 +419,14 @@ def test_generate_422_when_validation_retry_also_fails(client, alice, monkeypatc
     )
     monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
 
-    r = client.post(
-        "/workspaces/me/agents/generate",
-        headers=auth_headers(api_key),
-        json={"description": "Build a code review bot."},
-    )
-    assert r.status_code == 422
-    assert "valid bot" in r.json()["detail"].lower()
+    with pytest.raises(GenerationJobFailed) as exc:
+        kick_and_wait_for_job(
+            client,
+            auth_headers(api_key),
+            path="/workspaces/me/agents/generate",
+            body={"description": "Build a code review bot."},
+        )
+    assert "valid bot" in exc.value.error.lower()
 
 
 # ---------- Phase 12B.3: iteration loop ---------- #
@@ -457,17 +462,17 @@ def test_generate_iteration_includes_previous_in_messages(client, alice, monkeyp
     fake.messages.create = fake_create
     monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
 
-    r = client.post(
-        "/workspaces/me/agents/generate",
-        headers=auth_headers(api_key),
-        json={
+    kick_and_wait_for_job(
+        client,
+        auth_headers(api_key),
+        path="/workspaces/me/agents/generate",
+        body={
             "description": "A code review bot",
             "tweak_request": "Make it post to slack via hermes",
             "previous_bot_py": "def main(): pass",
             "previous_requirements_txt": "lightsei>=0.1.3",
         },
     )
-    assert r.status_code == 200, r.text
     msgs = captured["messages"]
     assert len(msgs) >= 2
     # First message: original description framing.
@@ -493,16 +498,16 @@ def test_generate_iteration_alone_without_previous_ignored(client, alice, monkey
     fake.messages.create = fake_create
     monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
 
-    r = client.post(
-        "/workspaces/me/agents/generate",
-        headers=auth_headers(api_key),
-        json={
+    kick_and_wait_for_job(
+        client,
+        auth_headers(api_key),
+        path="/workspaces/me/agents/generate",
+        body={
             "description": "A code review bot",
             "tweak_request": "Make it faster",
             # previous_* deliberately omitted.
         },
     )
-    assert r.status_code == 200
     # Only the framing message; no iteration turn.
     assert len(captured["messages"]) == 1
 
@@ -521,12 +526,12 @@ def test_generate_records_cost_on_lightsei_system_run(client, alice, monkeypatch
     fake.messages.create = lambda **kw: _fake_response(agent_name="vega")
     monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
 
-    r = client.post(
-        "/workspaces/me/agents/generate",
-        headers=auth_headers(api_key),
-        json={"description": "Build a code review bot."},
+    kick_and_wait_for_job(
+        client,
+        auth_headers(api_key),
+        path="/workspaces/me/agents/generate",
+        body={"description": "Build a code review bot."},
     )
-    assert r.status_code == 200, r.text
 
     expected = (123 * 15.00 + 456 * 75.00) / 1_000_000
 

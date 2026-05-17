@@ -21,7 +21,11 @@ from team_planner import (
     build_user_message,
     validate_team_plan,
 )
-from tests.conftest import auth_headers
+from tests.conftest import (
+    GenerationJobFailed,
+    auth_headers,
+    kick_and_wait_for_job,
+)
 
 
 # ---------- Pure-module unit tests ---------- #
@@ -294,10 +298,11 @@ def test_plan_returns_team_with_valid_names(client, alice, monkeypatch):
     fake.messages.create = lambda **kw: _fake_response(plan=_good_plan())
     monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
 
-    r = client.post(
-        "/workspaces/me/teams/plan",
-        headers=auth_headers(api_key),
-        json={
+    body = kick_and_wait_for_job(
+        client,
+        auth_headers(api_key),
+        path="/workspaces/me/teams/plan",
+        body={
             "freeform_description": (
                 "A small backend service with a Postgres DB. We push "
                 "to main, deploy to Railway, want PR review and a "
@@ -305,8 +310,6 @@ def test_plan_returns_team_with_valid_names(client, alice, monkeypatch):
             ),
         },
     )
-    assert r.status_code == 200, r.text
-    body = r.json()
     assert body["rationale"]
     names = [m["name"] for m in body["team"]]
     assert "vega" in names
@@ -363,12 +366,12 @@ def test_plan_retries_on_invalid_first_attempt(client, alice, monkeypatch):
     fake.messages.create = fake_create
     monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
 
-    r = client.post(
-        "/workspaces/me/teams/plan",
-        headers=auth_headers(api_key),
-        json={"readme_text": "small backend project"},
+    kick_and_wait_for_job(
+        client,
+        auth_headers(api_key),
+        path="/workspaces/me/teams/plan",
+        body={"readme_text": "small backend project"},
     )
-    assert r.status_code == 200, r.text
     assert calls["n"] == 2
 
 
@@ -402,15 +405,17 @@ def test_plan_translates_anthropic_overloaded_to_503(client, alice, monkeypatch)
     fake.messages.create = boom
     monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
 
-    r = client.post(
-        "/workspaces/me/teams/plan",
-        headers=auth_headers(api_key),
-        json={"readme_text": "anything"},
-    )
-    assert r.status_code == 503, r.text
-    detail = r.json()["detail"]
-    assert "overloaded" in detail.lower()
-    assert "try again" in detail.lower()
+    with pytest.raises(GenerationJobFailed) as exc:
+        kick_and_wait_for_job(
+            client,
+            auth_headers(api_key),
+            path="/workspaces/me/teams/plan",
+            body={"readme_text": "anything"},
+        )
+    # Persisted error wraps the FastAPI HTTPException text; check for
+    # the same "overloaded" + "try again" guidance the old 503 carried.
+    assert "overloaded" in exc.value.error.lower()
+    assert "try again" in exc.value.error.lower()
 
 
 def test_plan_422_when_retry_also_invalid(client, alice, monkeypatch):
@@ -429,13 +434,14 @@ def test_plan_422_when_retry_also_invalid(client, alice, monkeypatch):
     fake.messages.create = lambda **kw: _fake_response(plan=bad_plan)
     monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
 
-    r = client.post(
-        "/workspaces/me/teams/plan",
-        headers=auth_headers(api_key),
-        json={"readme_text": "anything"},
-    )
-    assert r.status_code == 422
-    assert "remaining issues" in r.json()["detail"].lower()
+    with pytest.raises(GenerationJobFailed) as exc:
+        kick_and_wait_for_job(
+            client,
+            auth_headers(api_key),
+            path="/workspaces/me/teams/plan",
+            body={"readme_text": "anything"},
+        )
+    assert "remaining issues" in exc.value.error.lower()
 
 
 def test_plan_records_cost_on_lightsei_system(client, alice, monkeypatch):
@@ -448,12 +454,12 @@ def test_plan_records_cost_on_lightsei_system(client, alice, monkeypatch):
     fake.messages.create = lambda **kw: _fake_response(plan=_good_plan())
     monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
 
-    r = client.post(
-        "/workspaces/me/teams/plan",
-        headers=auth_headers(api_key),
-        json={"readme_text": "small backend"},
+    kick_and_wait_for_job(
+        client,
+        auth_headers(api_key),
+        path="/workspaces/me/teams/plan",
+        body={"readme_text": "small backend"},
     )
-    assert r.status_code == 200
 
     # _FakeUsage(800, 1500) on claude-opus-4-7 = (800 * $15 + 1500 * $75) / 1M
     expected = (800 * 15.00 + 1500 * 75.00) / 1_000_000
@@ -501,12 +507,12 @@ def test_plan_filters_lightsei_system_from_existing_agents(client, alice, monkey
     fake = _FakeClient()
     fake.messages.create = lambda **kw: _fake_response(plan=_good_plan())
     monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
-    r = client.post(
-        "/workspaces/me/teams/plan",
-        headers=auth_headers(api_key),
-        json={"readme_text": "seed call"},
+    kick_and_wait_for_job(
+        client,
+        auth_headers(api_key),
+        path="/workspaces/me/teams/plan",
+        body={"readme_text": "seed call"},
     )
-    assert r.status_code == 200
 
     # Now intercept the prompt the second call sees.
     captured: dict = {}
@@ -515,10 +521,10 @@ def test_plan_filters_lightsei_system_from_existing_agents(client, alice, monkey
         return _fake_response(plan=_good_plan())
     fake.messages.create = capture_create
 
-    r = client.post(
-        "/workspaces/me/teams/plan",
-        headers=auth_headers(api_key),
-        json={"readme_text": "real call"},
+    kick_and_wait_for_job(
+        client,
+        auth_headers(api_key),
+        path="/workspaces/me/teams/plan",
+        body={"readme_text": "real call"},
     )
-    assert r.status_code == 200
     assert "lightsei.system" not in captured["system"]

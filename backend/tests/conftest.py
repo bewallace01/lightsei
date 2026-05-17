@@ -101,9 +101,16 @@ os.environ.setdefault("LIGHTSEI_WORKER_TOKEN", "test-worker-token")
 from fastapi.testclient import TestClient  # noqa: E402
 
 from db import engine  # noqa: E402
+import jobs  # noqa: E402
 from limits import reset_counter_for_tests  # noqa: E402
 from main import app  # noqa: E402
 from migrate import upgrade_to_head  # noqa: E402
+
+
+# Phase 12C.6: shrink the runner's idle sleep so async-generation tests
+# don't pay the default 500ms gap between claim attempts. Worth ~10s
+# saved across the suite once endpoints all use the kick-off path.
+jobs._IDLE_SLEEP_S = 0.01
 
 @pytest.fixture(scope="session", autouse=True)
 def _migrate_schema() -> list[str]:
@@ -163,6 +170,73 @@ def signup(client: TestClient, email: str = "alice@example.com",
 
 def auth_headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+# ---------- Phase 12C.6 async-generation helpers ---------- #
+
+
+class GenerationJobFailed(AssertionError):
+    """Raised by `kick_and_wait_for_job` when the runner finalizes the
+    job as failed. Carries the error text and the full row so a test
+    asserting on a specific failure mode can introspect either."""
+
+    def __init__(self, error: str | None, row: dict):
+        super().__init__(error or "generation job failed without error text")
+        self.error = error or ""
+        self.row = row
+
+
+def kick_and_wait_for_job(
+    client: TestClient,
+    headers: dict[str, str],
+    *,
+    path: str,
+    body: dict,
+    timeout_s: float = 5.0,
+    poll_interval_s: float = 0.02,
+) -> dict:
+    """POST a generation-job kick-off, wait for the runner, return the result.
+
+    The 12C.6 refactor moved /agents/generate and /teams/plan onto an
+    async job queue. Both endpoints now return 202 + {job_id}; the
+    in-process runner picks up the row and writes result_payload (on
+    success) or error (on failure). This helper hides that loop so
+    endpoint tests still look mostly like "call POST, check the result."
+
+    On `success`: returns the `result_payload` dict (what the old
+    synchronous response body used to be, modulo the job-id wrapper).
+    On `failed`: raises `GenerationJobFailed` carrying the error text;
+    tests use `with pytest.raises(GenerationJobFailed) as exc` and
+    assert on `exc.value.error`.
+
+    On non-202 status (4xx pre-enqueue gates: missing input, missing
+    secret, over budget): raises AssertionError so the test knows to
+    call `client.post` directly instead of going through the helper.
+    """
+    import time as _time
+    r = client.post(path, headers=headers, json=body)
+    assert r.status_code == 202, (
+        f"expected 202 from {path}, got {r.status_code}: {r.text}"
+    )
+    job_id = r.json()["job_id"]
+    deadline = _time.monotonic() + timeout_s
+    while True:
+        poll = client.get(
+            f"/workspaces/me/generation-jobs/{job_id}",
+            headers=headers,
+        )
+        assert poll.status_code == 200, poll.text
+        row = poll.json()
+        status = row["status"]
+        if status == "success":
+            return row["result_payload"]
+        if status == "failed":
+            raise GenerationJobFailed(row["error"], row=row)
+        if _time.monotonic() > deadline:
+            raise AssertionError(
+                f"job {job_id} still {status} after {timeout_s}s; row={row}"
+            )
+        _time.sleep(poll_interval_s)
 
 
 @pytest.fixture()

@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 12C.6.8: tests for the async-job machinery**
+> **Phase 12C.6 demo: drop the Lightsei README on prod, watch the team appear without timeouts**
 
-12C.5 (the demo) is deferred until 12C.6 lands. The demo hit a hard blocker on 2026-05-16: `POST /agents/generate` on prod runs an Opus call with `max_retries=5` that can exceed Railway's edge timeout (~100s). The browser surfaces the killed connection as a CORS error (no `Access-Control-Allow-Origin` header on the gateway's error response), so all 4 bots come back "Failed to fetch" and the team can never deploy. Quick fixes (drop retries, serialize client) would mask the race rather than solve it; 12C.6 fixes it properly by moving the long calls off the request path.
+12C.6.1-12C.6.8 are done (see Done Log): job model + migration, in-process runner, both endpoints refactored to 202 + job_id, poll endpoint with cross-workspace 404, dashboard polling behind the existing helper signatures, and 525 backend tests passing including a new test_jobs.py covering the runner state machine + poll endpoint and full coverage of the kick-off-and-poll path through the existing endpoint tests.
 
-12C.6.1-12C.6.7 are done (see Done Log): the `generation_jobs` table + runner, both endpoints return 202 + job_id, the poll endpoint with cross-workspace 404 authz, and the dashboard's `generateAgent`/`fetchTeamPlan` now hide the kick-off-and-poll loop behind the same signatures the rest of the dashboard already calls. NOW is 12C.6.8: tests for the runner state machine + the endpoints' 202 / poll shape. After that, the 12C.6 demo against prod gates re-running 12C.5.
+NOW is the 12C.6 demo: deploy to prod, drop the Lightsei README on `/agents/team-from-readme`, confirm plan returns inside the timeout, confirm bulk generate completes for all bots without CORS errors. Once green, NOW reverts to 12C.5 (the full team-from-README flow demo including deploy + dispatch chain).
 
 ## Phase 12C: drop a README, get a team
 
@@ -614,6 +614,20 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-16 — Phase 12C.6.8: tests for the async-job machinery
+
+Closes Phase 12C.6 except for the prod demo. Two new surfaces tested + every existing test that POSTed the refactored endpoints rewritten to match the 202/poll shape.
+
+- [x] **`backend/tests/test_jobs.py` (new, 12 tests).** Runner state machine: success path (stub handler returns dict → status='success' + result_payload + timestamps + attempt_count=1), failure path (handler raises → status='failed' with exception text captured, attempt_count=1, no double-processing), unknown-kind terminal failure (so unknown rows don't sit in the queue forever), oldest-first ordering, SKIP LOCKED claim semantics (two concurrent claimers never both win the same row). Poll endpoint: row-shape on success, error surfacing on failure, 404 on nonexistent id, 404 across workspaces (don't leak existence), 401 unauthenticated. JSONB round-trip on enqueue.
+- [x] **`kick_and_wait_for_job` helper + `GenerationJobFailed` exception in conftest.py.** POSTs the kick-off endpoint, asserts 202 + job_id, polls the GET endpoint until terminal, returns the result_payload on success or raises GenerationJobFailed carrying the persisted error text. Lets existing endpoint tests stay assertion-shaped close to the old synchronous style: success-path tests get the result dict back, failure-path tests wrap in `pytest.raises(GenerationJobFailed)` and check `exc.value.error` for the substring the old 4xx detail used to carry.
+- [x] **`jobs._IDLE_SLEEP_S = 0.01` in conftest.py.** The runner's default 500ms idle gap would have added ~10s across the suite once every endpoint test went through the kick-off path. Test-only override.
+- [x] **9 tests in test_agent_generator.py rewritten.** Success-path (3 retry-and-succeed + 1 happy path + 2 iteration + 1 cost-accounting) → `kick_and_wait_for_job`; failure-path (2 422s for off-dictionary retry exhaustion + validation retry exhaustion) → `pytest.raises(GenerationJobFailed)`. Pre-enqueue 4xx tests (missing secret, missing description, workspace isolation, unauthenticated) untouched — they still 4xx synchronously.
+- [x] **6 tests in test_team_planner.py rewritten the same way.** Including the Anthropic-529-→-503 translation test: the handler still maps 529 to HTTPException(503), the runner persists "fastapi.exceptions.HTTPException: 503: Anthropic is overloaded..." in `error`, the test asserts the same "overloaded" + "try again" substrings the old 503 carried.
+
+**Verification:** `pytest` full backend suite: 525 passed in 108s. No regressions outside the changed files; the new test_jobs.py adds 12 tests in <4s.
+
+**What's left for Phase 12C:** the 12C.6 demo against prod (drop the Lightsei README, confirm no timeouts). Once that's green, NOW reverts to 12C.5 to run the full team-from-README flow including deploy + dispatch chain — that closes Phase 12C.
 
 ### 2026-05-16 — Phase 12C.6.5-12C.6.7: poll endpoint + dashboard polling
 
