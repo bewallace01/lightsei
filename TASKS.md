@@ -7,11 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 14.7: demo Phase 14 on prod, close it, promote 12D.3**
+> **Phase 16.1: trust-zones design pass + sub-task breakdown (spec, not implementation)**
 
-14.1-14.5 all shipped 2026-05-17. 14.6 folded into the prior sub-tasks (59 new tests cover the surfaces 14.6 was meant to test, no gap left). The whole continuous-eval pipeline is live: cron picks runs hourly → Sonnet rates them → verdicts land in `run_evaluations` → dashboard renders Quality chips on /agents and a recent-bads section on /agents/{name} → SDK ships `lightsei.get_quality_signal` fail-closed so 12D.3's auto-tuner can read the signal safely.
+Phase 14 closed 2026-05-17 — demo passed visibly on prod: /agents Quality (7D) column shows green "3 good" chips on `vela` (90 runs/24h) and `antares` (25 runs/24h), agents with no completed runs in the window correctly show "—". The continuous-eval pipeline is live end-to-end.
 
-NOW is the Phase 14 demo (user-driven). After the next eval cycle completes on prod (~1 hour after the worker picks up the latest deploy): walk through /agents and confirm Quality pills are populated; click into a bot that has a bad and confirm the judge's reasons render; then watch the next `polaris.cost_analysis` event fold quality regressions into its waste callouts. Once the demo passes, Phase 14 closes and **12D.3 (auto-optimization with explicit consent) is unblocked** — that's the next phase after 14.7.
+Strategic direction shifted 2026-05-17 (see MEMORY.md): Lightsei is now positioned as a configure-your-team product for non-technical users (Viktor-but-better with trust zones + per-team isolation as defaults), not a developer observability platform. The wedge against Viktor is **trust zones** — Phase 16. 12D.3 (auto-tune) was the originally-planned next phase but is now engine-room polish, not on the critical path to first customer; deferred behind 16/17/18.
+
+NOW is **specifying Phase 16's sub-tasks.** The phase has a rough 7-item shape (see below) but no per-item deliverables / demos / design-question call-outs. Same shape of work as the Phase 14 spec session earlier today: convert the bullets into 16.1-16.7 sub-task specs each concrete enough to implement against, surface the open design questions (capability-model granularity, runtime enforcement boundary, dispatch-block semantics, redaction defaults vs opt-out, zone-preset count + naming) before code starts. Implementation happens multi-session after the spec is settled.
 
 ## Phase 12C: drop a README, get a team
 
@@ -224,7 +226,7 @@ The original list (sampler determinism, schema strictness, runner state machine 
 
 Sampler: determinism on fixed seed, per-agent coverage, doesn't pick the same run twice within a window. Judge schema: forced tool_choice produces the expected dict; missing fields surface as a judge-level failure rather than a `verdict=good` default. Background job: state-machine tests through the existing `test_jobs.py` harness with a stub judge. Endpoints: authz, rollup math, cross-workspace 404.
 
-### 14.7 — Demo
+### 14.7 — Demo ✅ passed 2026-05-17
 
 - Walk through /agents — quality pills populated on each bot after the first eval cycle.
 - Click into a bot with a bad eval, see the judge's reasons.
@@ -736,6 +738,14 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 14 closed: continuous-eval pipeline running on prod
+
+The 14.7 demo passed visibly on prod. `/agents` Quality (7D) column shows green "3 good" chips on the two bots with completed runs in the last hour (`vela`: 90 runs/24h, `antares`: 25 runs/24h). Agents without samples in the window correctly show the muted "—" pill (the empty-pool state, not a bug). The whole pipeline runs end-to-end without intervention: cron drops `eval_runs` jobs per workspace hourly → existing 12C.6.2 runner claims them → handler samples completed runs → Sonnet rates each → verdicts land in `run_evaluations` → dashboard renders chips → SDK exposes `lightsei.get_quality_signal` for 12D.3's eventual auto-tuner.
+
+Five Phase 14 sub-tasks shipped (14.1-14.5), 14.6 folded, 14.7 demoed. 59 new tests across the phase; full backend suite 577 passed, SDK suite 47 passed, 0 regressions.
+
+**12D.3 (auto-optimization with explicit consent) is now technically unblocked** — Phase 14 was its quality-signal dependency. But under the 2026-05-17 strategic direction shift (MEMORY.md), 12D.3 dropped from "next" to engine-room polish; the critical path is now 16/17/18 (trust zones / self-serve / dashboard polish).
 
 ### 2026-05-17 — Phase 14.5: SDK get_quality_signal helper
 
