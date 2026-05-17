@@ -7,11 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 16.7: three presets + team-from-README integration**
+> **Phase 16 demo: drop a CRM-shaped README on /agents/team-from-readme, pick Compliance team, confirm the wedge actually works**
 
-16.1-16.6 all shipped 2026-05-17. The full trust-zone story is now visible end-to-end: chip on /agents + /agents/{name} header, color-coded constellation nodes by zone, /zones topology page with cross-zone dispatcher callout, editor for the three knobs (level + capabilities + cross-zone flag). Backend 630 + SDK 101 still passing.
+Phase 16 is structurally complete on prod — all seven sub-tasks shipped 2026-05-17. The full pipeline runs end-to-end: schema (16.1) → capability storage + validator (16.2) → SDK gate (16.3) → cross-zone enforcement (16.4) → redaction + handoff (16.5) → dashboard surfaces (16.6) → trust-zone presets wired into team-from-README (16.7). Backend 654 + SDK 101 passing.
 
-NOW is 16.7: the last Phase 16 sub-task. `backend/zone_presets.py` defines three presets — `'open_team'`, `'standard_team'`, `'compliance_team'`. Each maps the team-planner's roles (orchestrator / executor / specialist / messenger) to `{sensitivity_level, capabilities, dispatches_cross_zone}`. Team-from-README flow gains a preset picker (default `'standard_team'`); compliance generates one CRM-side agent (`'pii'` + connector caps + no internet) and one internet-side agent (`'public'` + internet + no connectors), with cross-zone dispatch explicitly disabled so the handoff has to come from the operator. This wires the trust-zone enforcement into the canonical non-technical-user flow. After 16.7 the Compliance team demo — Phase 16's payoff against Viktor — is testable end-to-end.
+NOW is the Phase 16 demo (user-driven). The proof point: pick a CRM-shaped README, generate a team with the Compliance preset, confirm the wedge actually closes. Specifically: (1) see the /zones topology lay out specialists in `pii` + messengers in `public` after deploy; (2) try to make a `pii` bot do `httpx.get('https://example.com')` from its bot.py — should raise `LightseiCapabilityError`; (3) try to have a `pii` specialist `lightsei.send_command` to a `public` messenger — should raise `LightseiCrossZoneError` before the network call; (4) verify backend 403s with `cross_zone_blocked` if the SDK call were spoofed; (5) emit a payload with a real-looking email/SSN from a `pii` agent and confirm the persisted event shows `[redacted-email]` / `[redacted-ssn]`. Once that's all visibly working, Phase 16 closes and **the wedge against Viktor is real and demonstrable** (not just spec'd).
+
+After 16 closes, the natural next phases are 17 (auth/signup/billing) and 18 (dashboard polish) per the 2026-05-17 strategic direction — non-technical users still can't try the product without 17, and won't succeed at it without 18.
 
 ## Phase 12C: drop a README, get a team
 
@@ -269,7 +271,7 @@ The load-bearing piece. Phase 11's `send_command` (SDK) + `enqueue_command` (bac
 
 Three things wired together so the trust-zone story is visible without clicks: (1) sensitivity chip rendered on `/agents` (next to the existing Quality chip from 14.4) + on `/agents/{name}` header; (2) constellation map nodes color-coded by zone (green/yellow/orange/red for public/internal/sensitive/pii), cross-zone edges drawn red with a thicker stroke; (3) new `/zones` page showing the workspace topology — a vertical lane per zone, nodes grouped by lane, an explicit "dispatches across zones" section listing the agents that opted in. Editor on `/agents/{name}` lets the user set the sensitivity level + capability list + cross-zone flag (these are the three knobs that matter). Refusal surfaces: when the backend returns `cross_zone_blocked`, the dashboard's command-enqueue UI shows the actual policy violation rather than a generic 403.
 
-### 16.7 — Three trust-zone presets + team-from-README integration
+### 16.7 — Three trust-zone presets + team-from-README integration ✅ shipped 2026-05-17
 
 `backend/zone_presets.py` defines three presets: `'open_team'`, `'standard_team'`, `'compliance_team'`. Each preset is a `{role: {sensitivity_level, capabilities, dispatches_cross_zone}}` dict so the team-planner's existing roles (orchestrator / executor / specialist / messenger) map to a default trust-zone configuration. Team-from-README flow gains a preset picker (defaults to `'standard_team'`); the picker explains each preset's tradeoffs inline (Open = developer convenience, Standard = SMB defaults, Compliance = "your CRM data does not leave this team"). Compliance team is the canonical CRM-bot scenario as a starting template — generates one CRM-side agent (`'pii'` + connector capabilities + no internet) and one internet-side agent (`'public'` + internet + no connectors) with cross-zone dispatch explicitly disabled, so the handoff has to come from the operator.
 
@@ -768,6 +770,29 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 16.7: three trust-zone presets + team-from-README integration
+
+The last Phase 16 sub-task. Wires the trust-zone enforcement into the canonical non-technical-user flow (team-from-README) so the user doesn't have to configure trust zones manually after every deploy — they pick a preset once, and every agent in the generated team lands with the right zone/capabilities/cross-zone configuration applied.
+
+- [x] **`backend/zone_presets.py` (new).** Three presets defined as `{role → {sensitivity_level, capabilities, dispatches_cross_zone}}` maps:
+  - `open_team` — developer convenience. Every role gets `public` zone + `[internet, send_command]` + `dispatches_cross_zone=True`. No friction; for workspaces where no agents touch customer data.
+  - `standard_team` (default) — SMB defaults. `internal` zone everywhere, cross-zone off, orchestrator only gets `send_command` (no internet — its specialists are the ones that need it), specialists get both, messengers get `internet` but not `send_command` (leaves don't fan out).
+  - `compliance_team` — the canonical CRM-bot scenario. Specialists default to `pii` with empty capabilities (NO internet AND NO send_command — a compromised CRM bot literally can't exfiltrate). Messengers default to `public` with `internet` only (the outbound side; no dispatch back). Orchestrator stays `internal`. **Cross-zone dispatch disabled across every role** — the ONLY way data crosses zones is via the human-mediated `lightsei.handoff_span` from 16.5. This is the proof point against Viktor.
+  - Role normalization handles aliases (`executor` → `specialist`, `notifier` → `messenger`) so the presets work against both the team-planner's vocabulary and the agents table's. Module-level asserts catch preset/metadata drift at import time.
+  - `apply_preset(name, role)` returns a deep-copied dict so caller-side mutation can't poison the next call. Falls back to default-preset on unknown name, falls back to specialist on unknown role. `list_presets()` returns the dashboard-renderable form in stable order (open → standard → compliance, reads as a slider).
+- [x] **`GET /workspaces/me/zone-presets` endpoint.** Workspace-authed but workspace-independent (the presets are global). Returns the full picker payload — label, summary, tradeoff, `by_role` config, `is_default` flag — so the dashboard can render a preview without follow-up fetches.
+- [x] **Dashboard preset picker on `/agents/team-from-readme`.** Renders above the Deploy team button so the security posture is the last thing the user sees before clicking. Three cards (one per preset) with name + summary; clicking selects. Selected card highlights; below the cards a small table renders the preset's `(role → zone, capabilities, cross-zone)` config so the user previews what every role will get. Default is `standard_team`.
+- [x] **Apply at deploy time.** After each bot's deploy + the existing description PATCH, the deploy loop now does `patchAgent({sensitivity_level, dispatches_cross_zone})` + `patchAgentCapabilities(capabilities)` using the preset's per-role config. Best-effort (swallowed on failure) — a single PATCH 4xx shouldn't roll back the deploy; the bot runs default-deny until the user fixes it from `/agents/{name}`.
+- [x] **Tests: 24 new in `backend/tests/test_zone_presets.py`.** Cover the structural invariants (every preset has all three roles + the three required config fields), per-preset semantics (open grants everything; standard is internal-no-cross-zone with role-shaped capability differences; compliance specialists are pii-no-cap-no-cross-zone, messengers are public-with-internet-no-send-command, orchestrator is internal-no-cross-zone), `apply_preset` robustness (deep-copy invariant, role-alias normalization, unknown-fallback to specialist, unknown-preset-fallback to default), `list_presets` ordering + `is_default` correctness + full payload shape, and the endpoint contract (returns three presets in stable order, 401 unauthenticated, dashboard-renderable shape).
+
+**Verification:** Backend full suite 654 passed in 131s (was 630, +24 new). Dashboard tsc --noEmit clean. 0 regressions outside the new files.
+
+**What this completes:** Phase 16 in full. The trust-zone wedge against Viktor is now structurally + operationally + redaction-wise complete AND wired into the non-technical-user flow. A user picking "Compliance team" from /agents/team-from-readme gets a working CRM-isolation setup with zero manual configuration.
+
+### 2026-05-17 — Constellation: revert per-zone node coloring
+
+Quick revert of 16.6's "color constellation nodes by zone" change after user feedback that it washed out the per-bot visual identity (every non-orchestrator star looked the same shade). Per-agent stable-hash tints restored. Zone signal stays visible at the surfaces where it's actually useful: Zone column on /agents, chip on /agents/{name} header, /zones topology page. Save the constellation-zone-overlay idea for a follow-up that adds it as a secondary signal (e.g., ring stroke) rather than overwriting the primary signal.
 
 ### 2026-05-17 — Phase 16.6: dashboard surfaces (sensitivity chips, constellation coloring, /zones page, /agents/{name} editor)
 

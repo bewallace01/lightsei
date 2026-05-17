@@ -1284,6 +1284,26 @@ def get_workspace_cost(
     return workspace_cost_mtd(session, workspace_id)
 
 
+@app.get("/workspaces/me/zone-presets")
+def get_zone_presets(
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 16.7: list the three trust-zone presets the team-from-README
+    picker offers.
+
+    Workspace-authed but workspace-independent — the presets are
+    global. The auth check is here so an unauth caller can't enumerate
+    the workspace's UI surfaces, but the response body doesn't depend
+    on which workspace is asking.
+
+    Each entry carries the dashboard-renderable metadata (label,
+    summary, tradeoff) + the full `by_role` map so the picker can
+    show a preview of what each role gets without a follow-up fetch.
+    """
+    import zone_presets as _zp
+    return {"presets": _zp.list_presets()}
+
+
 @app.get("/workspaces/me/cost/insights")
 def get_cost_insights(
     session: Session = Depends(get_session),

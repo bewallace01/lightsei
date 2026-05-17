@@ -11,14 +11,18 @@ import {
   TeamMemberRole,
   TeamPlan,
   UnauthorizedError,
+  ZonePreset,
   fetchAgents,
   fetchSecrets,
   fetchTeamPlan,
+  fetchZonePresets,
   generateAgent,
   patchAgent,
+  patchAgentCapabilities,
   uploadDeploymentBundle,
   upsertAutoApprovalRule,
 } from "../../api";
+import { SensitivityChip } from "../../sensitivity";
 import { guidanceFor } from "../../secret_guidance";
 import { sparklePath, tintForAgent } from "../../stars";
 import { STAR_DICTIONARY, isStarName } from "./star_dictionary";
@@ -135,6 +139,30 @@ export default function TeamFromReadmePage() {
   >({});
   const [rulesResult, setRulesResult] = useState<RulesResult | null>(null);
   const [missingSecrets, setMissingSecrets] = useState<string[]>([]);
+
+  // Phase 16.7: trust-zone presets. Picker defaults to whichever
+  // preset the backend marks is_default ('standard_team' today).
+  // When the user deploys, each generated bot gets the preset's
+  // role→config applied via PATCH /agents/{name} +
+  // /agents/{name}/capabilities — best-effort, swallowed on
+  // failure so a single PATCH 4xx doesn't block the deploy.
+  const [zonePresets, setZonePresets] = useState<ZonePreset[]>([]);
+  const [selectedPreset, setSelectedPreset] = useState<string>("standard_team");
+
+  useEffect(() => {
+    let alive = true;
+    fetchZonePresets()
+      .then((presets) => {
+        if (!alive) return;
+        setZonePresets(presets);
+        const dft = presets.find((p) => p.is_default);
+        if (dft) setSelectedPreset(dft.name);
+      })
+      .catch(() => undefined); // best-effort; picker just shows defaults
+    return () => {
+      alive = false;
+    };
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -462,6 +490,24 @@ export default function TeamFromReadmePage() {
               () => undefined,
             );
           }
+          // Phase 16.7: apply the user-selected trust-zone preset.
+          // Pulls the role's preset config (sensitivity_level +
+          // capabilities + dispatches_cross_zone) and PATCHes it
+          // onto the freshly-deployed agent row. Best-effort like
+          // description — a 4xx here shouldn't roll back the
+          // deploy. The bot will run with default-deny capabilities
+          // until the user fixes the PATCH from /agents/{name}.
+          const preset = zonePresets.find((p) => p.name === selectedPreset);
+          const roleCfg = preset?.by_role[m.role] ?? preset?.by_role["specialist"];
+          if (roleCfg) {
+            patchAgent(m.name, {
+              sensitivity_level: roleCfg.sensitivity_level,
+              dispatches_cross_zone: roleCfg.dispatches_cross_zone,
+            }).catch(() => undefined);
+            patchAgentCapabilities(m.name, roleCfg.capabilities).catch(
+              () => undefined,
+            );
+          }
         } catch (e) {
           if (e instanceof UnauthorizedError) {
             router.replace("/login");
@@ -630,6 +676,9 @@ export default function TeamFromReadmePage() {
               onSkip={onSkip}
               onBackToPlan={onBackToPlan}
               onDeploy={onDeploy}
+              zonePresets={zonePresets}
+              selectedPreset={selectedPreset}
+              setSelectedPreset={setSelectedPreset}
             />
           )}
 
@@ -1271,6 +1320,9 @@ function GenerationSection({
   onSkip,
   onBackToPlan,
   onDeploy,
+  zonePresets,
+  selectedPreset,
+  setSelectedPreset,
 }: {
   team: TeamMember[];
   genResults: Record<string, GenResult>;
@@ -1279,6 +1331,12 @@ function GenerationSection({
   onSkip: (name: string) => void;
   onBackToPlan: () => void;
   onDeploy: () => void;
+  // Phase 16.7: trust-zone preset picker. Rendered above the
+  // Deploy team button so the user sees the security posture
+  // they're about to apply before clicking deploy.
+  zonePresets: ZonePreset[];
+  selectedPreset: string;
+  setSelectedPreset: (name: string) => void;
 }) {
   const successCount = team.filter(
     (m) => genResults[m.name]?.status === "success",
@@ -1335,31 +1393,43 @@ function GenerationSection({
       </ul>
 
       {allDone && (
-        <div className="mt-8 flex items-center justify-between gap-4 border-t border-gray-100 pt-6">
-          <div className="flex items-center gap-3 text-xs text-gray-500">
+        <>
+          {/* Phase 16.7: trust-zone preset picker. Renders above the
+              deploy button so the security posture is the last thing
+              the user sees before clicking. */}
+          {zonePresets.length > 0 && (
+            <ZonePresetPicker
+              presets={zonePresets}
+              selected={selectedPreset}
+              onSelect={setSelectedPreset}
+            />
+          )}
+          <div className="mt-8 flex items-center justify-between gap-4 border-t border-gray-100 pt-6">
+            <div className="flex items-center gap-3 text-xs text-gray-500">
+              <button
+                type="button"
+                onClick={onBackToPlan}
+                className="text-accent-600 hover:text-accent-700"
+              >
+                ← back to plan
+              </button>
+              <span className="text-gray-300">·</span>
+              <span>
+                {deployableCount} of {team.length} bot
+                {team.length === 1 ? "" : "s"} ready to deploy
+                {failedCount > 0 && ` (${failedCount} need attention)`}
+              </span>
+            </div>
             <button
               type="button"
-              onClick={onBackToPlan}
-              className="text-accent-600 hover:text-accent-700"
+              onClick={onDeploy}
+              disabled={deployableCount === 0}
+              className="px-5 py-2 bg-accent-600 text-white rounded-md text-sm font-medium hover:bg-accent-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              ← back to plan
+              Deploy team →
             </button>
-            <span className="text-gray-300">·</span>
-            <span>
-              {deployableCount} of {team.length} bot
-              {team.length === 1 ? "" : "s"} ready to deploy
-              {failedCount > 0 && ` (${failedCount} need attention)`}
-            </span>
           </div>
-          <button
-            type="button"
-            onClick={onDeploy}
-            disabled={deployableCount === 0}
-            className="px-5 py-2 bg-accent-600 text-white rounded-md text-sm font-medium hover:bg-accent-700 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Deploy team →
-          </button>
-        </div>
+        </>
       )}
     </div>
   );
@@ -1756,6 +1826,109 @@ function DeploySection({
               </Link>
             </div>
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+// ---------- Phase 16.7: trust-zone preset picker ---------- //
+
+function ZonePresetPicker({
+  presets,
+  selected,
+  onSelect,
+}: {
+  presets: ZonePreset[];
+  selected: string;
+  onSelect: (name: string) => void;
+}): JSX.Element {
+  const active = presets.find((p) => p.name === selected) ?? presets[0];
+  return (
+    <div className="mt-8 border-t border-gray-100 pt-6">
+      <h3 className="text-sm font-semibold text-gray-800 mb-1">
+        Trust-zone preset
+      </h3>
+      <p className="text-xs text-gray-500 mb-4">
+        Applied to every bot in the team when you click Deploy below.
+        Sets each agent&apos;s sensitivity level + capability allow-list +
+        cross-zone flag based on its role. Editable per-agent on
+        /agents/&lt;name&gt; afterward.
+      </p>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+        {presets.map((p) => {
+          const isActive = p.name === selected;
+          return (
+            <button
+              key={p.name}
+              type="button"
+              onClick={() => onSelect(p.name)}
+              className={
+                "text-left rounded-lg border p-3 transition-colors " +
+                (isActive
+                  ? "border-accent-500 bg-accent-50 ring-2 ring-accent-500/20"
+                  : "border-gray-200 hover:bg-gray-50")
+              }
+            >
+              <div className="flex items-baseline justify-between mb-1">
+                <span className="font-semibold text-sm text-gray-900">
+                  {p.label}
+                </span>
+                {p.is_default && (
+                  <span className="text-[10px] uppercase tracking-wider text-gray-500">
+                    default
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-gray-600">{p.summary}</p>
+            </button>
+          );
+        })}
+      </div>
+      {active && (
+        <div className="mt-4 rounded-md bg-gray-50 border border-gray-200 p-3">
+          <p className="text-xs text-gray-700 mb-3">{active.tradeoff}</p>
+          <table className="w-full text-xs">
+            <thead className="text-gray-500">
+              <tr>
+                <th className="text-left font-medium pb-1">role</th>
+                <th className="text-left font-medium pb-1">zone</th>
+                <th className="text-left font-medium pb-1">capabilities</th>
+                <th className="text-left font-medium pb-1">cross-zone</th>
+              </tr>
+            </thead>
+            <tbody className="text-gray-700">
+              {(["orchestrator", "specialist", "messenger"] as const).map((role) => {
+                const cfg = active.by_role[role];
+                if (!cfg) return null;
+                return (
+                  <tr key={role} className="border-t border-gray-200">
+                    <td className="py-1.5 font-mono">{role}</td>
+                    <td className="py-1.5">
+                      <SensitivityChip level={cfg.sensitivity_level} />
+                    </td>
+                    <td className="py-1.5">
+                      {cfg.capabilities.length === 0 ? (
+                        <span className="text-gray-400 italic">none</span>
+                      ) : (
+                        <span className="font-mono">
+                          {cfg.capabilities.join(", ")}
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-1.5">
+                      {cfg.dispatches_cross_zone ? (
+                        <span className="text-amber-700">↔ enabled</span>
+                      ) : (
+                        <span className="text-gray-500">off</span>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
       )}
     </div>

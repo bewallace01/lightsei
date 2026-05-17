@@ -644,6 +644,31 @@ export async function patchAgentCapabilities(
 }
 
 
+// Phase 16.7: trust-zone presets the team-from-README picker offers.
+
+export type ZonePresetRoleConfig = {
+  sensitivity_level: SensitivityLevel;
+  capabilities: string[];
+  dispatches_cross_zone: boolean;
+};
+
+export type ZonePreset = {
+  name: string;
+  label: string;
+  summary: string;
+  tradeoff: string;
+  by_role: Record<string, ZonePresetRoleConfig>;
+  is_default: boolean;
+};
+
+export async function fetchZonePresets(): Promise<ZonePreset[]> {
+  const body = (await authedJson(
+    "/workspaces/me/zone-presets",
+  )) as { presets: ZonePreset[] };
+  return body.presets;
+}
+
+
 export async function fetchAgentManifest(agentName: string): Promise<AgentManifest> {
   return (await authedJson(
     `/agents/${encodeURIComponent(agentName)}/manifest`,
