@@ -43,6 +43,26 @@ def is_valid_sensitivity_level(level: object) -> bool:
     return isinstance(level, str) and level in _VALID_SENSITIVITY_LEVELS
 
 
+# Phase 17.1: plan tiers + auth providers. Same dict-and-helper pattern
+# as the sensitivity ladder so the API + UI layers can validate inputs
+# against a single source of truth.
+_VALID_PLAN_TIERS: frozenset[str] = frozenset({"free", "paid"})
+DEFAULT_PLAN_TIER = "free"
+
+_VALID_AUTH_PROVIDERS: frozenset[str] = frozenset(
+    {"apikey", "magic_link", "google_oauth"}
+)
+DEFAULT_AUTH_PROVIDER = "apikey"
+
+
+def is_valid_plan_tier(tier: object) -> bool:
+    return isinstance(tier, str) and tier in _VALID_PLAN_TIERS
+
+
+def is_valid_auth_provider(provider: object) -> bool:
+    return isinstance(provider, str) and provider in _VALID_AUTH_PROVIDERS
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -60,6 +80,30 @@ class Workspace(Base):
     # UX path as Phase 2's per-agent daily cap.
     budget_usd_monthly: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(10, 2), nullable=True
+    )
+    # Phase 17.1: Stripe customer-on-workspace-create. Null on workspaces
+    # that predate billing or were created via the developer / API-key
+    # signup path (those skip Stripe until they upgrade).
+    stripe_customer_id: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True, unique=True
+    )
+    # Set when the workspace has an active paid subscription. Cleared by
+    # the Stripe webhook on cancel / payment_failed lifecycle events.
+    stripe_subscription_id: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True
+    )
+    # 'free' (using credits) | 'paid' (active subscription). Single source
+    # of truth for "should this workspace be allowed to spend right now."
+    # See `_VALID_PLAN_TIERS` below + the paywall middleware in 17.5.
+    plan_tier: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="free"
+    )
+    # $5 of signup credits decrement on every Run row creation; both
+    # lightsei.system (generation + judge) and bot-run cost come out of
+    # the same pool. Paywall fires when this hits 0 and plan_tier='free'.
+    free_credits_remaining_usd: Mapped[Decimal] = mapped_column(
+        Numeric(12, 6), nullable=False, server_default="5.00",
+        default=Decimal("5.00"),
     )
 
 
@@ -163,9 +207,68 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
+    # Phase 17.1: magic-link / OAuth verification status. False for users
+    # created via the existing API-key signup path; True after the user
+    # completes a magic-link round-trip OR signs in via Google OAuth with
+    # a verified email.
+    email_verified: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false"), default=False,
+    )
+    # Which signup path created this row. 'apikey' (existing flow),
+    # 'magic_link' (Phase 17.2), or 'google_oauth' (Phase 17.3).
+    auth_provider: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default=DEFAULT_AUTH_PROVIDER,
+        default=DEFAULT_AUTH_PROVIDER,
+    )
+    # Google's stable `sub` claim. Lets a returning OAuth user be matched
+    # to the same User row even if they change their primary email at
+    # Google. Unique-when-not-null; pre-OAuth users have NULL.
+    google_user_id: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True,
+    )
 
     __table_args__ = (
         Index("idx_users_workspace", "workspace_id"),
+    )
+
+
+class EmailSigninToken(Base):
+    """Phase 17.1: single-use, 15-minute TTL token for the magic-link
+    sign-in flow (Phase 17.2 consumes it).
+
+    Stored as `token_hash` (sha256 hex of the plaintext) — same pattern
+    as `api_keys.hash`. The plaintext goes in the magic-link URL; the
+    server only ever sees the hash on consume. Database leak doesn't
+    hand attackers active sign-in tokens.
+
+    `consumed_at` makes the row a record rather than deleting it on
+    consume — keeps an audit trail of "this token was used at T" for
+    future security review.
+    """
+
+    __tablename__ = "email_signin_tokens"
+
+    token_hash: Mapped[str] = mapped_column(String(128), primary_key=True)
+    email: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    consumed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        # Rate-limit query in 17.2 hits (email, created_at DESC) —
+        # "how many tokens have we issued for this email in the last
+        # hour?" Index leftmost on email so the same scan answers
+        # "any active token for this email" probes too.
+        Index(
+            "ix_email_signin_tokens_email_created",
+            "email", created_at.desc(),
+        ),
     )
 
 

@@ -7,13 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 17.1: schema backbone for auth + billing (single alembic migration)**
+> **Phase 17.2: magic-link auth backend (Resend integration + request/consume endpoints + new-user-creates-workspace path)**
 
-Phase 16 is structurally complete on prod (all seven sub-tasks shipped 2026-05-17, 654 backend tests + 101 SDK tests passing). The Phase 16 demo on prod is still user-driven and pending — moved to "open demos" in the Done Log below since the structural work is finished and the demo is a Bailey-side validation. Picking up on Phase 17 in parallel since they're independent and 17 is the gate to actually putting Lightsei in front of a real customer.
+17.1 shipped 2026-05-17 — alembic 0030 lands `email_verified` + `auth_provider` + `google_user_id` on `users`; `stripe_customer_id` + `stripe_subscription_id` + `plan_tier` + `free_credits_remaining_usd` on `workspaces`; new `email_signin_tokens` table. Backfilled every existing workspace to `plan_tier='free'` + `free_credits_remaining_usd=5.00`. 18 new tests cover the validator helpers, default behavior, partial-unique constraints, and the token table round-trip. Full backend suite at 672 passing.
 
-Phase 17 spec session just landed (see below) with all five design choices locked: both magic link + Google OAuth, Resend for email, $50/mo per workspace with $5 free credits at signup, hard 402 paywall when credits exhausted, one-workspace = one-seat for v1. 17.1-17.9 sub-tasks specced.
-
-NOW is 17.1: schema backbone. Single alembic migration (0030) adds `email_verified` + `auth_provider` + `google_user_id` to `users`; `stripe_customer_id` + `stripe_subscription_id` + `plan_tier` + `free_credits_remaining_usd` to `workspaces`; new `email_signin_tokens` table for magic-link single-use tokens. Backfills existing workspaces to `plan_tier='free'` + `free_credits_remaining_usd=5.00` (everyone gets the free credit on migration). Same shape as Phase 16.1 and 14.1 schema-backbone sub-tasks — pure storage, no endpoints, just makes the columns exist so 17.2-17.5 can wire against them.
+NOW is 17.2: magic-link auth backend. Three pieces: (a) new `backend/email.py` pure module wrapping Resend's API for transactional sends (configurable via `LIGHTSEI_RESEND_API_KEY` env var, with a fake-send mode for tests that just captures the email); (b) `POST /auth/magic-link/request {email}` — generates a single-use token, hashes it, inserts an `email_signin_tokens` row with 15-minute TTL, sends a Resend email with the unhashed token in a magic URL. Rate-limited via the existing `limits` machinery (~5/hour per email). Always 200 (don't leak existence on unknown emails); (c) `POST /auth/magic-link/consume {token}` — looks up by hashed token, checks not-consumed + not-expired, marks consumed, either signs in the matching user OR creates a fresh user+workspace pair (`auth_provider='magic_link'`, `email_verified=true`, `free_credits_remaining_usd=5.00`). Returns a session token.
 
 ## Phase 12C: drop a README, get a team
 
@@ -295,7 +293,7 @@ Operationalizes "non-technical users need to self-serve" from the 2026-05-17 str
 - **Paywall trigger: hard 402 on the next LLM call when free credits exhausted AND no active subscription.** Reuses the existing budget gate pattern from agent_generator + eval_runner. Read-only dashboard / signup / billing surfaces keep working so the user can see what they had + add a card. Switch trigger: customer feedback says the hard cutoff feels broken vs out-of-credits → consider a soft warning + 24h grace period.
 - **One workspace = one seat in v1.** Multi-user-per-workspace is parked in the Parking Lot. Per-seat billing makes sense once that lands; for now, "seat" and "workspace" are the same thing.
 
-### 17.1 — Schema backbone for auth + billing
+### 17.1 — Schema backbone for auth + billing ✅ shipped 2026-05-17
 
 Single alembic migration (0030) adding:
 
@@ -870,6 +868,19 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 17.1: schema backbone for auth + billing
+
+The columns + table 17.2-17.5 wire against. Single alembic migration, pure storage, no endpoints — same shape as Phase 16.1 and 14.1.
+
+- [x] **alembic 0030** adds: `users.email_verified` (Boolean default false), `users.auth_provider` (String(16) default 'apikey'), `users.google_user_id` (String, nullable, partial-unique on NOT NULL); `workspaces.stripe_customer_id` (String, nullable, partial-unique on NOT NULL), `workspaces.stripe_subscription_id` (String, nullable), `workspaces.plan_tier` (String(16) default 'free'), `workspaces.free_credits_remaining_usd` (Numeric(12,6) default 5.00); new `email_signin_tokens` table (token_hash PK, email, created_at, expires_at, consumed_at) with `(email, created_at DESC)` index for the rate-limit query in 17.2.
+- [x] **Backfill** every existing workspace to `plan_tier='free'` + `free_credits_remaining_usd=5.00` so they land in the same state a fresh signup would. Existing users keep `auth_provider='apikey'` + `email_verified=false` (they came in via the existing /auth/signup path; nothing to migrate semantically).
+- [x] **Partial-unique indexes** on `users.google_user_id` and `workspaces.stripe_customer_id` so apikey users / pre-billing workspaces (which carry NULL) don't collide while still preventing duplicates among the rows that DO carry a value.
+- [x] **`backend/models.py`**: `Workspace` + `User` carry the new columns with `server_default` matching the migration. New `EmailSigninToken` model. New `_VALID_PLAN_TIERS` + `_VALID_AUTH_PROVIDERS` frozensets at the module top with `is_valid_plan_tier` / `is_valid_auth_provider` helpers — same pattern as `_VALID_SENSITIVITY_LEVELS` from 16.1. Adding `Boolean` to the sqlalchemy imports was the only other change beyond the new fields.
+
+**Verification:** 18 new tests in `backend/tests/test_auth_billing_schema.py` covering the validator helpers (accepts canonical values, rejects off-list + non-string, default-in-set invariant, frozenset invariant), Workspace defaults (fresh workspace lands on `'free'` + 5.00 credits, paid update round-trips, partial-unique on stripe_customer_id, decimal precision on credits decrement), User defaults (`auth_provider='apikey'` + `email_verified=false` + `google_user_id=null` on existing signup path; verified update round-trips; partial-unique on google_user_id), and the EmailSigninToken table (round-trip with consume marker, PK prevents duplicate inserts, rate-limit query runs cleanly). Full backend suite 672 passed in 139s — was 654; +18 new; 0 regressions outside the new file.
+
+**What this unblocks:** 17.2 (magic-link backend reads + writes the email_signin_tokens table, creates user + workspace pairs with the new columns), 17.3 (Google OAuth uses `google_user_id` for matching returning users + `auth_provider='google_oauth'` on creation), 17.4 (Stripe writes stripe_customer_id + stripe_subscription_id + plan_tier on subscription lifecycle events), 17.5 (paywall middleware reads plan_tier + free_credits_remaining_usd). Every other 17.x sub-task assumed this existed; now it does.
 
 ### 2026-05-17 — Phase 17 spec: auth, signup, billing — design choices locked, 17.1-17.9 sub-tasks
 
