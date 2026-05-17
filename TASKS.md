@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 12C.6.5: poll endpoint for generation_jobs**
+> **Phase 12C.6.8: tests for the async-job machinery**
 
 12C.5 (the demo) is deferred until 12C.6 lands. The demo hit a hard blocker on 2026-05-16: `POST /agents/generate` on prod runs an Opus call with `max_retries=5` that can exceed Railway's edge timeout (~100s). The browser surfaces the killed connection as a CORS error (no `Access-Control-Allow-Origin` header on the gateway's error response), so all 4 bots come back "Failed to fetch" and the team can never deploy. Quick fixes (drop retries, serialize client) would mask the race rather than solve it; 12C.6 fixes it properly by moving the long calls off the request path.
 
-12C.6.1-12C.6.4 are done (see Done Log): the `generation_jobs` table, the in-process runner, and both `/agents/generate` and `/teams/plan` now return 202 + job_id and run their Anthropic call off the request path. NOW is 12C.6.5: `GET /workspaces/me/generation-jobs/{id}` so the dashboard has a poll target. After that, 12C.6.6 / .7 wire the dashboard to poll, then 12C.6.8 covers tests, then the 12C.6 demo gates re-running 12C.5.
+12C.6.1-12C.6.7 are done (see Done Log): the `generation_jobs` table + runner, both endpoints return 202 + job_id, the poll endpoint with cross-workspace 404 authz, and the dashboard's `generateAgent`/`fetchTeamPlan` now hide the kick-off-and-poll loop behind the same signatures the rest of the dashboard already calls. NOW is 12C.6.8: tests for the runner state machine + the endpoints' 202 / poll shape. After that, the 12C.6 demo against prod gates re-running 12C.5.
 
 ## Phase 12C: drop a README, get a team
 
@@ -614,6 +614,18 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-16 — Phase 12C.6.5-12C.6.7: poll endpoint + dashboard polling
+
+Closes the loop opened by 12C.6.1-12C.6.4. The backend endpoints already return 202 + job_id; this slice adds the GET that the dashboard polls and refactors the two long-running `api.ts` helpers (`generateAgent` and `fetchTeamPlan`) to kick off + poll behind their existing signatures. Callers (team-from-readme/page.tsx, the standalone /agents/generate page) keep working unchanged.
+
+- [x] **12C.6.5 — `GET /workspaces/me/generation-jobs/{job_id}`.** Returns the row (id, kind, status, result_payload, error, attempt_count, created_at, started_at, finished_at). 404 covers both "no such row" and "row belongs to a different workspace" so we don't leak existence across workspaces. Uses the SQLAlchemy model + dependency-injected workspace_id, no raw SQL.
+- [x] **12C.6.6 — `generateAgent()` polls.** POST returns `{job_id, status: 'pending'}`; helper polls `GET /workspaces/me/generation-jobs/{id}` with 1s → 2s → 4s → 5s cap backoff and a 5-minute total cap. Resolves with the typed `result_payload` on `success`; throws the backend's `error` text verbatim on `failed`. 250ms warmup pause so a fast handler doesn't pay a full second before the first poll.
+- [x] **12C.6.7 — `fetchTeamPlan()` polls.** Same pattern, same helper (`pollGenerationJob`). team-from-readme/page.tsx's existing "thinking..." state keeps working since the signature didn't change.
+
+**Verification:** Backend rebuilt, dashboard `tsc --noEmit` clean. POST /teams/plan returned 202 + job_id; immediate GET returned `pending` with `started_at=null, attempt_count=0`; 3s later GET returned `failed` with `started_at` + `finished_at` populated, `attempt_count=1`, and the full Anthropic 401 error captured on `error`. Nonexistent job id returned 404. Inserted a phase10c-workspace-owned row and read via default-ws's demo-key → 404 (cross-workspace authz). Cleanup deleted both the test rows + the seeded fake ANTHROPIC_API_KEY.
+
+**What's left for 12C.6:** 12C.6.8 (tests for runner state machine + endpoint shapes against the stubbed-Anthropic harness). 12C.6 demo against prod still gates re-running 12C.5.
 
 ### 2026-05-16 — Phase 12C.6.1-12C.6.4: async generation_jobs queue + endpoint refactors
 

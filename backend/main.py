@@ -50,6 +50,7 @@ from models import (
     DeploymentLog,
     Event,
     EventValidation,
+    GenerationJob,
     GitHubAgentPath,
     GitHubIntegration,
     NotificationChannel,
@@ -4363,6 +4364,37 @@ def plan_team(
         request_payload=payload,
     )
     return {"job_id": job_id, "status": "pending"}
+
+
+# ---------- Phase 12C.6.5: poll endpoint for generation_jobs ---------- #
+
+
+@app.get("/workspaces/me/generation-jobs/{job_id}")
+def get_generation_job(
+    job_id: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Return the current state of a generation job.
+
+    Dashboard polls this until `status` is terminal (`success` or
+    `failed`). 404 covers both "no such row" and "row belongs to a
+    different workspace" — we don't leak existence across workspaces.
+    """
+    row = session.get(GenerationJob, job_id)
+    if row is None or row.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {
+        "id": row.id,
+        "kind": row.kind,
+        "status": row.status,
+        "result_payload": row.result_payload,
+        "error": row.error,
+        "attempt_count": row.attempt_count,
+        "created_at": row.created_at.isoformat() if row.created_at else None,
+        "started_at": row.started_at.isoformat() if row.started_at else None,
+        "finished_at": row.finished_at.isoformat() if row.finished_at else None,
+    }
 
 
 def _parse_github_repo(s: str) -> tuple[str, str]:

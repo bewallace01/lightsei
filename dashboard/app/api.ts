@@ -632,11 +632,57 @@ export type AgentGenerateOutput = {
 export async function generateAgent(
   input: AgentGenerateInput,
 ): Promise<AgentGenerateOutput> {
-  return (await authedJson("/workspaces/me/agents/generate", {
+  // Phase 12C.6: the endpoint moved off the request path. POST returns
+  // 202 + {job_id}; the result lands on `result_payload` of the job row
+  // once the in-process runner finishes the Anthropic call. Callers'
+  // signature is unchanged; the polling is hidden here.
+  const kicked = (await authedJson("/workspaces/me/agents/generate", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
-  })) as AgentGenerateOutput;
+  })) as { job_id: string; status: string };
+  return (await pollGenerationJob(
+    kicked.job_id,
+  )) as AgentGenerateOutput;
+}
+
+// Shared poll loop for /workspaces/me/generation-jobs/{id}. Resolves
+// with the job's `result_payload` (typed by the caller) on
+// `status='success'`, throws the captured `error` text on
+// `status='failed'`. Backoff 1s → 2s → 4s → 5s cap; total wall-clock
+// cap ~5 min so the UI doesn't hang forever if the runner wedges.
+//
+// Why polling and not SSE / websockets: one Railway service, no
+// long-lived connections in front of us, and the result rows are small
+// enough that O(1 poll per 5s) is fine. Revisit if we ever burn the
+// API gateway with poll volume.
+async function pollGenerationJob(jobId: string): Promise<unknown> {
+  const start = Date.now();
+  const capMs = 5 * 60_000;
+  let delayMs = 1_000;
+  // Initial micro-wait so a fast handler doesn't take a full second to
+  // surface; the runner's idle sleep is 500ms.
+  await new Promise((r) => setTimeout(r, 250));
+  while (true) {
+    const row = (await authedJson(
+      `/workspaces/me/generation-jobs/${encodeURIComponent(jobId)}`,
+    )) as {
+      status: "pending" | "running" | "success" | "failed";
+      result_payload: unknown;
+      error: string | null;
+    };
+    if (row.status === "success") return row.result_payload;
+    if (row.status === "failed") {
+      throw new Error(row.error || "generation job failed");
+    }
+    if (Date.now() - start > capMs) {
+      throw new Error(
+        `generation job ${jobId} still ${row.status} after ${Math.round(capMs / 1000)}s; gave up polling`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, delayMs));
+    delayMs = Math.min(delayMs * 2, 5_000);
+  }
 }
 
 // Browser-native deploy. Same multipart shape the CLI uses: agent_name
@@ -1189,11 +1235,15 @@ export type TeamPlanInput = {
 };
 
 export async function fetchTeamPlan(input: TeamPlanInput): Promise<TeamPlan> {
-  return (await authedJson("/workspaces/me/teams/plan", {
+  // Phase 12C.6: same async-job pattern as generateAgent. POST → 202 +
+  // {job_id}, then poll until terminal. Signature unchanged so
+  // team-from-readme/page.tsx's "thinking..." state keeps working.
+  const kicked = (await authedJson("/workspaces/me/teams/plan", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
-  })) as TeamPlan;
+  })) as { job_id: string; status: string };
+  return (await pollGenerationJob(kicked.job_id)) as TeamPlan;
 }
 
 // ---------- Constellation map (Phase 11B.3) ---------- //
