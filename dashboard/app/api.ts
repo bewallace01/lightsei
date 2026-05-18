@@ -26,6 +26,14 @@ export type SessionUser = {
 export type SessionWorkspace = {
   id: string;
   name: string;
+  // Phase 17.7: billing fields surfaced by the backend's
+  // _serialize_workspace. Optional so older cached values in
+  // localStorage still parse cleanly.
+  plan_tier?: "free" | "paid";
+  free_credits_remaining_usd?: number;
+  has_stripe_customer?: boolean;
+  budget_usd_monthly?: number | null;
+  created_at?: string;
 };
 
 export function getSessionToken(): string | null {
@@ -225,6 +233,69 @@ export async function login(
   if (!r.ok) {
     const body = await r.json().catch(() => ({}));
     throw new Error(body.detail || `login failed (${r.status})`);
+  }
+  return await r.json();
+}
+
+// ---------- Phase 17.7: Stripe billing helpers ---------- //
+
+export class BillingNotConfiguredError extends Error {
+  constructor(message = "billing is not configured on this backend") {
+    super(message);
+    this.name = "BillingNotConfiguredError";
+  }
+}
+
+export async function createBillingCheckout(): Promise<{
+  checkout_url: string;
+  session_id: string;
+}> {
+  const r = await fetch(`${API_URL}/workspaces/me/billing/checkout`, {
+    method: "POST",
+    cache: "no-store",
+    headers: { ...authHeaders(), "content-type": "application/json" },
+  });
+  if (r.status === 503) {
+    throw new BillingNotConfiguredError();
+  }
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    const detail = (body as { detail?: unknown })?.detail;
+    if (detail && typeof detail === "object" && "message" in detail) {
+      throw new Error(String((detail as { message: string }).message));
+    }
+    throw new Error(
+      typeof detail === "string"
+        ? detail
+        : `billing checkout failed (${r.status})`,
+    );
+  }
+  return await r.json();
+}
+
+export async function createBillingPortal(): Promise<{
+  portal_url: string;
+  session_id: string;
+}> {
+  const r = await fetch(`${API_URL}/workspaces/me/billing/portal`, {
+    method: "POST",
+    cache: "no-store",
+    headers: { ...authHeaders(), "content-type": "application/json" },
+  });
+  if (r.status === 503) {
+    throw new BillingNotConfiguredError();
+  }
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    const detail = (body as { detail?: unknown })?.detail;
+    if (detail && typeof detail === "object" && "message" in detail) {
+      throw new Error(String((detail as { message: string }).message));
+    }
+    throw new Error(
+      typeof detail === "string"
+        ? detail
+        : `billing portal failed (${r.status})`,
+    );
   }
   return await r.json();
 }

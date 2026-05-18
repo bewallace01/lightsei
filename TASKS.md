@@ -7,13 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 17.7: dashboard billing UI on /account**
+> **Phase 17.8 (tests) + 17.9 (end-to-end demo). The non-technical-user signup arc is now code-complete.**
 
-17.4 backend code shipped 2026-05-17 with STRIPE_SETUP.md walkthrough — all three endpoints (`/checkout`, `/portal`, webhook) wired + 20 tests passing. The endpoints stay 503 until Stripe console config is done (product, webhook endpoint, signing secret); see STRIPE_SETUP.md for the dashboard-side work, which is the only thing standing between us and a live upgrade flow.
+17.4-17.7 shipped 2026-05-17. Backend at 747 tests. The user-facing demo arc (sign up via magic link or Google → get $5 of free credits → run team-from-readme → hit paywall → upgrade via Stripe → return to dashboard on paid plan) is code-complete pending Stripe console config from STRIPE_SETUP.md.
 
-17.5 + 17.6 shipped 2026-05-17 — magic-link + Google sign-in UI is live; the paywall fires when free credits run out. With 17.4 code in place, the whole non-technical-user demo arc is code-complete pending Stripe console config + 17.7's billing UI on `/account`.
-
-NOW is 17.7 — the small UI sub-task that surfaces credits-remaining + an upgrade button + a manage-subscription button on `/account`. With 17.4's endpoints already responding, 17.7 is a pure-frontend task: type a few API helpers, render the panel, handle the polling-on-redirect-back-to-account race.
+NOW: 17.8 sub-tasks have largely been folded into the prior subtasks (each shipped with its own tests; backend total now at 747). 17.9 is the end-to-end demo run with Stripe console configured — Bailey runs it once Stripe-side setup is done. Nothing more to ship in 17 until the Stripe console is wired.
 
 ## Phase 12C: drop a README, get a team
 
@@ -359,16 +357,15 @@ Replaced the password-only `/login` and `/signup` pages with magic-link-first fl
 - `/login/advanced` + `/signup/advanced` — the old password-based forms, preserved verbatim, with "back to magic-link" link and explanatory copy pointing developers at the SDK init flow.
 - `api.ts` — added `requestMagicLink`, `consumeMagicLink`, `startGoogleOAuth`, `completeGoogleOAuth`, and shared `AuthSuccess` type.
 
-### 17.7 — Dashboard billing UI
+### 17.7 — Dashboard billing UI ✅ shipped 2026-05-17
 
-New section on `/account`:
+New Billing section on `/account` (renders above Workspace):
 
-- "Plan" header showing current tier (Free / Paid).
-- Free tier: "Free credits remaining: $X.XX" + "Upgrade to $50/mo" button → POST `/workspaces/me/billing/checkout`, redirect to Checkout session URL.
-- Paid tier: "Active subscription · $50/mo · next charge YYYY-MM-DD" + "Manage subscription" button → POST `/workspaces/me/billing/portal`, redirect.
-- Empty / failure states handled (Stripe down, customer_id missing, etc.).
-
-When the user lands back on `/account` after Checkout success, page polls the workspace until `plan_tier='paid'` updates (webhook lands within seconds — short poll loop covers the race).
+- Free tier: "Free" badge + "$X.XX of free credits remaining" + "Upgrade to $50/mo" button → POST `/workspaces/me/billing/checkout`, navigates browser to Checkout URL.
+- Paid tier: "Paid" badge + "Active subscription · $50/mo" + "Manage subscription" button → POST `/workspaces/me/billing/portal`, navigates to Customer Portal.
+- Checkout redirect-back handling: `?upgrade=success` shows "Confirming your payment" banner + polls `fetchWorkspace` every 1.5s for up to 45s until `plan_tier='paid'`. `?upgrade=cancelled` shows "no charge made, try again" amber banner. Both query params are cleaned with `history.replaceState` so a hard reload doesn't re-trigger.
+- 503 from the billing endpoints (Stripe not configured) surfaces as a friendly "ask the admin to follow STRIPE_SETUP.md" message rather than a generic error.
+- Backend serializer (`_serialize_workspace`) extended with `plan_tier`, `free_credits_remaining_usd`, `has_stripe_customer` so the dashboard renders the right CTA without an extra API call.
 
 ### 17.8 — Tests
 
@@ -872,6 +869,22 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 17.7: dashboard billing UI on /account
+
+The non-technical-user signup arc is now visually complete: a fresh user can see their free credits remaining, upgrade with one click, return to /account on the paid plan, and manage their subscription via the Stripe Customer Portal. Plus a clean cancellation path.
+
+- **`backend/main.py` — `_serialize_workspace`** extended with three new fields: `plan_tier`, `free_credits_remaining_usd`, `has_stripe_customer`. Single change cascades through every endpoint that returns a workspace (auth/me, workspaces/me, signup, login, magic-link consume, OAuth callback) so the dashboard always has fresh billing state without a separate fetch.
+- **`dashboard/app/api.ts`** — added `BillingNotConfiguredError`, `createBillingCheckout`, `createBillingPortal`. Both helpers raise `BillingNotConfiguredError` specifically on 503 so the UI can render a "Stripe not configured" message rather than a generic error. `SessionWorkspace` type extended with the new billing fields (all optional, so older cached values in localStorage still parse).
+- **`dashboard/app/account/page.tsx`** — new Billing section above Workspace:
+  - Paid tier: green "Paid" badge + "Active subscription · $50/mo" + "manage subscription" button.
+  - Free tier: gray "Free" badge + "$X.XX of free credits remaining" + "upgrade to $50/mo" button.
+  - Checkout redirect-back handler reads `?upgrade=success|cancelled` from `window.location` (avoids wrapping the whole AccountPage in Suspense for useSearchParams) and shows the right banner. On success, polls `fetchWorkspace` every 1.5s for up to 45s until `plan_tier='paid'`, then swaps in the "you're on the paid plan, thanks" banner. Query params are cleaned with `history.replaceState` so a hard reload doesn't re-trigger.
+  - 503 surfaces as "Billing isn't configured on this Lightsei deployment yet. Ask the admin to follow STRIPE_SETUP.md." — actionable rather than scary.
+
+**Verification:** `npx tsc --noEmit` clean. `npx next build` builds /account at 6.13 kB (was 5.24 kB; +0.89 kB for the new section). Backend tests: 3 new serializer tests added to `test_stripe_billing.py` (fresh signup defaults; `/auth/me` carries billing fields; paid-state workspace serializes correctly). Full suite: **747 passed in 145s** (was 744, +3 new). 0 regressions outside the new fields.
+
+**What this unblocks:** the full Phase 17 demo arc end-to-end. The only thing left for 17.9 is Stripe console config from STRIPE_SETUP.md + a single test run with a real Stripe test card. 17.4-17.7 inclusive are all code-complete on 2026-05-17.
 
 ### 2026-05-17 — Phase 17.4: Stripe integration (code-complete pending Stripe console config)
 

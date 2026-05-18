@@ -512,6 +512,12 @@ def _serialize_workspace(w: Workspace) -> dict[str, Any]:
             if w.budget_usd_monthly is not None
             else None
         ),
+        # Phase 17.7: billing surface so /account can render the right
+        # CTA. has_stripe_customer is true iff the workspace has ever
+        # been through Checkout (the portal endpoint 400s otherwise).
+        "plan_tier": w.plan_tier,
+        "free_credits_remaining_usd": float(w.free_credits_remaining_usd or 0),
+        "has_stripe_customer": bool(w.stripe_customer_id),
     }
 
 

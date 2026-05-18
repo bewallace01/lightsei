@@ -1,10 +1,13 @@
 "use client";
 
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiKeySummary,
+  BillingNotConfiguredError,
   createApiKey,
+  createBillingCheckout,
+  createBillingPortal,
   deleteSecret,
   fetchApiKeys,
   fetchSecrets,
@@ -58,6 +61,17 @@ export default function AccountPage() {
   const [savingSecret, setSavingSecret] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Phase 17.7: billing state.
+  const [billingBusy, setBillingBusy] = useState<"checkout" | "portal" | null>(null);
+  const [billingError, setBillingError] = useState<string | null>(null);
+  // 'success' | 'cancelled' | 'paying' when we're polling for the
+  // webhook to flip plan_tier=paid after a Checkout return; cleared
+  // once we see the flip or the poll timeout fires.
+  const [billingFlash, setBillingFlash] = useState<
+    null | "success" | "cancelled" | "paying"
+  >(null);
+  const pollTimeoutRef = useRef<number | null>(null);
+
   const loadAll = async () => {
     try {
       const [ws, ks, ss, sc] = await Promise.all([
@@ -81,12 +95,97 @@ export default function AccountPage() {
     }
   };
 
+  // Poll fetchWorkspace until plan_tier flips to 'paid' (webhook lands
+  // within ~1s of Checkout success). Stops on flip, on timeout (45s),
+  // or when the component unmounts.
+  const pollForPaidFlip = useCallback(() => {
+    const startedAt = Date.now();
+    const tick = async () => {
+      try {
+        const ws = await fetchWorkspace();
+        setWorkspace(ws);
+        if (ws.plan_tier === "paid") {
+          setBillingFlash("success");
+          return;
+        }
+      } catch {
+        // Ignore transient errors during polling; we'll retry.
+      }
+      if (Date.now() - startedAt > 45_000) {
+        // Webhook didn't land in time. Leave the user on the "we're
+        // confirming your payment" state with a manual refresh hint;
+        // the next page load will resolve.
+        return;
+      }
+      pollTimeoutRef.current = window.setTimeout(tick, 1500);
+    };
+    tick();
+  }, []);
+
   useEffect(() => {
     setUser(getStoredUser());
     setWorkspace(getStoredWorkspace());
     loadAll();
+
+    // Handle the Checkout / Portal redirect-back query params. We use
+    // window.location instead of useSearchParams to avoid wrapping the
+    // whole AccountPage in Suspense.
+    const sp = new URLSearchParams(window.location.search);
+    const upgrade = sp.get("upgrade");
+    if (upgrade === "success") {
+      setBillingFlash("paying");
+      pollForPaidFlip();
+      // Clean the query param so a hard reload doesn't re-trigger.
+      window.history.replaceState({}, "", "/account");
+    } else if (upgrade === "cancelled") {
+      setBillingFlash("cancelled");
+      window.history.replaceState({}, "", "/account");
+    }
+
+    return () => {
+      if (pollTimeoutRef.current !== null) {
+        clearTimeout(pollTimeoutRef.current);
+      }
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  const onUpgrade = async () => {
+    setBillingError(null);
+    setBillingBusy("checkout");
+    try {
+      const { checkout_url } = await createBillingCheckout();
+      window.location.href = checkout_url;
+    } catch (e) {
+      if (e instanceof BillingNotConfiguredError) {
+        setBillingError(
+          "Billing isn't configured on this Lightsei deployment yet. " +
+            "Ask the admin to follow STRIPE_SETUP.md.",
+        );
+      } else {
+        setBillingError((e as Error).message);
+      }
+      setBillingBusy(null);
+    }
+  };
+
+  const onManageSubscription = async () => {
+    setBillingError(null);
+    setBillingBusy("portal");
+    try {
+      const { portal_url } = await createBillingPortal();
+      window.location.href = portal_url;
+    } catch (e) {
+      if (e instanceof BillingNotConfiguredError) {
+        setBillingError(
+          "Billing isn't configured on this Lightsei deployment yet.",
+        );
+      } else {
+        setBillingError((e as Error).message);
+      }
+      setBillingBusy(null);
+    }
+  };
 
   const onRename = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -181,6 +280,89 @@ export default function AccountPage() {
           {error}
         </div>
       )}
+
+      {/* --- Billing --- */}
+      <section className="mb-12">
+        <h2 className="text-[11px] font-semibold text-gray-500 mb-4 uppercase tracking-wider">
+          Billing
+        </h2>
+
+        {billingFlash === "paying" && (
+          <div className="mb-4 p-3 border border-blue-200 bg-blue-50 text-blue-800 text-sm rounded-md">
+            Confirming your payment with Stripe. This usually takes a couple of
+            seconds; the page will update automatically.
+          </div>
+        )}
+        {billingFlash === "success" && (
+          <div className="mb-4 p-3 border border-green-200 bg-green-50 text-green-800 text-sm rounded-md">
+            You&apos;re on the paid plan. Thanks!
+          </div>
+        )}
+        {billingFlash === "cancelled" && (
+          <div className="mb-4 p-3 border border-amber-200 bg-amber-50 text-amber-800 text-sm rounded-md">
+            Upgrade cancelled, no charge made. You can try again any time.
+          </div>
+        )}
+        {billingError && (
+          <div className="mb-4 p-3 border border-red-200 bg-red-50 text-red-700 text-sm rounded-md">
+            {billingError}
+          </div>
+        )}
+
+        {workspace?.plan_tier === "paid" ? (
+          <div className="rounded-lg border border-gray-200 p-5 flex items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2 mb-1.5">
+                <span className="inline-block px-2 py-0.5 rounded-full bg-green-100 text-green-800 text-[11px] font-medium">
+                  Paid
+                </span>
+                <span className="text-sm text-gray-700">
+                  Active subscription · $50/mo
+                </span>
+              </div>
+              <p className="text-xs text-gray-500">
+                Manage your card, view invoices, or cancel via the Stripe
+                customer portal.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onManageSubscription}
+              disabled={billingBusy !== null}
+              className="shrink-0 px-4 py-2 border border-gray-300 hover:bg-gray-50 text-gray-800 rounded-md text-sm font-medium disabled:opacity-50 transition-colors"
+            >
+              {billingBusy === "portal" ? "opening…" : "manage subscription"}
+            </button>
+          </div>
+        ) : (
+          <div className="rounded-lg border border-gray-200 p-5 flex items-start justify-between gap-4">
+            <div>
+              <div className="flex items-center gap-2 mb-1.5">
+                <span className="inline-block px-2 py-0.5 rounded-full bg-gray-100 text-gray-700 text-[11px] font-medium">
+                  Free
+                </span>
+                <span className="text-sm text-gray-700">
+                  {workspace
+                    ? `$${(workspace.free_credits_remaining_usd ?? 0).toFixed(2)} of free credits remaining`
+                    : "loading…"}
+                </span>
+              </div>
+              <p className="text-xs text-gray-500">
+                Upgrade to keep your bots running once your free credits are
+                used up. $50/mo, cancel anytime.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={onUpgrade}
+              disabled={billingBusy !== null}
+              className="shrink-0 px-4 py-2 bg-accent-600 hover:bg-accent-700 text-white rounded-md text-sm font-medium disabled:opacity-50 transition-colors"
+            >
+              {billingBusy === "checkout" ? "opening…" : "upgrade to $50/mo"}
+            </button>
+          </div>
+        )}
+      </section>
 
       {/* --- Workspace --- */}
       <section className="mb-12">

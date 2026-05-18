@@ -439,3 +439,53 @@ def test_webhook_returns_400_when_secret_not_set(client, monkeypatch):
     monkeypatch.delenv("LIGHTSEI_STRIPE_WEBHOOK_SECRET")
     r = _post_webhook(client, {"foo": "bar"})
     assert r.status_code == 400
+
+
+# ---------- Phase 17.7: workspace serializer billing fields ---------- #
+
+
+def test_serialize_workspace_includes_billing_fields_on_signup(client, alice):
+    """Fresh signup → plan_tier=free, free_credits=5.00,
+    has_stripe_customer=false. Dashboard renders 'free' billing panel."""
+    ws = alice["workspace"]
+    assert ws["plan_tier"] == "free"
+    assert ws["free_credits_remaining_usd"] == pytest.approx(5.0, abs=1e-6)
+    assert ws["has_stripe_customer"] is False
+
+
+def test_auth_me_includes_billing_fields(client, alice):
+    """The dashboard polls /auth/me after Checkout redirect-back to
+    notice the plan_tier flip — make sure the fields are on the
+    serializer that endpoint returns."""
+    r = client.get(
+        "/auth/me", headers=auth_headers(alice["session_token"]),
+    )
+    assert r.status_code == 200
+    ws = r.json()["workspace"]
+    assert ws["plan_tier"] == "free"
+    assert ws["free_credits_remaining_usd"] == pytest.approx(5.0, abs=1e-6)
+    assert ws["has_stripe_customer"] is False
+
+
+def test_serialize_workspace_reflects_paid_state(client, alice):
+    """After webhook flips plan_tier='paid' + stamps customer/sub id,
+    the serializer should reflect both — that's what the dashboard
+    pivots on to swap the upgrade button for the manage button."""
+    workspace_id = alice["workspace"]["id"]
+    with session_scope() as s:
+        ws = s.get(Workspace, workspace_id)
+        ws.plan_tier = "paid"
+        ws.stripe_customer_id = "cus_test_paid"
+        ws.stripe_subscription_id = "sub_test_paid"
+        ws.free_credits_remaining_usd = Decimal("0")
+
+    r = client.get(
+        "/workspaces/me", headers=auth_headers(alice["session_token"]),
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["plan_tier"] == "paid"
+    assert body["has_stripe_customer"] is True
+    # Paid workspaces' credit pool is irrelevant to billing but still
+    # surfaced; dashboard doesn't render it for paid users.
+    assert body["free_credits_remaining_usd"] == pytest.approx(0.0)
