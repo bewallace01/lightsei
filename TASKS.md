@@ -7,11 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 17.8 (tests) + 17.9 (end-to-end demo). The non-technical-user signup arc is now code-complete.**
+> **Phase 17 closed in test mode 2026-05-17. Live mode parked until the business is ready to take real payments.**
 
-17.4-17.7 shipped 2026-05-17. Backend at 747 tests. The user-facing demo arc (sign up via magic link or Google → get $5 of free credits → run team-from-readme → hit paywall → upgrade via Stripe → return to dashboard on paid plan) is code-complete pending Stripe console config from STRIPE_SETUP.md.
+The full non-technical-user demo arc works end-to-end against test-mode Stripe on prod: signup → /account → upgrade button → real Stripe Checkout → real Stripe webhook → DB `plan_tier='paid'` flip → dashboard polling animation → "you're on the paid plan" banner → manage-subscription button opens the Customer Portal. Smoke-tested 2026-05-17 with workspace `f43f0f71...` via test card 4242 4242 4242 4242 + watched verbatim by Bailey + verified via API.
 
-NOW: 17.8 sub-tasks have largely been folded into the prior subtasks (each shipped with its own tests; backend total now at 747). 17.9 is the end-to-end demo run with Stripe console configured — Bailey runs it once Stripe-side setup is done. Nothing more to ship in 17 until the Stripe console is wired.
+Live-mode activation parked. To resume: complete Stripe account activation (bank/identity/tax in the dashboard), recreate product/price/webhook/portal in live mode, swap the three live env vars on Railway (`LIGHTSEI_STRIPE_SECRET_KEY`, `LIGHTSEI_STRIPE_PRICE_ID`, `LIGHTSEI_STRIPE_WEBHOOK_SECRET`), redeploy, smoke test with a real card (refund yourself).
+
+NOW: pick a next phase. Phase 16 prod demo is still parked. Phase 18 (dashboard polish) is next in the strategic-pivot roadmap. Older parking-lot items also available (see Parking Lot below).
 
 ## Phase 12C: drop a README, get a team
 
@@ -367,28 +369,29 @@ New Billing section on `/account` (renders above Workspace):
 - 503 from the billing endpoints (Stripe not configured) surfaces as a friendly "ask the admin to follow STRIPE_SETUP.md" message rather than a generic error.
 - Backend serializer (`_serialize_workspace`) extended with `plan_tier`, `free_credits_remaining_usd`, `has_stripe_customer` so the dashboard renders the right CTA without an extra API call.
 
-### 17.8 — Tests
+### 17.8 — Tests ✅ folded into 17.1-17.7
 
-Per the existing test pattern (tests live with the code they cover):
+Tests for each Phase 17 sub-task shipped alongside the code (per the established pattern). Backend at 747 passing tests with 17.4 alone adding +20 and 17.5 alone adding +17.
 
-- 17.1: schema + alembic backfill (matches `test_sensitivity_level.py` shape).
-- 17.2: magic-link request + consume (mocked Resend), rate-limit, expiry, single-use, new-user vs existing-user paths.
-- 17.3: OAuth callback (mocked Google userinfo), state validation, returning-user vs new-user paths, email-link fallback when `google_user_id` not matched.
-- 17.4: webhook signature verification, subscription lifecycle state transitions, idempotency on duplicate webhook delivery.
-- 17.5: paywall middleware fires when free+exhausted, doesn't fire when paid, doesn't fire when free+remaining>0.
-- 17.6 + 17.7: dashboard `tsc --noEmit` clean.
+### 17.9 — Demo ✅ passed in test mode 2026-05-17 (live mode parked)
 
-### 17.9 — Demo
+The full non-technical-user upgrade arc runs end-to-end on prod against test-mode Stripe:
 
-A fresh non-technical user signs up cold:
+- Fresh signup via `/auth/signup` on prod, gets `plan_tier='free'` + $5 of free credits.
+- Hits `/account`, sees Billing section with Free badge + $5.00 credits remaining + Upgrade button.
+- Clicks Upgrade → real Stripe Checkout opens with the configured $50/mo price.
+- Pays with test card `4242 4242 4242 4242`.
+- Stripe redirects to `/account?upgrade=success` → dashboard shows blue "Confirming payment" banner → polls `fetchWorkspace` every 1.5s.
+- Within seconds: real Stripe webhook delivery → backend signature verification passes → `customer.subscription.created` handler runs → `plan_tier='paid'` written + `stripe_subscription_id` stamped.
+- Dashboard polling notices the flip → swaps to green "you're on the paid plan" banner + manage-subscription button.
+- Manage Subscription → real Stripe Customer Portal opens with the configured options (update card, view invoices, cancel at period end).
+- Verified via API: workspace row reports `plan_tier="paid"` + `has_stripe_customer=true`.
 
-- Lands on `/login`, types an email, hits "send magic link," sees confirmation, clicks the email link, lands on `/` signed in with a fresh workspace ($5 free credits, `plan_tier='free'`).
-- (Or alternative: clicks Google OAuth, same end state.)
-- Walks through team-from-README, picks a preset, deploys. Some LLM-calling ops decrement credits.
-- Either runs out of credits OR clicks "Upgrade to $50/mo" on `/account` → Stripe Checkout → returns to /account showing "Paid · $50/mo · next charge ...". From here all LLM ops work unbounded (subject to the existing monthly cap).
-- Cancel works via the Stripe portal link.
+Loose ends from the test-mode walkthrough (harmless, but for awareness):
+- Test workspace `stripe-smoke-1779072629` (email `wallacebailey32+stripe-smoke-1779072629@gmail.com`) is still in the prod DB with a live test-mode Stripe subscription.
+- Orphan live-mode product `prod_UXK3cHPoQXLrf9` exists in the live-mode catalog (created accidentally before mode-aware Stripe MCP detection).
 
-Phase 17 closes when that whole arc runs end-to-end without manual backend intervention.
+Phase 17 closes (test mode). Live-mode activation parked until ready to take real payments — when ready, see STRIPE_SETUP.md "Step 6 onward" + the live-mode env-var swap.
 
 ## Phase 18: Dashboard polish (the dashboard is the product)
 
@@ -869,6 +872,31 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-17 — Phase 17.9 demo PASSED in test mode (live mode parked)
+
+Stripe console + Lightsei prod backend integration verified end-to-end. The full non-technical-user upgrade arc works on prod against test-mode Stripe.
+
+**Stripe console setup** (Lightsei is a new Stripe account in the Lightspace Labs organization; org allows shared team + reporting while Lightsei has its own branding/portal/catalog):
+- Test-mode product `prod_UXK6teqTGTPLaH` (`Lightsei`) + test-mode recurring price `price_1TYFSoA1n0fiEOaqPnIAFdGJ` (`$50.00 USD / month`) — created via Stripe MCP.
+- Customer Portal configured: card update + invoice history + cancel-at-end-of-billing-period (so paid users keep access through the period they've paid for).
+- Webhook endpoint at `https://api.lightsei.com/billing/stripe/webhook` subscribed to the five event types the backend handles (`checkout.session.completed`, `customer.subscription.created/updated/deleted`, `invoice.payment_failed`).
+- Four env vars set on the `lightsei-backend` Railway service: `LIGHTSEI_STRIPE_SECRET_KEY` (sk_test_...), `LIGHTSEI_STRIPE_PRICE_ID`, `LIGHTSEI_STRIPE_WEBHOOK_SECRET` (whsec_...), `LIGHTSEI_DASHBOARD_BASE_URL`. Auto-redeploy picked them up.
+
+**Smoke test** (workspace `f43f0f71-5750-4b22-8e08-6dd6dc3c1ffb`, email `wallacebailey32+stripe-smoke-1779072629@gmail.com`):
+- Signup via `/auth/signup` → workspace created with `plan_tier='free'`, $5.00 credits, `has_stripe_customer=false`.
+- `POST /workspaces/me/billing/checkout` → returned real `cs_test_...` Checkout URL; Stripe customer `cus_UXLy6FoumGfueK` created and stamped on the workspace; `has_stripe_customer=true`.
+- Browser flow: completed Checkout with test card `4242 4242 4242 4242`, redirected to `/account?upgrade=success`, watched the dashboard polling animation swap from "Confirming payment" to "you're on the paid plan" within a few seconds.
+- API verification post-flow: `/workspaces/me` confirmed `plan_tier="paid"` + `has_stripe_customer=true`. The real Stripe webhook delivery, signature verification, and handler all worked.
+- Manage Subscription button opened the real Customer Portal.
+
+**Webhook sanity check (curl):** `POST /billing/stripe/webhook` with bogus signature returned `400 "bad signature: No signatures found matching..."` — confirms `LIGHTSEI_STRIPE_WEBHOOK_SECRET` is set and `construct_event` is verifying.
+
+**Mode confusion sidebar (one-time):** the Stripe MCP's first product create landed in live mode because the OAuth token picked up the Stripe dashboard's current mode at auth time. Caught it on the response (`"livemode":true`), reverted by switching dashboard to test mode + re-auth, then created the test-mode product successfully. The orphan live-mode `prod_UXK3cHPoQXLrf9` is harmless (no subscriptions possible until account activation) and easy to archive when next in the live-mode dashboard.
+
+**Live-mode activation parked.** To resume: complete Stripe account activation (bank + identity + tax info via dashboard), recreate product/price/webhook/portal in live mode, swap the three live env vars on Railway (`LIGHTSEI_STRIPE_SECRET_KEY` → `sk_live_...`, `LIGHTSEI_STRIPE_PRICE_ID` → live `price_...`, `LIGHTSEI_STRIPE_WEBHOOK_SECRET` → live `whsec_...`), redeploy, smoke test with a real card + refund.
+
+Phase 17 closed in test mode. Live-mode go-no-go waits for the business to be ready to take real payments.
 
 ### 2026-05-17 — Phase 17.7: dashboard billing UI on /account
 
