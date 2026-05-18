@@ -756,12 +756,6 @@ def run_agent_generation_job(
             detail="failed to decrypt ANTHROPIC_API_KEY (server config issue)",
         )
 
-    # Same idle-in-transaction fix as run_team_plan_job. Holding a
-    # Postgres transaction open across a multi-second Anthropic call
-    # trips Railway's idle-in-transaction timeout; commit the read
-    # transaction now so the LLM wait happens with no open transaction.
-    session.commit()
-
     description = payload.get("description") or ""
     target_agents = payload.get("target_agents") or None
     name_hint = payload.get("name_hint") or None
@@ -819,6 +813,15 @@ def run_agent_generation_job(
     token_log: list[tuple[str, int, int]] = []
 
     def _ask(extra_user_msg: Optional[str] = None) -> Any:
+        # Commit any pending read transaction before the LLM call. The
+        # handler reads workspace state (secret, existing agents) earlier,
+        # which opens an implicit Postgres transaction. If we hold that
+        # transaction open during the multi-second Anthropic call,
+        # Railway's idle-in-transaction timeout kills the connection and
+        # the post-LLM cost write fails. Committing here closes the read
+        # transaction; the post-LLM cost write opens a fresh one
+        # implicitly.
+        session.commit()
         messages: list[dict[str, Any]] = [{"role": "user", "content": user_msg}]
         if iteration_turn:
             messages.append({"role": "user", "content": iteration_turn})

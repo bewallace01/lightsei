@@ -586,14 +586,6 @@ def run_team_plan_job(
             detail="failed to decrypt ANTHROPIC_API_KEY (server config issue)",
         )
 
-    # Commit the read transaction before the long-running Anthropic call.
-    # Holding a Postgres transaction open across a 30s-2min LLM call trips
-    # Railway's idle-in-transaction timeout, which kills the connection
-    # and breaks the post-Anthropic cost write. The handler doesn't need
-    # the read transaction's snapshot after this point; the cost-write
-    # block opens a fresh transaction implicitly.
-    session.commit()
-
     readme_text = payload.get("readme_text") or None
     freeform_description = payload.get("freeform_description") or None
     github_repo = payload.get("github_repo") or None
@@ -681,6 +673,15 @@ def run_team_plan_job(
     token_log: list[tuple[str, int, int]] = []
 
     def _ask(extra_user_msg: Optional[str] = None) -> Any:
+        # Commit any pending read transaction before the LLM call. The
+        # handler reads workspace state (secret, github integration,
+        # existing agents) earlier, which opens an implicit Postgres
+        # transaction. If we hold that transaction open during the 30s-2min
+        # Anthropic call, Railway's idle-in-transaction timeout kills the
+        # connection and the post-LLM cost write fails. Committing here
+        # closes the read transaction; the post-LLM cost write opens a
+        # fresh one implicitly.
+        session.commit()
         messages: list[dict[str, Any]] = [{"role": "user", "content": user_msg}]
         if extra_user_msg:
             messages.append({"role": "user", "content": extra_user_msg})
