@@ -756,6 +756,12 @@ def run_agent_generation_job(
             detail="failed to decrypt ANTHROPIC_API_KEY (server config issue)",
         )
 
+    # Same idle-in-transaction fix as run_team_plan_job. Holding a
+    # Postgres transaction open across a multi-second Anthropic call
+    # trips Railway's idle-in-transaction timeout; commit the read
+    # transaction now so the LLM wait happens with no open transaction.
+    session.commit()
+
     description = payload.get("description") or ""
     target_agents = payload.get("target_agents") or None
     name_hint = payload.get("name_hint") or None
