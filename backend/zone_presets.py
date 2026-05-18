@@ -124,25 +124,20 @@ ZONE_PRESETS: dict[str, dict[str, dict[str, Any]]] = {
         },
     },
     COMPLIANCE_TEAM: {
-        # Orchestrator lives in the internal middle ground —
-        # coordinates the pii + public sides without itself holding
-        # either. Doesn't get internet (that's the messenger's job).
+        # Fallback by_role for planner outputs that lack sensitivity_hint
+        # (older planner runs before P16.x). The hint-aware mapping below
+        # is the preferred path; this is just here so deploys don't break
+        # when the hint is missing.
         "orchestrator": {
             "sensitivity_level": "internal",
             "capabilities": ["send_command"],
             "dispatches_cross_zone": False,
         },
-        # The canonical CRM-side: pii-tagged, no internet, no
-        # send_command. A prompt-injected CRM bot literally can't
-        # exfiltrate — the only paths off the pii zone are blocked.
         "specialist": {
             "sensitivity_level": "pii",
             "capabilities": [],
             "dispatches_cross_zone": False,
         },
-        # The canonical research/internet side: public-tagged with
-        # internet. The messenger is the place external data gets
-        # in or out.
         "messenger": {
             "sensitivity_level": "public",
             "capabilities": ["internet"],
@@ -159,6 +154,66 @@ for _name, _by_role in ZONE_PRESETS.items():
         f"preset {_name!r} missing required role keys: "
         f"got {sorted(_by_role.keys())}"
     )
+
+
+# P16.x: hint-aware preset mappings. When the planner emits a
+# `sensitivity_hint` per bot, the dashboard prefers this map over
+# the role-based one. Today only the Compliance preset is hint-aware
+# — Open and Standard don't gain anything from per-bot zones since
+# they apply the same zone everywhere — but the data shape is uniform
+# so the dashboard's preset code can treat all three identically.
+#
+# Why these defaults:
+#  - pii: no capabilities. A pii bot can't make outbound network
+#    calls (would defeat the boundary) and can't dispatch (cross-zone
+#    is blocked; same-zone would also need send_command).
+#  - sensitive: same locked-down posture as pii since "sensitive"
+#    data still shouldn't leak via prompt injection.
+#  - internal: send_command + internet. Internal bots coordinate
+#    within the chain and may need to post to Slack / webhooks (which
+#    require `internet`). Cross-zone still disabled.
+#  - public: internet only. Public bots are leaves; they don't dispatch
+#    back to internal/pii (one-way boundary). Cross-zone still disabled.
+HINT_AWARE_PRESETS: dict[str, dict[str, dict[str, Any]]] = {
+    OPEN_TEAM: {},  # not hint-aware; dashboard falls back to by_role
+    STANDARD_TEAM: {},  # same
+    COMPLIANCE_TEAM: {
+        "pii": {
+            "sensitivity_level": "pii",
+            "capabilities": [],
+            "dispatches_cross_zone": False,
+        },
+        "sensitive": {
+            "sensitivity_level": "sensitive",
+            "capabilities": [],
+            "dispatches_cross_zone": False,
+        },
+        "internal": {
+            "sensitivity_level": "internal",
+            "capabilities": ["send_command", "internet"],
+            "dispatches_cross_zone": False,
+        },
+        "public": {
+            "sensitivity_level": "public",
+            "capabilities": ["internet"],
+            "dispatches_cross_zone": False,
+        },
+    },
+}
+
+
+VALID_SENSITIVITY_HINTS: frozenset[str] = frozenset(
+    {"public", "internal", "sensitive", "pii"}
+)
+
+
+# Same import-time safety net for the hint-aware map.
+for _name, _by_hint in HINT_AWARE_PRESETS.items():
+    if _by_hint:
+        assert set(_by_hint.keys()) == VALID_SENSITIVITY_HINTS, (
+            f"preset {_name!r} hint mapping missing required keys: "
+            f"got {sorted(_by_hint.keys())}"
+        )
 
 
 # Dashboard-facing metadata. Separated from ZONE_PRESETS so wording
@@ -204,19 +259,43 @@ assert set(PRESET_METADATA.keys()) == VALID_PRESETS, (
 
 
 def apply_preset(
-    preset_name: str, role: Optional[str],
+    preset_name: str,
+    role: Optional[str],
+    sensitivity_hint: Optional[str] = None,
 ) -> dict[str, Any]:
-    """Return the trust-zone config for one role under one preset.
+    """Return the trust-zone config for one bot under one preset.
 
-    Unknown preset → fall back to DEFAULT_PRESET so a typo in the
-    dashboard's `preset_name` doesn't break the deploy. Unknown role
-    falls through to 'specialist' via `_normalize_role`.
+    If `sensitivity_hint` is provided AND the preset has a hint-aware
+    mapping for that hint, the hint wins — this is the P16.x path where
+    the planner labels each bot's intent and the preset uses it rather
+    than falling back to role-based defaults.
 
-    Returns a deep-copied dict — caller can mutate the returned
-    config (e.g. add an extra capability per-bot) without poisoning
-    the next call's preset config."""
+    If the hint is missing OR the preset isn't hint-aware (Open / Standard),
+    falls back to role-based mapping. Unknown preset → DEFAULT_PRESET.
+    Unknown role → 'specialist' via `_normalize_role`. Unknown hint →
+    falls back to role.
+
+    Returns a deep-copied dict so the caller can mutate the returned
+    config without poisoning the next call.
+    """
     if preset_name not in VALID_PRESETS:
         preset_name = DEFAULT_PRESET
+
+    # Hint-aware path: planner emitted a sensitivity_hint AND this preset
+    # has a mapping for it.
+    if (
+        sensitivity_hint is not None
+        and sensitivity_hint in VALID_SENSITIVITY_HINTS
+        and HINT_AWARE_PRESETS.get(preset_name)
+    ):
+        src = HINT_AWARE_PRESETS[preset_name][sensitivity_hint]
+        return {
+            "sensitivity_level": src["sensitivity_level"],
+            "capabilities": list(src["capabilities"]),
+            "dispatches_cross_zone": src["dispatches_cross_zone"],
+        }
+
+    # Role-based fallback (legacy path + non-hint-aware presets).
     normalized = _normalize_role(role)
     src = ZONE_PRESETS[preset_name][normalized]
     return {
@@ -228,8 +307,12 @@ def apply_preset(
 
 def list_presets() -> list[dict[str, Any]]:
     """Returns the presets in a dashboard-renderable shape:
-    `[{name, label, summary, tradeoff, by_role}]`. Stable ordering:
-    open, standard, compliance — left-to-right least-to-most
+    `[{name, label, summary, tradeoff, by_role, by_hint, is_default}]`.
+    `by_hint` is an empty dict for non-hint-aware presets (Open, Standard);
+    the dashboard treats an empty dict as "no hint-aware mapping, fall back
+    to by_role".
+
+    Stable ordering: open, standard, compliance — left-to-right least-to-most
     restrictive so the picker reads as a slider."""
     ordered = [OPEN_TEAM, STANDARD_TEAM, COMPLIANCE_TEAM]
     return [
@@ -240,6 +323,10 @@ def list_presets() -> list[dict[str, Any]]:
             "tradeoff": PRESET_METADATA[name]["tradeoff"],
             "by_role": {
                 role: dict(cfg) for role, cfg in ZONE_PRESETS[name].items()
+            },
+            "by_hint": {
+                hint: dict(cfg)
+                for hint, cfg in HINT_AWARE_PRESETS.get(name, {}).items()
             },
             "is_default": name == DEFAULT_PRESET,
         }

@@ -50,12 +50,18 @@ def test_submit_team_schema_has_required_fields():
     assert str(MAX_DISPATCHES_PER_BOT) in SUBMIT_TEAM_TOOL["description"]
     member = team["items"]
     assert set(member["required"]) == {
-        "name", "role", "summary", "command_kinds",
+        "name", "role", "sensitivity_hint", "summary", "command_kinds",
         "dispatches_to", "needs_workspace_secrets", "draft_description",
     }
     # role is enum-constrained
     assert set(member["properties"]["role"]["enum"]) == {
         "orchestrator", "specialist", "messenger",
+    }
+    # P16.x: sensitivity_hint must be one of the four trust-zone levels.
+    # The Compliance preset uses this to assign zones rather than
+    # role-based defaults.
+    assert set(member["properties"]["sensitivity_hint"]["enum"]) == {
+        "public", "internal", "sensitive", "pii",
     }
     # Dispatch cap is described in prose (validator enforces; tool
     # schema can't carry `maxItems > 1` in strict mode).
@@ -113,10 +119,12 @@ def _team_member(
     role: str = "specialist",
     dispatches_to: list | None = None,
     command_kinds: list | None = None,
+    sensitivity_hint: str = "internal",
 ) -> dict:
     return {
         "name": name,
         "role": role,
+        "sensitivity_hint": sensitivity_hint,
         "summary": f"{name} does the thing",
         "command_kinds": command_kinds if command_kinds is not None else [f"{name}.do"],
         "dispatches_to": dispatches_to if dispatches_to is not None else [],
@@ -232,6 +240,54 @@ def test_validate_team_plan_rejects_two_orchestrators():
     }
     problems = validate_team_plan(plan, reserved_names=set())
     assert any("orchestrator" in p for p in problems)
+
+
+# ---------- P16.x: sensitivity_hint validation ---------- #
+
+
+def test_validate_team_plan_rejects_missing_sensitivity_hint():
+    """Bot without sensitivity_hint → flagged in the corrective retry
+    message so the LLM tries again with a hint."""
+    plan = {
+        "rationale": "test",
+        "team": [
+            {k: v for k, v in _team_member("vega").items() if k != "sensitivity_hint"},
+            _team_member("argus"),
+            _team_member("hermes", role="messenger"),
+        ],
+    }
+    problems = validate_team_plan(plan, reserved_names=set())
+    assert any("sensitivity_hint" in p for p in problems)
+
+
+def test_validate_team_plan_rejects_invalid_sensitivity_hint():
+    """Hint must be one of the four levels; anything else fails."""
+    plan = {
+        "rationale": "test",
+        "team": [
+            _team_member("vega", sensitivity_hint="ultra-secret"),
+            _team_member("argus"),
+            _team_member("hermes", role="messenger"),
+        ],
+    }
+    problems = validate_team_plan(plan, reserved_names=set())
+    assert any("sensitivity_hint" in p for p in problems)
+
+
+def test_validate_team_plan_accepts_all_four_hint_values():
+    """All four levels are valid; the validator doesn't care which one
+    a bot picked (that's a per-bot judgment call)."""
+    for hint in ("public", "internal", "sensitive", "pii"):
+        plan = {
+            "rationale": "test",
+            "team": [
+                _team_member("vega", sensitivity_hint=hint),
+                _team_member("argus"),
+                _team_member("hermes", role="messenger"),
+            ],
+        }
+        problems = validate_team_plan(plan, reserved_names=set())
+        assert problems == [], f"hint {hint!r} produced problems: {problems}"
 
 
 # ---------- Endpoint tests with stubbed Anthropic ---------- #

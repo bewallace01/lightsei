@@ -93,6 +93,24 @@ SUBMIT_TEAM_TOOL: dict[str, Any] = {
                                 "(Hermes-shaped)."
                             ),
                         },
+                        "sensitivity_hint": {
+                            "type": "string",
+                            "enum": ["public", "internal", "sensitive", "pii"],
+                            "description": (
+                                "Trust-zone hint per bot. The dashboard's "
+                                "Compliance preset uses this to assign zones "
+                                "rather than role-based defaults — see the "
+                                "system prompt's Trust zones section for the "
+                                "rules. Pick 'pii' if the bot touches "
+                                "customer PII or anything in a SOC 2 / GDPR "
+                                "boundary; 'sensitive' for internal-only "
+                                "regulated data that's not PII; 'internal' "
+                                "for coordination and internal logic that "
+                                "doesn't touch customer-shape data; 'public' "
+                                "for bots that operate on public information "
+                                "(web research, news, public APIs)."
+                            ),
+                        },
                         "summary": {
                             "type": "string",
                             "description": (
@@ -153,6 +171,7 @@ SUBMIT_TEAM_TOOL: dict[str, Any] = {
                     "required": [
                         "name",
                         "role",
+                        "sensitivity_hint",
                         "summary",
                         "command_kinds",
                         "dispatches_to",
@@ -231,6 +250,49 @@ your proposed work overlaps with an existing bot, **don't** propose a
 duplicate — instead, wire your new bots to dispatch to the existing
 one. Include the existing agent's name in `dispatches_to` rather than
 adding it to `team`.
+
+## Trust zones (sensitivity_hint per bot)
+
+Every bot needs a `sensitivity_hint` so the dashboard can apply the
+right trust-zone configuration when the user picks the Compliance
+preset. The rules below are what the operator expects you to follow
+— get them wrong and the deploy lands the bot in the wrong zone:
+
+- `pii`: the bot touches customer PII (names, emails, phone numbers,
+  addresses, account-level customer metadata) or data covered by SOC 2
+  / GDPR / HIPAA. Even reading from a CRM counts. The Compliance
+  preset locks `pii` bots down to NO outbound capabilities — they
+  can't call the internet, can't dispatch elsewhere. This is the
+  load-bearing trust-zone wedge: a prompt-injected `pii` bot
+  literally cannot exfiltrate.
+
+- `sensitive`: internal-only regulated data that isn't PII
+  (financial records, contracts, salary info). Same locked-down
+  posture as `pii` under Compliance.
+
+- `internal`: coordination, scheduling, internal-only logic that
+  doesn't touch customer-shape data. Orchestrators usually live here.
+  Bots that post to internal Slack channels (without reading customer
+  data) live here too. Compliance grants internal bots send_command
+  + internet so they can post webhooks but doesn't let them cross to
+  the pii zone.
+
+- `public`: operates only on public information — web research, news
+  sites, public APIs, prospect data on companies the workspace has no
+  existing relationship with. Compliance grants internet but blocks
+  dispatch back to internal/pii zones.
+
+Heuristic: if a bot's data path could be described to a buyer's CISO
+as "this bot reads customer data," it's `pii`. If it could be
+described as "this bot reads internal-only business data," it's
+`sensitive` or `internal` depending on regulatory shape. If you'd put
+the bot's traffic in front of a public webcache without flinching,
+it's `public`.
+
+When in doubt, prefer the more restrictive zone. The Compliance
+preset is opt-in safety; over-classifying a bot as `pii` just means
+the operator has to grant it capabilities explicitly. Under-
+classifying means data leaks.
 """
 
 
@@ -381,6 +443,20 @@ def validate_team_plan(
 
         if m.get("role") == "orchestrator":
             orchestrator_count += 1
+
+        # P16.x: sensitivity_hint must be one of the four levels.
+        # Missing or invalid hints would land the bot in a degraded
+        # role-based fallback at deploy time, which silently misses
+        # the trust-zone configuration. Flag here so the retry message
+        # can ask the LLM to fix it.
+        hint = m.get("sensitivity_hint")
+        if not isinstance(hint, str) or hint.strip().lower() not in {
+            "public", "internal", "sensitive", "pii",
+        }:
+            problems.append(
+                f"team[{i}].sensitivity_hint `{hint!r}` is not one of "
+                f"'public' / 'internal' / 'sensitive' / 'pii'"
+            )
 
     if orchestrator_count > 1:
         problems.append(

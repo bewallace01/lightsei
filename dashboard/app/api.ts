@@ -817,6 +817,11 @@ export type ZonePreset = {
   summary: string;
   tradeoff: string;
   by_role: Record<string, ZonePresetRoleConfig>;
+  // P16.x: hint-aware mapping. Empty for non-hint-aware presets
+  // (Open / Standard); populated for Compliance with one config per
+  // sensitivity level. When the planner emits a sensitivity_hint per
+  // bot, the deploy code prefers by_hint[hint] over by_role[role].
+  by_hint: Record<string, ZonePresetRoleConfig>;
   is_default: boolean;
 };
 
@@ -1502,9 +1507,15 @@ export async function fetchAgents(): Promise<Agent[]> {
 
 export type TeamMemberRole = "orchestrator" | "specialist" | "messenger";
 
+// P16.x: planner emits a per-bot trust-zone hint so the Compliance
+// preset's deploy code can land each bot in the right zone without
+// the operator manually overriding (the gap the Coral demo exposed).
+export type SensitivityHint = "public" | "internal" | "sensitive" | "pii";
+
 export type TeamMember = {
   name: string;
   role: TeamMemberRole;
+  sensitivity_hint: SensitivityHint;
   summary: string;
   command_kinds: string[];
   dispatches_to: string[];

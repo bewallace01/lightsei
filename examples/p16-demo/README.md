@@ -51,23 +51,27 @@ Below the proposed team, the preset picker shows three options. Click
 **Compliance team** (description: "Your customer data does not leave
 the team").
 
-The preview panel updates to show what each bot gets:
-- Specialists: `'pii'` zone, NO capabilities, no cross-zone dispatch.
-- Messengers: `'public'` zone, internet capability, no cross-zone
-  dispatch.
+The preview panel updates to show one row per sensitivity hint
+(P16.x — the planner labels each bot with a `sensitivity_hint` and
+the deploy uses it to land each bot in the right zone):
 
-**One-time manual override**: under the Compliance preset, both bots
-will probably be marked `specialist` by the planner — which means they
-both default to the PII zone with no internet. That's a known
-follow-up; for now: deploy, then go to **/agents/{research-bot-name}**
-and flip its sensitivity to `public` + add the `internet` capability.
+- `pii`: pii zone, NO capabilities, no cross-zone dispatch.
+- `sensitive`: sensitive zone, NO capabilities, no cross-zone dispatch.
+- `internal`: internal zone, `send_command + internet`, no cross-zone.
+- `public`: public zone, `internet`, no cross-zone.
 
-After clicking **Deploy team** and applying the manual override:
-- `coral-crm-bot` (rename if necessary): `'pii'`, capabilities=`[]`
-- `coral-research-bot`: `'public'`, capabilities=`['internet']`
+Click **Deploy team**. The Compliance preset picks the right zone per
+bot automatically based on what the planner inferred from the README.
+For the Coral README you should end up with something like:
 
-(If the planner picked different names, rename them via
-**/agents/{name}** edit. The demo scripts below assume those two names.)
+- PII chain: orchestrator (`internal`) → CRM specialists (`pii`, no caps) → notifier (`internal`)
+- Public chain: research bots (`public`, internet)
+- No cross-zone edges anywhere.
+
+(If you want different names from what the planner picked, rename them
+via **/agents/{name}** edit before deploying. The demo scripts below
+assume `coral-crm-bot` and `coral-research-bot` — you may want to
+rename the PII-side specialist and one public-side bot to match.)
 
 ### Act 3 — visit /zones, see the topology
 
@@ -149,10 +153,5 @@ When you're done demoing:
 
 ## Known follow-ups (parked in TASKS.md)
 
-- The Compliance preset puts every `specialist` role in the PII zone,
-  but the planner emits both PII-side and external-research-side bots
-  as specialists. Today this requires the one-time manual override in
-  Act 2. P16.x follow-up: add a "researcher" role to the planner OR
-  make the preset capability-aware.
 - The cross-zone refusal message is good but could be even more
   specific about which dispatch path got blocked. Minor polish.

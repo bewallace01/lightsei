@@ -257,6 +257,9 @@ export default function TeamFromReadmePage() {
     const nm: TeamMember = {
       name: free.name,
       role: "specialist",
+      // Conservative default for hand-added bots; operator picks the
+      // right hint via the editor before deploying.
+      sensitivity_hint: "internal",
       summary: "(describe what this bot does)",
       command_kinds: [],
       dispatches_to: [],
@@ -490,21 +493,26 @@ export default function TeamFromReadmePage() {
               () => undefined,
             );
           }
-          // Phase 16.7: apply the user-selected trust-zone preset.
-          // Pulls the role's preset config (sensitivity_level +
-          // capabilities + dispatches_cross_zone) and PATCHes it
-          // onto the freshly-deployed agent row. Best-effort like
-          // description — a 4xx here shouldn't roll back the
-          // deploy. The bot will run with default-deny capabilities
-          // until the user fixes the PATCH from /agents/{name}.
+          // Phase 16.7 + P16.x: apply the user-selected trust-zone
+          // preset. Prefers the planner's sensitivity_hint when the
+          // preset has a hint-aware mapping (Compliance), so a research
+          // bot tagged 'public' gets internet even when the planner
+          // labeled it role='specialist'. Falls back to role-based
+          // mapping otherwise (Open / Standard, or older planner
+          // outputs without a hint). Best-effort — a 4xx here shouldn't
+          // roll back the deploy.
           const preset = zonePresets.find((p) => p.name === selectedPreset);
+          const hintCfg = m.sensitivity_hint
+            ? preset?.by_hint?.[m.sensitivity_hint]
+            : undefined;
           const roleCfg = preset?.by_role[m.role] ?? preset?.by_role["specialist"];
-          if (roleCfg) {
+          const cfg = hintCfg ?? roleCfg;
+          if (cfg) {
             patchAgent(m.name, {
-              sensitivity_level: roleCfg.sensitivity_level,
-              dispatches_cross_zone: roleCfg.dispatches_cross_zone,
+              sensitivity_level: cfg.sensitivity_level,
+              dispatches_cross_zone: cfg.dispatches_cross_zone,
             }).catch(() => undefined);
-            patchAgentCapabilities(m.name, roleCfg.capabilities).catch(
+            patchAgentCapabilities(m.name, cfg.capabilities).catch(
               () => undefined,
             );
           }
@@ -1886,51 +1894,89 @@ function ZonePresetPicker({
           );
         })}
       </div>
-      {active && (
-        <div className="mt-4 rounded-md bg-gray-50 border border-gray-200 p-3">
-          <p className="text-xs text-gray-700 mb-3">{active.tradeoff}</p>
-          <table className="w-full text-xs">
-            <thead className="text-gray-500">
-              <tr>
-                <th className="text-left font-medium pb-1">role</th>
-                <th className="text-left font-medium pb-1">zone</th>
-                <th className="text-left font-medium pb-1">capabilities</th>
-                <th className="text-left font-medium pb-1">cross-zone</th>
-              </tr>
-            </thead>
-            <tbody className="text-gray-700">
-              {(["orchestrator", "specialist", "messenger"] as const).map((role) => {
-                const cfg = active.by_role[role];
-                if (!cfg) return null;
-                return (
-                  <tr key={role} className="border-t border-gray-200">
-                    <td className="py-1.5 font-mono">{role}</td>
-                    <td className="py-1.5">
-                      <SensitivityChip level={cfg.sensitivity_level} />
-                    </td>
-                    <td className="py-1.5">
-                      {cfg.capabilities.length === 0 ? (
-                        <span className="text-gray-400 italic">none</span>
-                      ) : (
-                        <span className="font-mono">
-                          {cfg.capabilities.join(", ")}
-                        </span>
-                      )}
-                    </td>
-                    <td className="py-1.5">
-                      {cfg.dispatches_cross_zone ? (
-                        <span className="text-amber-700">↔ enabled</span>
-                      ) : (
-                        <span className="text-gray-500">off</span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      )}
+      {active && (() => {
+        // P16.x: hint-aware presets (today: Compliance) show one row per
+        // sensitivity hint, since the deploy uses the planner's hint to
+        // pick the row. Non-hint-aware presets (Open, Standard) still
+        // show by_role since they apply uniformly to all bots.
+        const hintEntries = Object.entries(active.by_hint ?? {});
+        const useHints = hintEntries.length > 0;
+        const firstColLabel = useHints ? "sensitivity" : "role";
+        return (
+          <div className="mt-4 rounded-md bg-gray-50 border border-gray-200 p-3">
+            <p className="text-xs text-gray-700 mb-3">{active.tradeoff}</p>
+            <table className="w-full text-xs">
+              <thead className="text-gray-500">
+                <tr>
+                  <th className="text-left font-medium pb-1">{firstColLabel}</th>
+                  <th className="text-left font-medium pb-1">zone</th>
+                  <th className="text-left font-medium pb-1">capabilities</th>
+                  <th className="text-left font-medium pb-1">cross-zone</th>
+                </tr>
+              </thead>
+              <tbody className="text-gray-700">
+                {useHints
+                  ? (["pii", "sensitive", "internal", "public"] as const).map((hint) => {
+                      const cfg = active.by_hint?.[hint];
+                      if (!cfg) return null;
+                      return (
+                        <tr key={hint} className="border-t border-gray-200">
+                          <td className="py-1.5 font-mono">{hint}</td>
+                          <td className="py-1.5">
+                            <SensitivityChip level={cfg.sensitivity_level} />
+                          </td>
+                          <td className="py-1.5">
+                            {cfg.capabilities.length === 0 ? (
+                              <span className="text-gray-400 italic">none</span>
+                            ) : (
+                              <span className="font-mono">
+                                {cfg.capabilities.join(", ")}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-1.5">
+                            {cfg.dispatches_cross_zone ? (
+                              <span className="text-amber-700">↔ enabled</span>
+                            ) : (
+                              <span className="text-gray-500">off</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  : (["orchestrator", "specialist", "messenger"] as const).map((role) => {
+                      const cfg = active.by_role[role];
+                      if (!cfg) return null;
+                      return (
+                        <tr key={role} className="border-t border-gray-200">
+                          <td className="py-1.5 font-mono">{role}</td>
+                          <td className="py-1.5">
+                            <SensitivityChip level={cfg.sensitivity_level} />
+                          </td>
+                          <td className="py-1.5">
+                            {cfg.capabilities.length === 0 ? (
+                              <span className="text-gray-400 italic">none</span>
+                            ) : (
+                              <span className="font-mono">
+                                {cfg.capabilities.join(", ")}
+                              </span>
+                            )}
+                          </td>
+                          <td className="py-1.5">
+                            {cfg.dispatches_cross_zone ? (
+                              <span className="text-amber-700">↔ enabled</span>
+                            ) : (
+                              <span className="text-gray-500">off</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+              </tbody>
+            </table>
+          </div>
+        );
+      })()}
     </div>
   );
 }
