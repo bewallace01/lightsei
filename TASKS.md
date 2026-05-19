@@ -7,11 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 18.8 — tests (then 18.9 demo). 18.1-18.7 shipped 2026-05-18 + 2026-05-19.**
+> **Phase 18 code-complete 2026-05-19. NOW: pick a next phase, or run 18.9 (Bailey-driven hand-product-to-non-technical-user demo).**
 
-Phase 18 (dashboard polish) is the strategic-pivot roadmap's next P0 phase. 18.1-18.7 shipped — roles-first nav, shared EmptyState component, first-run onboarding checklist, constellation cross-zone edge highlighting + tooltip zone chip, agent-detail Advanced configuration collapse, team-from-readme progress indicator + friendlier failure copy, HelpTip component + glossary + 3 surface annotations.
+Phase 18 (dashboard polish) is code-complete: 18.1-18.8 all shipped 2026-05-18 + 2026-05-19. Roles-first nav, shared EmptyState component, first-run onboarding checklist, constellation cross-zone edge highlighting + tooltip zone chip, agent-detail Advanced configuration collapse, team-from-readme progress indicator + friendlier failure copy, HelpTip component + glossary + 3 surface annotations, final test sweep (backend 758/758, dashboard tsc + next build green).
 
-NOW is 18.8: tests. Mostly `tsc --noEmit` + `next build` checks (each sub-task has been verifying these already, but a clean sweep at the end is worth doing). Then 18.9 (demo) — Bailey-driven hand-the-product-to-a-non-technical-person session.
+18.9 (demo) is Bailey-driven: hand the dashboard to someone non-technical with no explanation, watch where they get stuck, capture friction in a follow-up. Passes when a non-technical first-time user lands a deployed Compliance team from a README in under 5 minutes with no help.
+
+Next phase options per the strategic-pivot roadmap: Phase 19 (chat surface / Slack app), Phase 20 (integration breadth), Phase 21 (customer-facing widget + operator inbox). Or pick up Stripe live-mode activation when verification lands. Or the parked follow-ups (deployment cleanup, generator psycopg2 bug).
 
 Phase 16 prod demo passed 2026-05-18. Phase 17 closed in test mode 2026-05-17. Live-mode activation submitted, waiting on Stripe verification.
 
@@ -458,9 +460,15 @@ Failure-hint catalog is intentionally tiny — only patterns we've seen in real 
 
 Add new term annotations as friction surfaces. `<HelpTip term="..." />` works anywhere — the heavy lifting is in the glossary.
 
-### 18.8 — Tests
+### 18.8 — Tests ✅ shipped 2026-05-19
 
-Per the existing test pattern: `tsc --noEmit` clean across all routes after each sub-task; dashboard `next build` green; a small integration test that confirms the nav exposes the new top-level items + tucks the old ones under Advanced. No backend changes in Phase 18, so backend test suite count should be unchanged.
+Each Phase 18 sub-task verified `npx tsc --noEmit` + `npx next build` at landing time. Final clean-sweep at the end of the phase:
+
+- **Backend**: `python -m pytest` → 758 passed in 157s. Same count as start of Phase 18 — confirms no backend changes leaked through the dashboard polish work.
+- **Dashboard tsc --noEmit**: clean.
+- **Dashboard next build**: green; 26/26 routes still build.
+
+Bundle growth on Phase 18 surfaces (vs. start of phase): `/` +1.6 kB (OnboardingChecklist), `/agents` +2.0 kB (EmptyState + HelpTip), `/agents/team-from-readme` +1.0 kB (PhaseProgress + FailurePanel), `/zones` +2.3 kB (EmptyState + HelpTip). All within reasonable bounds for additive UI infrastructure.
 
 ### 18.9 — Demo
 
@@ -937,6 +945,26 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-19 — Phase 18.8 final test sweep + Phase 18 code-complete
+
+Phase 18 closes here. 7 sub-tasks across 2 sessions, each landing with its own tsc + build verification; final clean sweep at the end:
+
+- **Backend**: 758/758 pass in 157s (`python -m pytest`). Same count as the start of Phase 18 — no backend changes leaked through the polish work, as designed.
+- **Dashboard tsc --noEmit**: clean.
+- **Dashboard next build**: green; 26/26 routes still build.
+
+Bundle growth on Phase 18 surfaces:
+- `/` (+1.6 kB) — OnboardingChecklist
+- `/agents` (+2.0 kB) — EmptyState + HelpTip
+- `/agents/team-from-readme` (+1.0 kB) — PhaseProgress + FailurePanel
+- `/zones` (+2.3 kB) — EmptyState + HelpTip
+
+All within reasonable bounds for additive UI infrastructure.
+
+**Phase 18 closed: 18.1 IA pass, 18.2 EmptyState component + 4 surface rewrites, 18.3 OnboardingChecklist, 18.4 constellation cross-zone edge highlighting + tooltip zone chip, 18.5 Advanced configuration collapse on agent detail, 18.6 PhaseProgress + FailurePanel on team-from-README, 18.7 HelpTip + glossary + 3 surface annotations, 18.8 final test sweep.** 18.9 (hand-product-to-non-technical-user demo) is Bailey-driven, not code.
+
+**What this unblocks**: the non-technical-user activation funnel is now intentional end-to-end. From signup landing on the home page through deploying a Compliance team with trust zones visible on /zones, every step has signposting, useful empty states, friendly failure copy, and term tooltips where jargon would otherwise stall the user. Phase 18 was the dashboard-polish lift the 2026-05-17 strategic pivot required before driving real traffic at the product.
 
 ### 2026-05-19 — Phase 18.7 shipped: HelpTip component + glossary + 3 surface annotations
 
