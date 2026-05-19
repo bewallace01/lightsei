@@ -1149,3 +1149,148 @@ class RunEvaluation(Base):
             unique=True,
         ),
     )
+
+
+# ---------- Phase 19.1: Slack chat surface schema ---------- #
+
+
+class SlackWorkspace(Base):
+    """Phase 19.1: one row per Slack workspace that has installed the
+    Lightsei Slack app.
+
+    Owns the encrypted bot OAuth token + the binding to the Lightsei
+    workspace. `revoked_at` is set when the install is removed (we keep
+    the row for audit; the partial-unique index below excludes revoked
+    rows so a fresh install of the same Slack workspace works without
+    manual cleanup).
+
+    The bot token is encrypted via the same secrets_crypto helper used
+    by `WorkspaceSecret.encrypted_value` — never logged, never returned
+    in serializers, only decrypted when the backend needs to call Slack
+    on behalf of a workspace.
+    """
+
+    __tablename__ = "slack_workspaces"
+
+    # Slack's team_id is a stable string like 'T0123ABCD' — never reused
+    # across reinstalls of the same workspace.
+    slack_team_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    lightsei_workspace_id: Mapped[str] = mapped_column(
+        String, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    team_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    # Slack bot token, xoxb-... Encrypted at rest; the decrypt path lives
+    # in slack_oauth (Phase 19.2). Surface checks: never log this column.
+    bot_token_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    bot_user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    # SET NULL on user delete so the audit trail survives a user
+    # tear-down. Not load-bearing for any runtime path.
+    installed_by_user_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    installed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        # One Lightsei workspace per Slack workspace at a time, filtered
+        # to non-revoked installs. Postgres partial-unique index.
+        Index(
+            "ix_slack_workspaces_lightsei_workspace_active",
+            "lightsei_workspace_id",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+    )
+
+
+class SlackChannel(Base):
+    """Phase 19.1: one row per Slack channel the Lightsei app has been
+    mentioned in.
+
+    The operator-set `sensitivity_level` is what the Phase 19.4 chat
+    orchestrator uses to filter which bots can be reached from this
+    channel — same trust-zone semantics as `agents.sensitivity_level`,
+    just applied to the channel side of the request boundary.
+
+    `opted_in` defaults False: the Lightsei bot stays silent until the
+    operator explicitly turns a channel on from the dashboard. Without
+    this, every channel the bot got added to would receive responses,
+    which is the opposite of the wedge story.
+    """
+
+    __tablename__ = "slack_channels"
+
+    slack_team_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    channel_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    lightsei_workspace_id: Mapped[str] = mapped_column(
+        String, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    channel_name: Mapped[str] = mapped_column(String(256), nullable=False)
+    sensitivity_level: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        server_default=text("'internal'"),
+        default=DEFAULT_SENSITIVITY_LEVEL,
+    )
+    opted_in: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+        default=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        # Chat orchestrator's primary query is "given Lightsei
+        # workspace X + sensitivity Y, which channels are opted in?"
+        Index(
+            "ix_slack_channels_workspace_sensitivity",
+            "lightsei_workspace_id", "sensitivity_level",
+        ),
+        # FK on (slack_team_id) → slack_workspaces.slack_team_id is
+        # defined in alembic 0032's ForeignKeyConstraint. SQLAlchemy
+        # doesn't need to redeclare it for ORM operations; the runtime
+        # CASCADE on slack_workspaces revocation is enforced at the
+        # DB level.
+    )
+
+
+class SlackEvent(Base):
+    """Phase 19.1: idempotency log for inbound Slack events.
+
+    Slack retries delivery (up to 3 times within an hour and again at
+    longer intervals when a 5xx is received). Without this table we'd
+    dispatch the same `app_mention` twice. The chat webhook (19.3)
+    inserts on receive + ignores any duplicate.
+
+    Keyed on `(slack_team_id, event_id)` — event_ids are unique within
+    a Slack team but tenant-isolating is cheap defense.
+
+    Rows aged out by a cron (not in this sub-task). The `received_at`
+    index makes that cleanup cheap.
+    """
+
+    __tablename__ = "slack_events"
+
+    slack_team_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    event_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    received_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_slack_events_received_at",
+            "received_at",
+        ),
+    )

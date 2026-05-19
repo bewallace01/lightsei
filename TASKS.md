@@ -7,13 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 19.1 — Slack workspaces + channels + event-idempotency schema. Spec locked 2026-05-19.**
+> **Phase 19.2 — Slack OAuth backend. 19.1 shipped 2026-05-19.**
 
-Phase 18 (dashboard polish) is code-complete: 18.1-18.8 shipped 2026-05-18 + 2026-05-19. The non-technical-user activation funnel is intentional end-to-end on the dashboard. Phase 19 extends the wedge to chat.
+Phase 19 (chat surface) running. 19.1 shipped 2026-05-19 — alembic 0032 + SlackWorkspace + SlackChannel + SlackEvent models + 11 tests, 769/769 backend green. The schema backbone every other 19.x sub-task reads from is in place.
 
-Phase 19 (chat surface) design locked 2026-05-19: single published Slack app, Events API webhook transport, Polaris-orchestrated auto-routing, per-channel sensitivity_level for trust-zone enforcement. 9 sub-tasks (19.1 schema → 19.9 demo). 19.1 is the foundational change every other 19.x reads from.
+NOW is 19.2: Slack OAuth start + callback endpoints, `backend/slack_oauth.py` helper module mirroring `google_oauth.py`'s shape, encrypted bot-token storage on `slack_workspaces.bot_token_encrypted`.
 
-Phase 16 prod demo passed 2026-05-18. Phase 17 closed in test mode 2026-05-17. Live-mode Stripe activation submitted, waiting on verification.
+Phase 18 code-complete 2026-05-19. Phase 16 prod demo passed. Phase 17 in test mode; live-mode awaiting Stripe verification.
 
 ## Phase 12C: drop a README, get a team
 
@@ -483,7 +483,9 @@ Operationalizes the "chat-first surface" wedge from the 2026-05-17 decision. Seq
 - **Bot routing: Polaris-orchestrated auto-routing.** `@Lightsei pull our MRR` on Slack → command dispatched to Polaris (or a chat-specific orchestrator) → Polaris picks the best specialist based on capability + channel zone → specialist runs → response posts back to the channel. Reuses the orchestrator concept the dashboard already runs on. Switch trigger: orchestrator routing is wrong often enough that customers prefer explicit channel-bot binding — at that point we add per-channel bot allow-lists alongside auto-routing.
 - **Trust-zone × channel: per-channel sensitivity level.** Each Slack channel gets a `sensitivity_level` on the Lightsei side (configured in the dashboard). When a Slack event lands, Polaris only routes to bots whose `sensitivity_level` matches the channel's. A `#internal-finance` channel (set to `internal` or `sensitive`) won't reach a `public` bot. End-to-end the wedge story: PII bots can't be reached from non-PII channels; public-side bots can't be reached from PII channels. Switch trigger: customers want a more granular per-bot channel allow-list — at that point we layer it on top.
 
-### 19.1 — Schema for Slack workspaces + channels + event idempotency
+### 19.1 — Schema for Slack workspaces + channels + event idempotency ✅ shipped 2026-05-19
+
+Alembic 0032 + three new SQLAlchemy models + 11 schema tests landed in one commit. Same shape as Phase 17.1.
 
 Three new tables in a single alembic migration:
 
@@ -1022,6 +1024,20 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-19 — Phase 19.1 shipped: Slack chat-surface schema
+
+Alembic 0032 lands three new tables that every other Phase 19.x sub-task reads from. SQLAlchemy models match (SlackWorkspace, SlackChannel, SlackEvent) + 11 schema tests covering FK cascades, defaults, partial-unique index behavior, and idempotency PK enforcement.
+
+- **`slack_workspaces`**: one row per Slack install. `slack_team_id` PK, `lightsei_workspace_id` FK to workspaces (CASCADE), encrypted `bot_token_encrypted` (LargeBinary, same encryption path as WorkspaceSecret.encrypted_value), `bot_user_id`, `installed_by_user_id` (SET NULL on user delete for audit trail). `revoked_at` nullable; the partial-unique index `WHERE revoked_at IS NULL` enforces one active install per Lightsei workspace at a time but lets a revoked-then-reinstalled cycle work cleanly.
+- **`slack_channels`**: composite PK (slack_team_id, channel_id). `sensitivity_level` defaults `internal`, `opted_in` defaults `false` (silent-by-default; the wedge story — Lightsei doesn't respond in a channel until the operator opts it in). Composite index `(lightsei_workspace_id, sensitivity_level)` for the chat-orchestrator's primary query. FK cascade from slack_workspaces means revoking an install drops its channel rows.
+- **`slack_events`**: idempotency log keyed on `(slack_team_id, event_id)`. Slack retries delivery; the webhook handler inserts on receive + ignores duplicates by IntegrityError. The `(slack_team_id, ...)` prefix keeps cross-tenant event_id collisions safe. `received_at` indexed for the future cleanup cron.
+
+**Verification:** new tests in `backend/tests/test_slack_schema.py` (11 passing): roundtrip writes, workspace FK cascade, partial-unique index enforces one active install per Lightsei workspace, partial-unique allows revoked + reinstall, channel defaults are internal+silent, composite PK rejects dupes, channel cascade on slack_workspaces delete, slack_events PK enforces idempotency, same event_id allowed across different Slack teams, both indexes exist in pg_indexes.
+
+Full backend suite: **769 passed in 155s** (was 758, +11 new). 0 regressions.
+
+**What this unblocks:** 19.2 (Slack OAuth) writes to slack_workspaces; 19.3 (webhook) writes to slack_events; 19.6 (channel config endpoints) reads/writes slack_channels. Schema-first means each subsequent sub-task can land independently.
 
 ### 2026-05-19 — Phase 18.8 final test sweep + Phase 18 code-complete
 
