@@ -1,7 +1,7 @@
 """Phase 16 demo, Act 4: SDK refuses an internet call from a PII-zone bot.
 
 After deploying the Coral team via team-from-README with the Compliance
-preset, the CRM-side bot (coral-crm-bot) lives in the 'pii' zone with
+preset, the CRM-side bot (vega) lives in the 'pii' zone with
 NO capabilities — including no 'internet' capability. The SDK's httpx
 patch (Phase 16.3) refuses outbound network calls before they leave
 the process.
@@ -14,11 +14,11 @@ Run this script from your laptop after the team is deployed:
 
 Expected output:
 
-    [setup] initializing SDK as coral-crm-bot...
+    [setup] initializing SDK as vega...
     [setup] capability list pulled from prod: []
     [attempt] httpx.get('https://api.linkedin.com/v2/...')
     [result] BLOCKED — LightseiCapabilityError raised before the network call
-    [details] capability 'internet' not granted to agent 'coral-crm-bot'
+    [details] capability 'internet' not granted to agent 'vega'
               (granted: none — default-deny).
 
 This is the wedge in action: prompt-injected CRM bots can't exfiltrate
@@ -36,7 +36,9 @@ import lightsei
 from lightsei.errors import LightseiCapabilityError
 
 
-CRM_BOT_NAME = "coral-crm-bot"
+CRM_BOT_NAME = "vega"  # PII-zone bot from the deployed Coral team
+                       # (does HubSpot enrichment; tagged 'pii' by the
+                       # planner; zero capabilities under Compliance).
 
 
 def main() -> int:

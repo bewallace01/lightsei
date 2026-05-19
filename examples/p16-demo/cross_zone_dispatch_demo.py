@@ -1,35 +1,49 @@
-"""Phase 16 demo, Act 5: SDK refuses a cross-zone dispatch.
+"""Phase 16 demo, Act 5: SDK refuses a forbidden dispatch.
 
-After the Coral team is deployed with the Compliance preset:
+After the Coral team is deployed with the Compliance preset, the
+PII-side bot (vega) tries to lightsei.send_command(...) to the
+public-side bot (rigel). The SDK refuses BEFORE the network call,
+proving prompt injection / runaway loops can't move PII data across
+the zone boundary.
 
-  - coral-crm-bot         sensitivity_level='pii',    dispatches_cross_zone=False
-  - coral-research-bot    sensitivity_level='public', dispatches_cross_zone=False
+Under Compliance, two backstops apply, in order:
 
-When coral-crm-bot tries to `lightsei.send_command(agent='coral-research-bot', ...)`,
-the SDK's command dispatcher (Phase 16.4) checks the target's zone
-BEFORE making the network call, sees a mismatched zone with cross-zone
-disabled, and raises LightseiCrossZoneError.
+1. Capability gate (Phase 16.3): vega has NO capabilities — not even
+   'send_command' — so the SDK refuses on the capability check before
+   it ever evaluates the target's zone. This is the gate that fires
+   in the standard Compliance demo.
 
-Run this script from your laptop after the team is deployed:
+2. Cross-zone gate (Phase 16.4): even if vega WERE granted
+   'send_command' (someone overrode the preset), dispatching from
+   pii → public would still be refused because
+   dispatches_cross_zone=False on vega.
+
+The script catches BOTH error types so the demo works regardless of
+which gate fires. Strong guarantee: two backstops, the more
+restrictive one fires first.
+
+Run from your laptop after the team is deployed:
 
     export LIGHTSEI_API_KEY=bk_...    # workspace api key from /account
     export LIGHTSEI_API_URL=https://api.lightsei.com
     python examples/p16-demo/cross_zone_dispatch_demo.py
 
-Expected output:
+Expected output (default Compliance state):
 
-    [setup] initializing SDK as coral-crm-bot (zone='pii')...
-    [attempt] coral-crm-bot → send_command(coral-research-bot, kind='research_company')
-    [result] BLOCKED — LightseiCrossZoneError raised before the network call
-    [details] source: coral-crm-bot (pii)
-              target: coral-research-bot (public)
-              dispatches_cross_zone is False on the source — the framework
-              refuses the call. The only way data crosses the zone is via
-              a human-mediated handoff with lightsei.handoff_span.
+    [setup] initializing SDK as vega (zone='pii')...
+    [attempt] vega → send_command(rigel, kind='research_company')
+    [result] BLOCKED — LightseiCapabilityError raised before the network call
+    [details] capability 'send_command' not granted to agent 'vega'
+              (granted: none — default-deny).
+              A pii bot literally cannot initiate send_command — the
+              capability gate refuses even before the cross-zone gate
+              would. Two backstops; the more restrictive one fires first.
 
-The wedge claim — your CRM data cannot leak to an internet-side bot via
-prompt injection, runaway agent loops, or accidental developer wiring.
-The framework enforces the boundary, not vibes.
+The wedge claim — your CRM data cannot leak to an internet-side bot
+via prompt injection, runaway agent loops, or accidental developer
+wiring. The framework enforces the boundary, not vibes. The only
+sanctioned way data crosses zones is a human-mediated
+lightsei.handoff_span (Act 6).
 """
 from __future__ import annotations
 
@@ -37,11 +51,11 @@ import os
 import sys
 
 import lightsei
-from lightsei.errors import LightseiCrossZoneError
+from lightsei.errors import LightseiCapabilityError, LightseiCrossZoneError
 
 
-CRM_BOT_NAME = "coral-crm-bot"
-RESEARCH_BOT_NAME = "coral-research-bot"
+CRM_BOT_NAME = "vega"
+RESEARCH_BOT_NAME = "rigel"
 
 
 def main() -> int:
@@ -64,7 +78,7 @@ def main() -> int:
     )
     try:
         lightsei.send_command(
-            agent=RESEARCH_BOT_NAME,
+            target_agent=RESEARCH_BOT_NAME,
             kind="research_company",
             payload={
                 # In a real exfiltration scenario this is where customer
@@ -74,7 +88,26 @@ def main() -> int:
                 "contact_email": "fake@example.com",
             },
         )
+    except LightseiCapabilityError as exc:
+        # Under the Compliance preset, vega has NO capabilities — not
+        # even 'send_command'. So the capability gate fires BEFORE
+        # we even reach the cross-zone check. That's actually the
+        # stronger guarantee: pii bots literally can't initiate a
+        # dispatch at all, let alone one that targets a different zone.
+        print("[result] BLOCKED — LightseiCapabilityError raised before the network call")
+        print(f"[details] capability {exc.capability!r} not granted to agent {exc.agent_name!r}")
+        print(f"          (granted: {exc.granted or 'none — default-deny'}).")
+        print("          A pii bot literally cannot initiate send_command — the")
+        print("          capability gate refuses even before the cross-zone gate")
+        print("          would. Two backstops; the more restrictive one fires first.")
+        return 0
     except LightseiCrossZoneError as exc:
+        # Fallback for source bots that DO have send_command but try
+        # to dispatch across a zone boundary (e.g. polaris → vega).
+        # Under the Compliance preset's hint-aware mapping, pii bots
+        # don't have send_command, so this branch usually doesn't fire
+        # with vega as the source — but it would for polaris → vega
+        # if you wanted to exercise the cross-zone gate specifically.
         print("[result] BLOCKED — LightseiCrossZoneError raised before the network call")
         print(f"[details] source: {exc.source_agent} ({exc.source_zone})")
         print(f"          target: {exc.target_agent} ({exc.target_zone})")

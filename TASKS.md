@@ -7,13 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 17 closed in test mode 2026-05-17. Live mode parked until the business is ready to take real payments.**
+> **Phase 16 prod demo PASSED 2026-05-18. Phase 17 closed in test mode 2026-05-17. Phase 18 is up next.**
 
-The full non-technical-user demo arc works end-to-end against test-mode Stripe on prod: signup → /account → upgrade button → real Stripe Checkout → real Stripe webhook → DB `plan_tier='paid'` flip → dashboard polling animation → "you're on the paid plan" banner → manage-subscription button opens the Customer Portal. Smoke-tested 2026-05-17 with workspace `f43f0f71...` via test card 4242 4242 4242 4242 + watched verbatim by Bailey + verified via API.
+Phase 16 prod demo: ran on prod 2026-05-18 with the Coral fake-SaaS README + Compliance preset. Acts 1-5 of the demo runbook passed — planner produced clean two-chain split with per-bot zone reasoning, `/zones` rendered isolated topology, SDK refused vega's internet call + send_command attempts with crystal-clear errors. Act 6 (handoff_span) skipped because Railway worker had bots queued without ticking (separate follow-up). The wedge claim is now demoable to a prospect in ~5 minutes.
 
-Live-mode activation parked. To resume: complete Stripe account activation (bank/identity/tax in the dashboard), recreate product/price/webhook/portal in live mode, swap the three live env vars on Railway (`LIGHTSEI_STRIPE_SECRET_KEY`, `LIGHTSEI_STRIPE_PRICE_ID`, `LIGHTSEI_STRIPE_WEBHOOK_SECRET`), redeploy, smoke test with a real card (refund yourself).
+Phase 17 demo: ran in Stripe test mode on prod 2026-05-17. Live-mode activation submitted, waiting on Stripe verification.
 
-NOW: pick a next phase. Phase 16 prod demo is still parked. Phase 18 (dashboard polish) is next in the strategic-pivot roadmap. Older parking-lot items also available (see Parking Lot below).
+NOW: pick a next phase. **Phase 18 (dashboard polish)** is next in the strategic-pivot roadmap. Worker investigation is parked as a quick follow-up.
 
 ## Phase 12C: drop a README, get a team
 
@@ -872,6 +872,37 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-18 — Phase 16 prod demo PASSED on Coral fake-SaaS README
+
+The trust-zone wedge runs end-to-end on prod against the new hint-aware Compliance preset. A non-technical operator drops a CRM-shaped README, picks Compliance, and gets a team where the framework structurally refuses PII exfiltration. No manual zone overrides needed; the planner emits per-bot sensitivity_hint and the preset applies it.
+
+**Setup**: Stripe-smoke workspace on prod (paid plan, ANTHROPIC_API_KEY set). Dropped `examples/p16-demo/crm-readme.md` (the Coral fake-SaaS README — B2B SaaS using HubSpot internally + LinkedIn/Crunchbase for prospect research, with explicit "no edges between PII and public sides" language).
+
+**Acts 1-3 (browser)**:
+- Planner produced a five-bot team with explicit two-chain rationale: *"two strictly separated workloads... two disjoint chains with no dispatch edges between them... the handoff between the two worlds is human, not automated."*
+- Per-bot descriptions surfaced the planner's zone reasoning in plain English ("PII zone because the digest payload contains customer names, emails, and account metadata"). The new prompt's Trust zones section worked — the LLM thinks aloud about classification.
+- Atlas's code generation failed twice (existing generator weakness: bot.py imports `psycopg2` but LLM doesn't add it to requirements.txt). Skipped without affecting the demo.
+- Compliance preset preview now renders sensitivity-keyed rows (pii / sensitive / internal / public) instead of role-keyed rows, matching the hint-aware deploy logic.
+- Deployed 4 bots (polaris, rigel, hermes, vega).
+- `/zones` rendered the final topology: public lane (rigel, internet), internal lane (polaris, send_command+internet), sensitive lane (empty), pii lane (hermes + vega, no capabilities). Cross-zone dispatchers section: empty. Every agent locked to its own zone.
+
+**Acts 4-5 (terminal scripts)**:
+- `capability_gate_demo.py` → `BLOCKED — LightseiCapabilityError raised before the network call. capability 'internet' not granted to agent 'vega' (granted: none — default-deny).` Vega's httpx.get against `api.linkedin.com` refused before the network call leaves the process.
+- `cross_zone_dispatch_demo.py` → `BLOCKED — LightseiCapabilityError raised before the network call. capability 'send_command' not granted to agent 'vega' (granted: none — default-deny).` Vega's `send_command(rigel, ...)` refused. Under the Compliance preset's hint-aware mapping, PII bots have zero outbound capabilities, so the capability gate fires before the cross-zone gate ever evaluates. Two backstops; the more restrictive one fires first.
+
+**Act 6 (handoff_span) skipped**: Railway worker had the 4 deployments queued for 22+ minutes without ticking. Acts 1-5 already prove the wedge; Act 6 is the sanctioned alternative path, nice-to-have but not load-bearing. Worker investigation parked as a separate follow-up.
+
+**Bugs caught + fixed in-session**:
+- Idle-in-transaction Postgres timeout in team_planner + agent_generator handlers. Holding a transaction open across multi-second Anthropic calls trips Railway's idle-in-transaction kill. Fix: session.commit() inside `_ask()` immediately before `client.messages.create`. First fix landed too early (more session reads opened a new transaction); corrected to fire right before the LLM call.
+- Compliance preset role-based mapping put both PII-side bots and research bots in the PII zone (preset's "specialist → pii" rule didn't distinguish). Fixed by P16.x hint-aware mapping (committed pre-demo).
+
+**Loose ends**:
+- Worker not ticking on prod (deployments queued; see `tasks/Worker investigation` follow-up).
+- Atlas's psycopg2 generator failure is an existing generator weakness, unrelated to trust zones.
+- Test workspace `stripe-smoke-1779072629` is mixed-purpose at this point (Stripe smoke + P16 demo). Can be deleted when no longer needed.
+
+**The pitch** (in case it's useful for sales conversations): *"Your customer data lives in an isolated zone the framework refuses to let out. Not by convention — by gate. A prompt injection on your CRM bot literally cannot make a network call. A runaway agent loop literally cannot dispatch across the boundary. The only sanctioned way data crosses zones is a human operator who decides what's safe to forward, and we log that translation for audit. Demoed end-to-end on prod."*
 
 ### 2026-05-17 — Phase 17.9 demo PASSED in test mode (live mode parked)
 

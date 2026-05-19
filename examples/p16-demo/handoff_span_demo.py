@@ -1,7 +1,7 @@
 """Phase 16 demo, Act 6: human-mediated handoff joins two zones in the trace.
 
-The trust-zone boundary is one-way by default: coral-crm-bot can't
-dispatch to coral-research-bot directly (Act 5 proves this). But real
+The trust-zone boundary is one-way by default: vega can't
+dispatch to rigel directly (Act 5 proves this). But real
 work needs the two sides to coordinate.
 
 The intended path is a human-in-the-loop: the operator reads the
@@ -20,8 +20,8 @@ recent run:
 Expected output:
 
     [setup] initializing SDK as operator (no agent_name)...
-    [lookup] most recent coral-crm-bot run:       run_abc123
-    [lookup] most recent coral-research-bot run:  run_def456
+    [lookup] most recent vega run:       run_abc123
+    [lookup] most recent rigel run:  run_def456
     [emit] handoff_span(from=run_abc123, to=run_def456, sanitized_prompt=...)
     [result] OK — handoff event written.
     [view] open https://app.lightsei.com/runs/run_abc123 to see the
@@ -42,8 +42,8 @@ import httpx
 import lightsei
 
 
-CRM_BOT_NAME = "coral-crm-bot"
-RESEARCH_BOT_NAME = "coral-research-bot"
+CRM_BOT_NAME = "vega"
+RESEARCH_BOT_NAME = "rigel"
 
 
 def latest_run(api_url: str, api_key: str, agent_name: str) -> Optional[str]:
