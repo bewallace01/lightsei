@@ -19,6 +19,7 @@ import {
   patchAgent,
 } from "../api";
 import EmptyState from "../EmptyState";
+import HelpTip from "../HelpTip";
 import { SensitivityChip } from "../sensitivity";
 
 
@@ -320,8 +321,18 @@ export default function AgentsPage() {
                 <th className="px-4 py-3 font-medium">Tick</th>
                 <th className="px-4 py-3 font-medium">Runs (24h)</th>
                 <th className="px-4 py-3 font-medium">Cost (24h)</th>
-                <th className="px-4 py-3 font-medium">Quality (7d)</th>
-                <th className="px-4 py-3 font-medium">Zone</th>
+                <th className="px-4 py-3 font-medium">
+                  <span className="inline-flex items-center">
+                    Quality (7d)
+                    <HelpTip term="quality_signal" placement="above" />
+                  </span>
+                </th>
+                <th className="px-4 py-3 font-medium">
+                  <span className="inline-flex items-center">
+                    Zone
+                    <HelpTip term="sensitivity_zone" placement="above" />
+                  </span>
+                </th>
                 <th className="px-4 py-3 font-medium">Last seen</th>
                 <th className="px-4 py-3 font-medium text-right"></th>
               </tr>

@@ -25,6 +25,7 @@ import {
   fetchAgents,
 } from "../api";
 import EmptyState from "../EmptyState";
+import HelpTip from "../HelpTip";
 import { SENSITIVITY_TONE, SensitivityChip } from "../sensitivity";
 
 
@@ -81,8 +82,9 @@ export default function ZonesPage(): JSX.Element {
 
   return (
     <div className="max-w-6xl mx-auto px-6 py-8">
-      <h1 className="text-2xl font-semibold tracking-tight mb-1">
+      <h1 className="text-2xl font-semibold tracking-tight mb-1 flex items-center">
         Trust zones
+        <HelpTip term="sensitivity_zone" placement="auto" />
       </h1>
       <p className="text-sm text-gray-500 mb-6">
         Where does your workspace&apos;s data live, and what can cross between

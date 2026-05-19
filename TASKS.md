@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 18.7 — inline help + tooltips on technical terms. 18.1-18.6 shipped 2026-05-18 + 2026-05-19.**
+> **Phase 18.8 — tests (then 18.9 demo). 18.1-18.7 shipped 2026-05-18 + 2026-05-19.**
 
-Phase 18 (dashboard polish) is the strategic-pivot roadmap's next P0 phase. 18.1-18.6 shipped — roles-first nav, shared EmptyState component, first-run onboarding checklist, constellation cross-zone edge highlighting + tooltip zone chip, agent-detail Advanced configuration collapse, team-from-readme progress indicator + friendlier failure copy.
+Phase 18 (dashboard polish) is the strategic-pivot roadmap's next P0 phase. 18.1-18.7 shipped — roles-first nav, shared EmptyState component, first-run onboarding checklist, constellation cross-zone edge highlighting + tooltip zone chip, agent-detail Advanced configuration collapse, team-from-readme progress indicator + friendlier failure copy, HelpTip component + glossary + 3 surface annotations.
 
-NOW is 18.7: a `<Tooltip>` component + tooltip annotations on 8-10 of the most-confusing technical terms surfaced in the Phase 16/17 UI (sensitivity zone, capability, dispatch chain, cross-zone dispatch, quality signal, verdict, workspace secret, command kind, orchestrator/specialist/messenger, handoff span).
+NOW is 18.8: tests. Mostly `tsc --noEmit` + `next build` checks (each sub-task has been verifying these already, but a clean sweep at the end is worth doing). Then 18.9 (demo) — Bailey-driven hand-the-product-to-a-non-technical-person session.
 
 Phase 16 prod demo passed 2026-05-18. Phase 17 closed in test mode 2026-05-17. Live-mode activation submitted, waiting on Stripe verification.
 
@@ -447,9 +447,16 @@ Two additive polishes:
 
 Failure-hint catalog is intentionally tiny — only patterns we've seen in real usage. Adding new hints is one entry per pattern in `FAILURE_HINTS`.
 
-### 18.7 — Inline help + tooltips
+### 18.7 — Inline help + tooltips ✅ shipped 2026-05-19
 
-Add a `<Tooltip>` component that wraps a term with a small "(?)" affordance; hover opens a tooltip with a 1-2 line explanation. Apply to 8-10 terms surfaced in the Phase 16 + 17 UI: `sensitivity zone`, `capability`, `dispatch chain`, `cross-zone dispatch`, `quality signal`, `verdict`, `workspace secret`, `command kind`, `orchestrator / specialist / messenger`, `handoff span`. Long-form explanations link to docs (which now lives under Advanced).
+`dashboard/app/HelpTip.tsx` + `dashboard/app/glossary.ts` land as paired infra:
+
+- **Glossary** has 12 entries today: sensitivity_zone, capability, cross_zone_dispatch, dispatch_chain, quality_signal, verdict, workspace_secret, command_kind, orchestrator, specialist, messenger, handoff_span. Each is a short 1-2 line description; some have optional `docsHref` pointing at the docs (now under the Advanced nav dropdown).
+- **HelpTip** is CSS-only show/hide via Tailwind's `group-hover` + `group-focus-within` variants. No JS state; tooltips work via keyboard focus too. Tooltip is positioned below the trigger by default (`placement="auto"`) or above (`placement="above"`) for triggers near the bottom of a container.
+
+**Wired into three highest-impact surfaces tonight**: `/zones` page header (sensitivity_zone), `/agents` Quality column header (quality_signal), `/agents` Zone column header (sensitivity_zone). The agent detail page's Trust zone section already has rich in-place explanations, so HelpTip would be redundant there.
+
+Add new term annotations as friction surfaces. `<HelpTip term="..." />` works anywhere — the heavy lifting is in the glossary.
 
 ### 18.8 — Tests
 
@@ -930,6 +937,21 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-19 — Phase 18.7 shipped: HelpTip component + glossary + 3 surface annotations
+
+`dashboard/app/HelpTip.tsx` + `dashboard/app/glossary.ts` land as paired infra. Glossary has 12 entries today covering the most-confusing Phase 16/17 terms. HelpTip is CSS-only show/hide via Tailwind `group-hover` + `group-focus-within` — works on keyboard focus too, no JS state.
+
+**Wired into three surfaces tonight**:
+- `/zones` page H1 — sensitivity_zone tooltip explaining the 4-step ladder.
+- `/agents` Quality column header — quality_signal tooltip explaining what the chip means.
+- `/agents` Zone column header — sensitivity_zone tooltip (same term, second occurrence).
+
+Skipped the agent detail page's Trust zone section since it already has rich in-place explanations. Future annotations are one-liner additions: `<HelpTip term="..." />` anywhere; heavy lifting is in the glossary.
+
+**One typing hiccup caught + fixed**: the glossary was initially typed with `satisfies Record<string, GlossaryEntry>` after a `const` literal, which narrowed per-key types and broke HelpTip's `entry.docsHref` access on keys without that field. Fix: typed the export as `Record<string, GlossaryEntry>` directly + hand-wrote the `GlossaryKey` union so typos in `<HelpTip term="...">` still error at compile time.
+
+**Verification:** `npx tsc --noEmit` clean; `npx next build` green; 26/26 routes still build.
 
 ### 2026-05-19 — Phase 18.6 shipped: team-from-README progress indicator + friendlier failure copy
 
