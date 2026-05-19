@@ -141,6 +141,12 @@ def run_eval_job(
             "skipped_reason": "no_samples",
         }
 
+    # Close the read transaction before the judge calls. The preflight
+    # checks and sampler open an implicit Postgres transaction; holding
+    # it idle during one or more Anthropic calls trips Railway's
+    # idle-in-transaction timeout and loses the eval writes.
+    session.commit()
+
     # 4. Judge loop. max_retries kept modest (2) so a transient 529 on
     # one sample doesn't burn the whole cycle's wall time — the sample
     # will be a candidate again next cycle.
