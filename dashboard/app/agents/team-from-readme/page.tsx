@@ -389,7 +389,9 @@ export default function TeamFromReadmePage() {
    *  existing (out-of-team) agents are skipped here because we don't
    *  know their command kinds from the plan — the user can wire those
    *  on the agent's auto-approval page if they want. */
-  const installRules = async (): Promise<RulesResult> => {
+  const installRules = async (
+    deploymentOutcomes: Record<string, DeployResult>,
+  ): Promise<RulesResult> => {
     const teamByName = new Map(team.map((m) => [m.name, m]));
     const installed: RulesResult["installed"] = [];
     const failed: RulesResult["failed"] = [];
@@ -397,11 +399,11 @@ export default function TeamFromReadmePage() {
     const promises: Promise<void>[] = [];
     for (const src of team) {
       // Only wire rules for bots that actually got deployed.
-      if (deployResults[src.name]?.status !== "deployed") continue;
+      if (deploymentOutcomes[src.name]?.status !== "deployed") continue;
       for (const targetName of src.dispatches_to) {
         const targetMember = teamByName.get(targetName);
         if (!targetMember) continue; // existing-agent edge; skip
-        if (deployResults[targetName]?.status !== "deployed") continue;
+        if (deploymentOutcomes[targetName]?.status !== "deployed") continue;
         for (const kind of targetMember.command_kinds) {
           const rule = {
             source_agent: src.name,
@@ -471,6 +473,7 @@ export default function TeamFromReadmePage() {
     for (const m of approved) initial[m.name] = { status: "pending" };
     setDeployResults(initial);
 
+    const finalDeployResults: Record<string, DeployResult> = {};
     await Promise.allSettled(
       approved.map(async (m) => {
         const out = genResults[m.name]?.output;
@@ -481,9 +484,13 @@ export default function TeamFromReadmePage() {
         }));
         try {
           const dep = await zipAndDeploy(m.name, out.bot_py, out.requirements_txt);
+          finalDeployResults[m.name] = {
+            status: "deployed",
+            deploymentId: dep.id,
+          };
           setDeployResults((cur) => ({
             ...cur,
-            [m.name]: { status: "deployed", deploymentId: dep.id },
+            [m.name]: finalDeployResults[m.name],
           }));
           // Best-effort: carry the LLM rationale as the agent's
           // description so /agents has something to show. Don't block
@@ -521,12 +528,13 @@ export default function TeamFromReadmePage() {
             router.replace("/login");
             return;
           }
+          finalDeployResults[m.name] = {
+            status: "failed",
+            error: e instanceof Error ? e.message : String(e),
+          };
           setDeployResults((cur) => ({
             ...cur,
-            [m.name]: {
-              status: "failed",
-              error: e instanceof Error ? e.message : String(e),
-            },
+            [m.name]: finalDeployResults[m.name],
           }));
         }
       }),
@@ -536,7 +544,7 @@ export default function TeamFromReadmePage() {
     // failures here surface in the success view but don't roll back
     // the deploy.
     try {
-      const r = await installRules();
+      const r = await installRules(finalDeployResults);
       setRulesResult(r);
     } catch (e) {
       setRulesResult({

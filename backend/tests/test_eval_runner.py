@@ -247,6 +247,45 @@ def test_run_eval_job_writes_verdict_row(client, alice, monkeypatch):
     assert float(row.judge_cost_usd) > 0
 
 
+def test_run_eval_job_commits_before_judge_call(client, alice, monkeypatch):
+    """Regression for Railway's idle-in-transaction timeout: the eval
+    handler must close its read transaction before the long Anthropic
+    judge call starts."""
+    workspace_id = alice["workspace"]["id"]
+    api_key = alice["api_key"]["plaintext"]
+    _seed_anthropic_secret(client, api_key)
+
+    now = datetime.now(timezone.utc)
+    with session_scope() as s:
+        _ensure_agent(s, workspace_id, name="argus")
+        _seed_judgeable_run(
+            s, workspace_id, agent_name="argus", run_id="argus-r1", now=now,
+        )
+
+    calls = {"commits": 0}
+
+    def fake_create(**kw):
+        assert calls["commits"] >= 1
+        return _fake_verdict_response()
+
+    fake = _FakeClient()
+    fake.messages.create = fake_create
+    monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
+
+    with session_scope() as s:
+        original_commit = s.commit
+
+        def commit_spy():
+            calls["commits"] += 1
+            return original_commit()
+
+        monkeypatch.setattr(s, "commit", commit_spy)
+        result = eval_runner.run_eval_job(s, workspace_id, {})
+
+    assert result["evaluated"] == 1
+    assert calls["commits"] >= 2
+
+
 def test_run_eval_job_records_cost_on_lightsei_system(client, alice, monkeypatch):
     """Phase 12D rollup parity: judge spend must land on
     lightsei.system so /cost reflects it the same way generation
