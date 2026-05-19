@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 18.6 — polish team-from-README flow. 18.1-18.5 (each scoped tonight) shipped 2026-05-18.**
+> **Phase 18.7 — inline help + tooltips on technical terms. 18.1-18.6 shipped 2026-05-18 + 2026-05-19.**
 
-Phase 18 (dashboard polish) is the strategic-pivot roadmap's next P0 phase. 18.1-18.5 shipped 2026-05-18 — roles-first nav, shared EmptyState component, first-run onboarding checklist, constellation cross-zone edge highlighting + tooltip zone chip, agent-detail Advanced configuration collapse. Each scoped to the additive minimum that shipped safely in one session; bigger restructure work parked for future slices.
+Phase 18 (dashboard polish) is the strategic-pivot roadmap's next P0 phase. 18.1-18.6 shipped — roles-first nav, shared EmptyState component, first-run onboarding checklist, constellation cross-zone edge highlighting + tooltip zone chip, agent-detail Advanced configuration collapse, team-from-readme progress indicator + friendlier failure copy.
 
-NOW is 18.6: polish the team-from-README flow. Add a progress indicator across the plan → generate → review → deploy phases, friendlier failure copy when code-gen fails (the psycopg2-crash scenario from the demo).
+NOW is 18.7: a `<Tooltip>` component + tooltip annotations on 8-10 of the most-confusing technical terms surfaced in the Phase 16/17 UI (sensitivity zone, capability, dispatch chain, cross-zone dispatch, quality signal, verdict, workspace secret, command kind, orchestrator/specialist/messenger, handoff span).
 
 Phase 16 prod demo passed 2026-05-18. Phase 17 closed in test mode 2026-05-17. Live-mode activation submitted, waiting on Stripe verification.
 
@@ -438,9 +438,14 @@ Wrapped Description + Model + Schedule editors in a collapsed `<details>` panel 
 
 **Deferred to future 18.5 slices**: full hero (name + zone chip + status + quick actions) at the top, two-column layout for config + activity, more aggressive folding of developer-flavored sections (Instances / Deployments could potentially live in Advanced too, but that has bigger UX implications since "is my bot running?" is a primary question). Each is its own design lift.
 
-### 18.6 — Polish team-from-README flow
+### 18.6 — Polish team-from-README flow ✅ shipped 2026-05-19
 
-The three-phase flow (plan → review → deploy → success) is functional but visually unsignposted. Add a progress indicator at the top, clearer "next-step" affordances at each transition, and better failure messaging when a bot's code generation fails (the psycopg2 failure during the Coral demo was a real example of where the failure copy could be friendlier — link to "edit the request and retry" rather than just showing the error).
+Two additive polishes:
+
+- **`PhaseProgress`** — 5-step numbered indicator (Plan → Generate → Review → Deploy → Done) at the top of the page. Steps before current show a green check; current is accent-colored; future are gray. Visible from the moment the user lands so they see the path ahead.
+- **`FailurePanel`** — replaces the bare red-error line on failed code-gen rows. Wraps the raw error with a "what you can do" preamble (retry / edit & retry / skip), a pattern-matched hint catalog (today: psycopg2 import + generic missing-import patterns; expandable), and the raw error tucked behind a `<details>` for when the user needs it. The psycopg2 hint specifically addresses the failure mode from the Phase 16 Coral demo run.
+
+Failure-hint catalog is intentionally tiny — only patterns we've seen in real usage. Adding new hints is one entry per pattern in `FAILURE_HINTS`.
 
 ### 18.7 — Inline help + tooltips
 
@@ -925,6 +930,17 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-19 — Phase 18.6 shipped: team-from-README progress indicator + friendlier failure copy
+
+Two additive polishes on `/agents/team-from-readme`:
+
+- **PhaseProgress component** — 5-step numbered indicator (Plan → Generate → Review → Deploy → Done) renders at the top of the page, visible from the moment a user lands so the path ahead is obvious. Steps before current show a green check; current is accent-highlighted; future are gray. Connector lines between steps fill green as the user progresses.
+- **FailurePanel component** — replaces the bare red-error line on failed code-gen rows. Wraps the raw error with a "what you can do" preamble (retry / edit & retry / skip), a pattern-matched hint catalog (today: psycopg2 import + generic missing-import patterns; expandable), and the raw error tucked behind a `<details>` for when the user needs it. The psycopg2 hint specifically addresses the failure mode the Phase 16 Coral demo hit twice — telling the user to use `psycopg[binary]` instead of `psycopg2` in their retry prompt.
+
+The failure hint catalog (`FAILURE_HINTS`) is intentionally tiny — only patterns we've seen in real usage. Each entry is a `(RegExp, message)` pair. Add new ones as failure modes recur in real demos / customer use.
+
+**Verification:** `npx tsc --noEmit` clean; `npx next build` green; 26/26 routes still build.
 
 ### 2026-05-18 — Phase 18.5 (first slice) shipped: Advanced configuration collapse on agent detail
 

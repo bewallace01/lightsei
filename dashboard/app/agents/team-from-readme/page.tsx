@@ -581,12 +581,17 @@ export default function TeamFromReadmePage() {
       <h1 className="text-2xl font-semibold tracking-tight">
         ✨ propose a team from a README
       </h1>
-      <p className="text-sm text-gray-500 mt-1 mb-8 max-w-2xl">
+      <p className="text-sm text-gray-500 mt-1 mb-6 max-w-2xl">
         Drop a project README (or paste freeform context, or point at a
         GitHub repo) and Lightsei proposes a team of 3-7 bots wired
         into a constellation. Review and edit the plan; nothing is
         deployed until you confirm.
       </p>
+
+      {/* Phase 18.6: progress indicator across the 5-phase flow so
+          first-time users see the path ahead. Renders before the
+          input card so it's the first orientation signal. */}
+      <PhaseProgress phase={phase} className="mb-8" />
 
       <InputCard
         readmeText={readmeText}
@@ -1523,9 +1528,7 @@ function GenerationRow({
       </div>
 
       {result.status === "failed" && result.error && (
-        <p className="mt-2 text-xs text-red-700 break-words">
-          {result.error}
-        </p>
+        <FailurePanel error={result.error} />
       )}
 
       {editingDesc && (
@@ -1980,3 +1983,156 @@ function ZonePresetPicker({
     </div>
   );
 }
+
+
+// ---------- Phase 18.6: friendlier failure copy on a code-gen row ---------- //
+//
+// The generator validator catches a class of LLM mistakes (imports declared
+// in bot.py that aren't in requirements.txt, schemas the bot won't satisfy,
+// etc.). Before 18.6 the row just printed the raw error. Now we wrap it with
+// a "what you can do" preamble + a pattern-matched hint when we recognize
+// the failure shape.
+//
+// Hint catalog is intentionally tiny — only patterns we've seen in real
+// usage (psycopg2 is the one that hit the Phase 16 Coral demo). Each hint
+// is a hand-written sentence directing the user at the most-likely fix.
+// Better to surface ONE strong hint when we know the answer than to drown
+// the user in generic options.
+
+const FAILURE_HINTS: { match: RegExp; hint: string }[] = [
+  {
+    // The Coral demo's atlas bot hit this twice: bot.py imported psycopg2
+    // but requirements.txt didn't. The generator validator caught it but
+    // the LLM kept emitting the same broken combo on retry. Easiest fix
+    // is using psycopg[binary] which is what the rest of Lightsei uses.
+    match: /psycopg2/i,
+    hint: "Tip: the LLM tends to leave 'psycopg2' out of requirements.txt. Use 'edit & retry' and add a note like: \"Use psycopg[binary] for Postgres (not psycopg2), and make sure every import in bot.py is in requirements.txt.\"",
+  },
+  {
+    match: /imports? in bot\.py aren't declared in requirements\.txt/i,
+    hint: "Tip: the LLM imported a library it didn't add to requirements.txt. Use 'edit & retry' and tell it explicitly to declare every imported library in requirements.txt.",
+  },
+];
+
+function failureHintFor(error: string): string | null {
+  for (const h of FAILURE_HINTS) {
+    if (h.match.test(error)) return h.hint;
+  }
+  return null;
+}
+
+function FailurePanel({ error }: { error: string }) {
+  const hint = failureHintFor(error);
+  return (
+    <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2.5 text-xs text-red-800">
+      <div className="font-medium mb-1">Code-gen failed.</div>
+      <p className="text-red-700 mb-2">
+        You can <span className="font-mono">retry</span> (sometimes the LLM
+        gets it on a second try), <span className="font-mono">edit &amp; retry</span>{" "}
+        (tweak the description, then re-run), or <span className="font-mono">skip</span>{" "}
+        this bot and continue with the rest of the team.
+      </p>
+      {hint && (
+        <div className="rounded bg-white/70 border border-red-200 px-2 py-1.5 mb-2 text-red-900">
+          {hint}
+        </div>
+      )}
+      <details className="mt-1">
+        <summary className="cursor-pointer text-red-600 hover:text-red-800">
+          show raw error
+        </summary>
+        <pre className="mt-1 whitespace-pre-wrap break-words font-mono text-[11px]">
+          {error}
+        </pre>
+      </details>
+    </div>
+  );
+}
+
+
+// ---------- Phase 18.6: progress indicator across the 5-phase flow ---------- //
+//
+// Renders five numbered steps along the top of the team-from-readme page.
+// Steps before the current phase show a green check; current is highlighted
+// in accent color; future steps are gray. The full 5-step path is visible
+// from the moment a user lands so they see where they're headed (plan →
+// generate → review → deploy → done).
+
+const PHASE_STEPS: { phase: Phase; label: string }[] = [
+  { phase: "plan", label: "Plan" },
+  { phase: "generating", label: "Generate" },
+  { phase: "review", label: "Review" },
+  { phase: "deploying", label: "Deploy" },
+  { phase: "success", label: "Done" },
+];
+
+function PhaseProgress({
+  phase,
+  className,
+}: {
+  phase: Phase;
+  className?: string;
+}) {
+  const currentIdx = PHASE_STEPS.findIndex((s) => s.phase === phase);
+  return (
+    <ol
+      className={
+        "flex items-center gap-2 text-sm " + (className ?? "")
+      }
+      aria-label="Progress through the team-from-readme flow"
+    >
+      {PHASE_STEPS.map((step, i) => {
+        const isPast = i < currentIdx;
+        const isCurrent = i === currentIdx;
+        // success phase: when we reach the last step, mark it as
+        // current with a check (the deploy has finished).
+        const showCheck = isPast || (isCurrent && step.phase === "success");
+        return (
+          <li
+            key={step.phase}
+            className="flex items-center gap-2 shrink-0"
+            aria-current={isCurrent ? "step" : undefined}
+          >
+            <div className="flex items-center gap-2">
+              <span
+                className={
+                  "w-6 h-6 rounded-full flex items-center justify-center text-xs font-semibold border-2 " +
+                  (showCheck
+                    ? "border-green-600 bg-green-600 text-white"
+                    : isCurrent
+                      ? "border-accent-600 bg-accent-50 text-accent-700"
+                      : "border-gray-300 bg-white text-gray-400")
+                }
+                aria-hidden="true"
+              >
+                {showCheck ? "✓" : i + 1}
+              </span>
+              <span
+                className={
+                  "font-medium " +
+                  (isPast
+                    ? "text-gray-500"
+                    : isCurrent
+                      ? "text-gray-900"
+                      : "text-gray-400")
+                }
+              >
+                {step.label}
+              </span>
+            </div>
+            {i < PHASE_STEPS.length - 1 && (
+              <span
+                className={
+                  "h-px w-6 sm:w-10 " +
+                  (isPast ? "bg-green-300" : "bg-gray-200")
+                }
+                aria-hidden="true"
+              />
+            )}
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
