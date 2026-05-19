@@ -35,6 +35,7 @@ import {
   fetchConstellation,
   UnauthorizedError,
 } from "./api";
+import { SENSITIVITY_TONE, SensitivityChip } from "./sensitivity";
 import { sparklePath, tintForAgent } from "./stars";
 
 // ---- Layout constants. ---- //
@@ -387,21 +388,40 @@ export default function Constellation() {
             frame. No duplicate field here. */}
 
         {/* Edges first so stars sit on top. */}
-        <g aria-hidden="true">
+        <g>
           {data?.edges.map((edge: ConstellationEdge, i: number) => {
-            const from = placementByName.get(edge.from)?.pos;
-            const to = placementByName.get(edge.to)?.pos;
-            if (!from || !to) return null;
+            const fromP = placementByName.get(edge.from);
+            const toP = placementByName.get(edge.to);
+            if (!fromP || !toP) return null;
+            const from = fromP.pos;
+            const to = toP.pos;
             // Straight lines look cleaner for hub-and-spoke than fighting
             // bezier control points around the orchestrator. Multi-edges
             // between the same pair will need bend later, but in v1 the
             // chain is always a tree rooted at polaris so straight reads
             // unambiguously.
-            const opacity =
+            //
+            // Phase 18.4: highlight cross-zone edges in red. When a
+            // dispatch crosses zone boundaries, draw a thicker red line
+            // so the operator can see the boundary breach at a glance.
+            // The framework enforces same-zone-only by default (Phase
+            // 16.4), so a cross-zone edge means the source agent has
+            // dispatches_cross_zone=True — the operator explicitly opted
+            // in. Red signals "you should know about this." Hovering
+            // gives the policy implication via <title>.
+            const fromZone = fromP.agent.sensitivity_level;
+            const toZone = toP.agent.sensitivity_level;
+            const isCrossZone = fromZone !== toZone;
+            const baseOpacity =
               0.3 +
               Math.min(0.4, Math.log10((edge.count_24h || 1) + 1) * 0.2);
-            const width =
+            const baseWidth =
               Math.min(4, 1 + Math.log10((edge.count_24h || 1) + 1));
+            const opacity = isCrossZone ? Math.max(0.55, baseOpacity) : baseOpacity;
+            const width = isCrossZone ? Math.max(2.5, baseWidth) : baseWidth;
+            const stroke = isCrossZone
+              ? "rgb(248 113 113)" // red-400; readable on dark canvas
+              : "rgb(199 210 254)";
             return (
               <line
                 key={`${edge.from}-${edge.to}-${i}`}
@@ -409,11 +429,18 @@ export default function Constellation() {
                 y1={from.y}
                 x2={to.x}
                 y2={to.y}
-                stroke="rgb(199 210 254)"
+                stroke={stroke}
                 strokeOpacity={opacity}
                 strokeWidth={width}
                 strokeLinecap="round"
-              />
+              >
+                {isCrossZone && (
+                  <title>
+                    {`Cross-zone dispatch: ${edge.from} (${fromZone}) → ${edge.to} (${toZone}). `}
+                    {`Requires dispatches_cross_zone=True on ${edge.from} and explicit operator review.`}
+                  </title>
+                )}
+              </line>
             );
           })}
         </g>
@@ -645,13 +672,21 @@ function Tooltip({
         maxWidth: 240,
       }}
     >
-      <div className="flex items-center justify-between gap-3 mb-1">
+      <div className="flex items-center justify-between gap-3 mb-2">
         <span className="font-mono font-medium text-indigo-50">
           {agent.name}
         </span>
         <span className="text-[10px] uppercase tracking-wider text-indigo-300">
           {agent.role}
         </span>
+      </div>
+      {/* Phase 18.4: surface trust zone in the tooltip so the wedge
+          story is visible from the home page without clicking through
+          to /agents or /zones. The chip's tone palette (green/amber/
+          orange/red) stays readable on the tooltip's dark backdrop
+          because the chip is a light pill with dark text. */}
+      <div className="mb-2">
+        <SensitivityChip level={agent.sensitivity_level} />
       </div>
       <div className="grid grid-cols-2 gap-x-3 gap-y-0.5 text-[11px]">
         <span className="text-indigo-300">status</span>

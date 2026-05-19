@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 18.4 — visual pass on the constellation map. 18.1 + 18.2 + 18.3 shipped 2026-05-18.**
+> **Phase 18.5 — visual pass on the agent detail page. 18.1 + 18.2 + 18.3 + 18.4 (first slice) shipped 2026-05-18.**
 
-Phase 18 (dashboard polish) is the strategic-pivot roadmap's next P0 phase. 18.1 + 18.2 + 18.3 shipped 2026-05-18 — roles-first nav, shared EmptyState component wired into four primary surfaces, dismissible first-run onboarding checklist on the home page. The full empty-state → first-deploy activation funnel is now intentional rather than dead-ends.
+Phase 18 (dashboard polish) is the strategic-pivot roadmap's next P0 phase. 18.1-18.4 shipped 2026-05-18 — roles-first nav, shared EmptyState component, first-run onboarding checklist, constellation map gains cross-zone edge highlighting + zone chip in hover tooltip. The wedge story is now visually undeniable: a non-technical user sees zone-isolated bots on the home page with red edges screaming when boundaries get crossed.
 
-NOW is 18.4: visual pass on `dashboard/app/Constellation.tsx`. Goals from the spec: clearer node hierarchy, readable labels at all zoom levels, hover tooltips with agent summary + zone chip, subtle zone color-coding that doesn't fight the per-agent star-tints, cross-zone edges rendered red with a thicker stroke + a policy-implication tooltip, mobile-responsive canvas.
+NOW is 18.5: visual pass on `dashboard/app/agents/[name]/page.tsx`. Layout currently puts equally-weighted sections in a long vertical stack; target = top hero (name + zone chip + status + quick actions), middle two columns (config + recent runs/quality), bottom collapsed Advanced panel (raw bot.py, scheduling, manifest).
 
 Phase 16 prod demo passed 2026-05-18. Phase 17 closed in test mode 2026-05-17. Live-mode activation submitted, waiting on Stripe verification.
 
@@ -423,9 +423,14 @@ Built `dashboard/app/EmptyState.tsx` as a shared component (title + body + prima
 
 Dismiss button writes `localStorage['lightsei.onboarding.dismissed']='true'` and the widget never re-appears for that browser. Auto-hides when all 4 steps complete (separate from dismiss state so deleting a secret later doesn't bring it back). Per-workspace dismiss state via DB column deferred — localStorage-only is fine for the first wave; promote to DB column when multi-device dismissal becomes a complaint.
 
-### 18.4 — Visual pass on the constellation map
+### 18.4 — Visual pass on the constellation map (first slice ✅ shipped 2026-05-18)
 
-Polish `dashboard/app/Constellation.tsx`. Goals: clearer node hierarchy (orchestrator visibly distinct from specialists from messengers), readable labels at all zoom levels, hover tooltips with agent summary + zone chip, color-coding subtle enough that the per-agent star-tints (per [[feedback]] memory) still feel like the primary identity. Cross-zone edges (when present) drawn in red with a thicker stroke + a tooltip explaining the policy implication. Mobile-responsive (the canvas dominates the home page; broken on narrow screens today).
+Two highest-impact additive polishes shipped tonight without risking the per-agent identity tints (per [[feedback]] memory):
+
+1. **Cross-zone edges highlighted.** When a dispatch crosses sensitivity zones (e.g. PII → public), the edge renders in red (`rgb(248 113 113)`) at thicker stroke + boosted opacity. Hovering the edge surfaces a `<title>` explaining the policy implication. Pre-Phase-16 same-zone edges stay subtle indigo. Operators can spot boundary breaches at a glance.
+2. **Hover tooltip surfaces trust zone.** `SensitivityChip` from `dashboard/app/sensitivity.tsx` lands inside the per-agent tooltip below the name/role header. The chip's light palette stays readable on the tooltip's dark backdrop. No clicks needed to see what zone an agent lives in.
+
+**Deferred to a future 18.4 slice:** mobile responsiveness on narrow screens, role-hierarchy redesign (orchestrator vs specialist vs messenger visual distinction beyond what's already there), subtle zone hints on the stars themselves (risk: regressing per-agent tint identity again — needs careful design pass). Each is its own design lift; tonight's slice is the minimum-viable polish that strengthens the wedge story without touching the parts that are already working.
 
 ### 18.5 — Visual pass on the agent detail page
 
@@ -918,6 +923,19 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-18 — Phase 18.4 (first slice) shipped: cross-zone edge highlighting + zone chip in tooltip
+
+Two minimum-viable polishes on the constellation map that strengthen the wedge story without touching the parts that already work (per the Phase 16.6 revert, the per-agent star-tints are the primary identity and must not be replaced by zone color).
+
+- **Cross-zone edges render red.** When a dispatch crosses sensitivity zones, the SVG `<line>` uses `rgb(248 113 113)` (red-400) at thicker stroke + boosted opacity, plus a `<title>` carrying the policy implication. Pre-Phase-16 same-zone edges stay subtle indigo. Implementation derives both ends' zones from `placementByName.get(from).agent.sensitivity_level` and `placementByName.get(to).agent.sensitivity_level`.
+- **Tooltip surfaces trust zone.** `SensitivityChip` lands inside the hover tooltip below the name/role header. The chip's light palette (e.g. `bg-red-100 text-red-800`) stays readable on the tooltip's `bg-slate-900/95` backdrop because the chip is a light pill with dark text.
+
+**Deferred**: mobile responsiveness, role-hierarchy redesign (specialist vs messenger), subtle zone hints on stars themselves. Each is its own design lift; tonight's scope is what's additive + low-risk.
+
+**Verification:** `npx tsc --noEmit` clean; `npx next build` green; 26/26 routes still build.
+
+**What this unblocks:** the home page now visually conveys the wedge claim. A prospect looking at a screenshot can see PII bots isolated from public bots, with red edges screaming whenever those boundaries get crossed. No clicks required to read the trust-zone story.
 
 ### 2026-05-18 — Phase 18.3 shipped: first-run onboarding checklist
 
