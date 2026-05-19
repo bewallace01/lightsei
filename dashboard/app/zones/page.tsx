@@ -66,6 +66,14 @@ export default function ZonesPage(): JSX.Element {
       }
     };
     load();
+    // Phase 18.3: mark zone topology as seen so the home page
+    // onboarding checklist can flip its "see your trust-zone topology"
+    // step to complete. Setting on mount (not after agents load)
+    // because the user reached this page regardless of whether their
+    // zones are populated.
+    if (typeof window !== "undefined") {
+      localStorage.setItem("lightsei.onboarding.visited_zones", "true");
+    }
     return () => {
       alive = false;
     };

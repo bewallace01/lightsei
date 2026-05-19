@@ -7,6 +7,7 @@ import { fetchRunSummaries, RunSummary, UnauthorizedError } from "./api";
 import Constellation from "./Constellation";
 import CostPanel from "./CostPanel";
 import EmptyState from "./EmptyState";
+import OnboardingChecklist from "./OnboardingChecklist";
 import PolarisCostAnalysisPanel from "./PolarisCostAnalysisPanel";
 import Hero from "./Hero";
 
@@ -53,6 +54,14 @@ export default function Home() {
 
   return (
     <main className="px-8 py-10 max-w-6xl mx-auto">
+
+      {/* Phase 18.3: first-run onboarding checklist. Renders above
+          the constellation hero so a non-technical first-time user
+          sees the next-action ladder before the constellation
+          (which is empty / unhelpful on a fresh workspace anyway).
+          Auto-hides when all four steps complete or the user
+          dismisses. */}
+      <OnboardingChecklist />
 
       {/* Phase 11B.2 + 11B.3: hero text overlays the constellation
           canvas rather than stacking above it. The hero text sits

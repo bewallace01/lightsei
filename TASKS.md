@@ -7,9 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 18.3 — first-run onboarding checklist on the home page. 18.1 + 18.2 shipped 2026-05-18.**
+> **Phase 18.4 — visual pass on the constellation map. 18.1 + 18.2 + 18.3 shipped 2026-05-18.**
 
-Phase 18 (dashboard polish) is the strategic-pivot roadmap's next P0 phase. 18.1 + 18.2 shipped 2026-05-18 — roles-first nav + EmptyState component wired across home / /agents / /zones / /runs. 18.3 follows: build a dismissible first-run checklist widget on the home page that walks a non-technical first-time user from empty dashboard to first deployed bot in five clicks (set ANTHROPIC_API_KEY → drop README → deploy → see /zones → set sensitivity / capabilities).
+Phase 18 (dashboard polish) is the strategic-pivot roadmap's next P0 phase. 18.1 + 18.2 + 18.3 shipped 2026-05-18 — roles-first nav, shared EmptyState component wired into four primary surfaces, dismissible first-run onboarding checklist on the home page. The full empty-state → first-deploy activation funnel is now intentional rather than dead-ends.
+
+NOW is 18.4: visual pass on `dashboard/app/Constellation.tsx`. Goals from the spec: clearer node hierarchy, readable labels at all zoom levels, hover tooltips with agent summary + zone chip, subtle zone color-coding that doesn't fight the per-agent star-tints, cross-zone edges rendered red with a thicker stroke + a policy-implication tooltip, mobile-responsive canvas.
 
 Phase 16 prod demo passed 2026-05-18. Phase 17 closed in test mode 2026-05-17. Live-mode activation submitted, waiting on Stripe verification.
 
@@ -410,9 +412,16 @@ Restructured `dashboard/app/Header.tsx`. Top-level: `My team / Activity / Trust 
 
 Built `dashboard/app/EmptyState.tsx` as a shared component (title + body + primary CTA + secondary CTA, two sizes). Replaced four bespoke empty-state blocks with it: home (`/`), `/agents`, `/zones` (added a workspace-level zero-bot state on top of the per-zone "no agents in this zone" placeholders), `/runs`. All four primary CTAs now point at `/agents/team-from-readme` — the highest-conversion next action for a non-technical first-time user. Secondary CTAs route to either `/agents` (see roster) or `/agents/generate` (single-bot path) depending on context.
 
-### 18.3 — First-run onboarding checklist
+### 18.3 — First-run onboarding checklist ✅ shipped 2026-05-18
 
-Add a dismissible checklist widget that surfaces on the home page when a workspace hasn't completed key setup steps. Steps: (1) add ANTHROPIC_API_KEY workspace secret; (2) drop a README to plan a team; (3) deploy a team; (4) visit /zones to see the topology; (5) set a sensitivity_level + capabilities on at least one agent (or use the Compliance preset). Each step links to its respective surface, shows a green check when completed, and the whole widget hides itself once all 5 are done. Per-workspace dismissed flag stored on the workspace row + carried in the workspace serializer.
+`dashboard/app/OnboardingChecklist.tsx` lands as a 4-step dismissible widget on the home page (renders above the constellation hero). Steps derived from existing data + two localStorage flags:
+
+1. **Add an Anthropic API key** — derived from `fetchSecrets()` containing `ANTHROPIC_API_KEY`.
+2. **Drop a README and deploy a team** — derived from `fetchAgents()` returning at least one non-`lightsei.*` agent.
+3. **See your trust-zone topology** — derived from `localStorage['lightsei.onboarding.visited_zones']`, set on /zones page mount.
+4. **Configure a trust zone on at least one bot** — derived from any user agent having non-default `sensitivity_level`, non-empty `capabilities`, or `dispatches_cross_zone=true` (Compliance preset deployers satisfy this automatically).
+
+Dismiss button writes `localStorage['lightsei.onboarding.dismissed']='true'` and the widget never re-appears for that browser. Auto-hides when all 4 steps complete (separate from dismiss state so deleting a secret later doesn't bring it back). Per-workspace dismiss state via DB column deferred — localStorage-only is fine for the first wave; promote to DB column when multi-device dismissal becomes a complaint.
 
 ### 18.4 — Visual pass on the constellation map
 
@@ -909,6 +918,23 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-18 — Phase 18.3 shipped: first-run onboarding checklist
+
+Dismissible 4-step checklist lands on the home page above the constellation hero. Steps derived from existing data + two localStorage flags:
+
+1. Add an Anthropic API key (from `fetchSecrets()`)
+2. Drop a README and deploy a team (from non-`lightsei.*` agents existing)
+3. See your trust-zone topology (from `localStorage['lightsei.onboarding.visited_zones']`, set on /zones mount)
+4. Configure a trust zone on at least one bot (any user agent with non-default zone/caps/cross-zone)
+
+Each step renders as a card linking to its surface. Done steps show a green checkmark + reduced text emphasis. Auto-hides when all 4 complete OR when the user clicks dismiss (which sets `localStorage['lightsei.onboarding.dismissed']='true'`).
+
+Per-workspace dismiss-state via DB column deferred — localStorage is fine for the first wave; promote to a workspace-row column when multi-device dismissal becomes a complaint. Same shape as Phase 16's per-bot tint memory: localStorage-first, DB-migrate-later.
+
+**Verification:** `npx tsc --noEmit` clean; `npx next build` green; 26/26 routes still build.
+
+**What this unblocks:** the activation funnel from signup → first deploy is now intentional. A non-technical first-time user lands on the home page, sees a 4-step checklist, and has a clear linear path to the team-from-README flow. Phase 18.9 demo will measure whether this is enough or if we need stronger guidance (the spec's switch trigger: if completion rate is low + dismiss rate is high, swap to a more aggressive first-time-only modal).
 
 ### 2026-05-18 — Phase 18.2 shipped: shared EmptyState component + 4 surface rewrites
 
