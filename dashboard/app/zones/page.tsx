@@ -24,6 +24,7 @@ import {
   UnauthorizedError,
   fetchAgents,
 } from "../api";
+import EmptyState from "../EmptyState";
 import { SENSITIVITY_TONE, SensitivityChip } from "../sensitivity";
 
 
@@ -91,6 +92,21 @@ export default function ZonesPage(): JSX.Element {
 
       {agents === null ? (
         <p className="text-sm text-gray-500">loading…</p>
+      ) : agents.length === 0 ? (
+        <EmptyState
+          title="No agents yet"
+          body={
+            <>
+              Your team&apos;s trust-zone topology will appear here once you
+              deploy. Drop a README + pick the Compliance preset to land a
+              team with PII isolated from public-side bots by default.
+            </>
+          }
+          primary={{
+            href: "/agents/team-from-readme",
+            label: "✨ Drop a README to build your team",
+          }}
+        />
       ) : (
         <>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-10">

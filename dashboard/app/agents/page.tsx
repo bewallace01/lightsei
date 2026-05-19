@@ -18,6 +18,7 @@ import {
   fetchWorkspaceQuality,
   patchAgent,
 } from "../api";
+import EmptyState from "../EmptyState";
 import { SensitivityChip } from "../sensitivity";
 
 
@@ -289,29 +290,24 @@ export default function AgentsPage() {
       {loading ? (
         <div className="text-gray-400 text-sm">loading…</div>
       ) : rows.length === 0 ? (
-        <div className="border border-dashed border-gray-200 rounded-lg p-10 text-center">
-          <div className="text-gray-700 font-medium mb-2">
-            No agents yet
-          </div>
-          <p className="text-sm text-gray-500 mb-4">
-            Deploy a bot or generate one from a description; it will land
-            here with its role, pinned model, and recent activity.
-          </p>
-          <div className="flex items-center justify-center gap-3">
-            <Link
-              href="/agents/generate"
-              className="px-4 py-2 bg-accent-600 text-white rounded-md text-sm font-medium hover:bg-accent-700 no-underline"
-            >
-              ✨ generate from description
-            </Link>
-            <Link
-              href="/getting-started"
-              className="px-4 py-2 border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 no-underline"
-            >
-              Read the guide
-            </Link>
-          </div>
-        </div>
+        <EmptyState
+          title="No agents yet"
+          body={
+            <>
+              Drop a project README and Lightsei proposes a tailored team
+              of bots, with trust zones pre-configured. Or describe a
+              single bot if you know what you want.
+            </>
+          }
+          primary={{
+            href: "/agents/team-from-readme",
+            label: "✨ Propose a team from a README",
+          }}
+          secondary={{
+            href: "/agents/generate",
+            label: "Generate one bot",
+          }}
+        />
       ) : (
         <div className="rounded-lg border border-gray-200 overflow-hidden">
           <table className="w-full text-left text-sm">

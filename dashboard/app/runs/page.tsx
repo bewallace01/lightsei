@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 import { fetchRunSummaries, RunSummary, UnauthorizedError } from "../api";
+import EmptyState from "../EmptyState";
 
 function fmtTime(iso: string): string {
   try {
@@ -67,28 +68,20 @@ export default function RunsPage() {
       {loading ? (
         <div className="text-gray-400 text-sm">loading…</div>
       ) : rows.length === 0 ? (
-        <div className="border border-dashed border-gray-200 rounded-lg p-10 text-center">
-          <div className="text-gray-700 font-medium mb-2">No runs yet</div>
-          <p className="text-sm text-gray-500 mb-4">
-            A &quot;run&quot; is a span of work your bot did — typically one
-            LLM call (OpenAI / Anthropic / Gemini) auto-instrumented by the
-            SDK. Deploy a bot first; runs land here as it works.
-          </p>
-          <div className="flex items-center justify-center gap-3">
-            <Link
-              href="/getting-started"
-              className="px-4 py-2 bg-accent-600 text-white rounded-md text-sm font-medium hover:bg-accent-700 no-underline"
-            >
-              Get started →
-            </Link>
-            <Link
-              href="/agents/new"
-              className="px-4 py-2 border border-gray-300 text-gray-700 rounded-md text-sm font-medium hover:bg-gray-50 no-underline"
-            >
-              Deploy a bot
-            </Link>
-          </div>
-        </div>
+        <EmptyState
+          title="No runs yet"
+          body={
+            <>
+              A run is a span of work your bot did, typically one LLM call.
+              Once you deploy a team, every call shows up here.
+            </>
+          }
+          primary={{
+            href: "/agents/team-from-readme",
+            label: "✨ Drop a README to build your team",
+          }}
+          secondary={{ href: "/agents", label: "See my agents" }}
+        />
       ) : (
         <div className="rounded-lg border border-gray-200 overflow-hidden">
           <table className="w-full text-left text-sm">

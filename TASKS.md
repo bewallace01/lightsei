@@ -7,9 +7,9 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 18.2 — empty states + first-action CTAs on primary surfaces. Spec locked 2026-05-18; 18.1 shipped 2026-05-18.**
+> **Phase 18.3 — first-run onboarding checklist on the home page. 18.1 + 18.2 shipped 2026-05-18.**
 
-Phase 18 (dashboard polish) is the strategic-pivot roadmap's next P0 phase. 18.1 shipped 2026-05-18 — top nav restructured to roles-first (`My team / Activity / Trust zones / Integrations / Account / Advanced`). 18.2 follows: rewrite empty states on home / /agents / /zones / /runs so a freshly-signed-up workspace sees a useful CTA instead of a blank table. Closes the gap between "I just signed up" and "I just dropped a README" — currently most non-technical users don't make it across.
+Phase 18 (dashboard polish) is the strategic-pivot roadmap's next P0 phase. 18.1 + 18.2 shipped 2026-05-18 — roles-first nav + EmptyState component wired across home / /agents / /zones / /runs. 18.3 follows: build a dismissible first-run checklist widget on the home page that walks a non-technical first-time user from empty dashboard to first deployed bot in five clicks (set ANTHROPIC_API_KEY → drop README → deploy → see /zones → set sensitivity / capabilities).
 
 Phase 16 prod demo passed 2026-05-18. Phase 17 closed in test mode 2026-05-17. Live-mode activation submitted, waiting on Stripe verification.
 
@@ -406,9 +406,9 @@ Operationalizes "dashboard is the primary surface" from the 2026-05-17 decision.
 
 Restructured `dashboard/app/Header.tsx`. Top-level: `My team / Activity / Trust zones / Integrations / Account / Advanced`. Polaris demoted from top-level to a regular agent in `My team`. Docs / drop-a-zip / deployments / validators moved under Advanced. Home dropped from nav (Logo links to `/`). Account is now a top-level link (workspace switcher dropdown still has Log out + display info). Build clean across all 26 routes.
 
-### 18.2 — Empty states + first-action CTAs
+### 18.2 — Empty states + first-action CTAs ✅ shipped 2026-05-18
 
-Every primary surface (home, /agents, /zones, /runs) should render a useful empty state when the workspace has zero bots. Today most pages render a blank table or a "no records" placeholder; replace with explicit CTAs that route to the next-best action. Specifically: home page empty state → big "Drop a README to build your team" card linking to `/agents/team-from-readme`. /agents empty → same. /zones empty → "Your team will appear here once you deploy. Drop a README to start." /runs empty → "No bot runs yet. Bots tick on their schedule or react to commands; once a run lands, you'll see it here."
+Built `dashboard/app/EmptyState.tsx` as a shared component (title + body + primary CTA + secondary CTA, two sizes). Replaced four bespoke empty-state blocks with it: home (`/`), `/agents`, `/zones` (added a workspace-level zero-bot state on top of the per-zone "no agents in this zone" placeholders), `/runs`. All four primary CTAs now point at `/agents/team-from-readme` — the highest-conversion next action for a non-technical first-time user. Secondary CTAs route to either `/agents` (see roster) or `/agents/generate` (single-bot path) depending on context.
 
 ### 18.3 — First-run onboarding checklist
 
@@ -909,6 +909,16 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-18 — Phase 18.2 shipped: shared EmptyState component + 4 surface rewrites
+
+Shared `dashboard/app/EmptyState.tsx` component lands; consistent shape (title + body + primary CTA + optional secondary CTA, two sizes). Replaces the four bespoke empty-state blocks that previously lived inline on home, /agents, /zones, /runs.
+
+All four primary CTAs now point at `/agents/team-from-readme` — the highest-conversion next action for a non-technical first-time user. Secondary CTAs route to either `/agents` (see roster) or `/agents/generate` (single-bot path) depending on context. /zones gains a workspace-level zero-bot state on top of the per-zone "no agents in this zone" placeholders that already existed (previously zero-bot workspaces just saw four empty lanes).
+
+**Verification:** `npx tsc --noEmit` clean; `npx next build` green; 26/26 routes still build.
+
+**What this unblocks:** 18.3 (first-run onboarding checklist) lands on top of the new home empty state. The CTA copy across the four surfaces now consistently points at the same next-best action so cross-surface navigation feels intentional rather than dead-ends.
 
 ### 2026-05-18 — Phase 18 spec locked + 18.1 (IA pass) shipped
 
