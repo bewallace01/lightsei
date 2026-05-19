@@ -541,23 +541,44 @@ export default function AgentPage({ params }: { params: { name: string } }) {
         </div>
       </section>
 
-      <DescriptionSection
-        agent={agent}
-        onSaved={(updated) => setAgent(updated)}
-        onError={(msg) => setError(msg)}
-      />
+      {/* Phase 18.5: developer-flavored knobs (one-line description,
+          pinned model id, cron schedule) live in a collapsed
+          "Advanced configuration" panel. Non-technical users don't
+          need to see them; technical users open the panel once to
+          configure and then it sits closed. Native <details> so the
+          state is preserved across re-renders without React state
+          plumbing. Children stay mounted (just hidden via display:
+          none-style behavior), so their fetches + dirty flags stay
+          consistent. */}
+      {agent && (
+        <details className="mb-10 rounded-lg border border-gray-200 bg-gray-50/50 [&[open]]:bg-white [&[open]]:border-gray-300 transition-colors">
+          <summary className="cursor-pointer list-none px-4 py-3 flex items-center justify-between text-sm font-medium text-gray-700 hover:text-gray-900">
+            <span>Advanced configuration</span>
+            <span className="text-xs text-gray-500 font-normal">
+              description, pinned model, schedule
+            </span>
+          </summary>
+          <div className="px-4 pb-4 pt-2 border-t border-gray-200">
+            <DescriptionSection
+              agent={agent}
+              onSaved={(updated) => setAgent(updated)}
+              onError={(msg) => setError(msg)}
+            />
 
-      <ModelSelector
-        agent={agent}
-        onSaved={(updated) => setAgent(updated)}
-        onError={(msg) => setError(msg)}
-      />
+            <ModelSelector
+              agent={agent}
+              onSaved={(updated) => setAgent(updated)}
+              onError={(msg) => setError(msg)}
+            />
 
-      <ScheduleSelector
-        agent={agent}
-        onSaved={(updated) => setAgent(updated)}
-        onError={(msg) => setError(msg)}
-      />
+            <ScheduleSelector
+              agent={agent}
+              onSaved={(updated) => setAgent(updated)}
+              onError={(msg) => setError(msg)}
+            />
+          </div>
+        </details>
+      )}
 
       <section className="mb-10">
         <h2 className="text-[11px] font-semibold text-gray-500 mb-4 uppercase tracking-wider">

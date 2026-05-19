@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 18.5 — visual pass on the agent detail page. 18.1 + 18.2 + 18.3 + 18.4 (first slice) shipped 2026-05-18.**
+> **Phase 18.6 — polish team-from-README flow. 18.1-18.5 (each scoped tonight) shipped 2026-05-18.**
 
-Phase 18 (dashboard polish) is the strategic-pivot roadmap's next P0 phase. 18.1-18.4 shipped 2026-05-18 — roles-first nav, shared EmptyState component, first-run onboarding checklist, constellation map gains cross-zone edge highlighting + zone chip in hover tooltip. The wedge story is now visually undeniable: a non-technical user sees zone-isolated bots on the home page with red edges screaming when boundaries get crossed.
+Phase 18 (dashboard polish) is the strategic-pivot roadmap's next P0 phase. 18.1-18.5 shipped 2026-05-18 — roles-first nav, shared EmptyState component, first-run onboarding checklist, constellation cross-zone edge highlighting + tooltip zone chip, agent-detail Advanced configuration collapse. Each scoped to the additive minimum that shipped safely in one session; bigger restructure work parked for future slices.
 
-NOW is 18.5: visual pass on `dashboard/app/agents/[name]/page.tsx`. Layout currently puts equally-weighted sections in a long vertical stack; target = top hero (name + zone chip + status + quick actions), middle two columns (config + recent runs/quality), bottom collapsed Advanced panel (raw bot.py, scheduling, manifest).
+NOW is 18.6: polish the team-from-README flow. Add a progress indicator across the plan → generate → review → deploy phases, friendlier failure copy when code-gen fails (the psycopg2-crash scenario from the demo).
 
 Phase 16 prod demo passed 2026-05-18. Phase 17 closed in test mode 2026-05-17. Live-mode activation submitted, waiting on Stripe verification.
 
@@ -432,9 +432,11 @@ Two highest-impact additive polishes shipped tonight without risking the per-age
 
 **Deferred to a future 18.4 slice:** mobile responsiveness on narrow screens, role-hierarchy redesign (orchestrator vs specialist vs messenger visual distinction beyond what's already there), subtle zone hints on the stars themselves (risk: regressing per-agent tint identity again — needs careful design pass). Each is its own design lift; tonight's slice is the minimum-viable polish that strengthens the wedge story without touching the parts that are already working.
 
-### 18.5 — Visual pass on the agent detail page
+### 18.5 — Visual pass on the agent detail page (first slice ✅ shipped 2026-05-18)
 
-Polish `dashboard/app/agents/[name]/page.tsx`. Current layout puts equally-weighted sections in a long vertical stack; readers don't know which to look at first. Target layout: top hero (name + zone chip + status + quick actions), middle two columns (left = config: sensitivity / capabilities / cross-zone / capabilities; right = recent runs + quality signal), bottom collapsed "Advanced" panel (raw bot.py viewer, scheduling, raw command/manifest, SDK init snippet). The Advanced panel is collapsed by default. Trust-zone editor stays in the middle config column.
+Wrapped Description + Model + Schedule editors in a collapsed `<details>` panel labeled "Advanced configuration" with the subtitle "description, pinned model, schedule." Native HTML element (no React state plumbing); children stay mounted so their fetches + dirty flags stay consistent across open/close. The panel sits between the system-prompt section and the send-command section, where non-technical users hit it naturally if they scroll but don't have to engage with it.
+
+**Deferred to future 18.5 slices**: full hero (name + zone chip + status + quick actions) at the top, two-column layout for config + activity, more aggressive folding of developer-flavored sections (Instances / Deployments could potentially live in Advanced too, but that has bigger UX implications since "is my bot running?" is a primary question). Each is its own design lift.
 
 ### 18.6 — Polish team-from-README flow
 
@@ -923,6 +925,16 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-18 — Phase 18.5 (first slice) shipped: Advanced configuration collapse on agent detail
+
+`dashboard/app/agents/[name]/page.tsx` is 1322 lines with equally-weighted sections in a vertical stack. Full hero + two-column restructure is a real design lift; tonight's scoped slice hides the most-confusing technical knobs behind a collapsed panel so non-technical users don't have to scroll past them.
+
+- **Description + Model + Schedule editors** wrapped in a native `<details>` panel labeled "Advanced configuration" (subtitle: "description, pinned model, schedule"). Native HTML so no React state plumbing; children stay mounted so dirty flags + fetches stay consistent across open/close transitions.
+- Panel sits between System prompt and Send command — non-technical users hit it during natural scroll but don't have to engage.
+- Deferred: full hero (name + zone chip + status + quick actions), two-column layout for config + activity, more aggressive folding (Instances / Deployments potentially also Advanced, but those answer "is my bot running?" which is too primary to hide).
+
+**Verification:** `npx tsc --noEmit` clean; `npx next build` green; 26/26 routes still build.
 
 ### 2026-05-18 — Phase 18.4 (first slice) shipped: cross-zone edge highlighting + zone chip in tooltip
 
