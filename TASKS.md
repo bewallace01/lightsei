@@ -7,15 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 18 code-complete 2026-05-19. NOW: pick a next phase, or run 18.9 (Bailey-driven hand-product-to-non-technical-user demo).**
+> **Phase 19.1 — Slack workspaces + channels + event-idempotency schema. Spec locked 2026-05-19.**
 
-Phase 18 (dashboard polish) is code-complete: 18.1-18.8 all shipped 2026-05-18 + 2026-05-19. Roles-first nav, shared EmptyState component, first-run onboarding checklist, constellation cross-zone edge highlighting + tooltip zone chip, agent-detail Advanced configuration collapse, team-from-readme progress indicator + friendlier failure copy, HelpTip component + glossary + 3 surface annotations, final test sweep (backend 758/758, dashboard tsc + next build green).
+Phase 18 (dashboard polish) is code-complete: 18.1-18.8 shipped 2026-05-18 + 2026-05-19. The non-technical-user activation funnel is intentional end-to-end on the dashboard. Phase 19 extends the wedge to chat.
 
-18.9 (demo) is Bailey-driven: hand the dashboard to someone non-technical with no explanation, watch where they get stuck, capture friction in a follow-up. Passes when a non-technical first-time user lands a deployed Compliance team from a README in under 5 minutes with no help.
+Phase 19 (chat surface) design locked 2026-05-19: single published Slack app, Events API webhook transport, Polaris-orchestrated auto-routing, per-channel sensitivity_level for trust-zone enforcement. 9 sub-tasks (19.1 schema → 19.9 demo). 19.1 is the foundational change every other 19.x reads from.
 
-Next phase options per the strategic-pivot roadmap: Phase 19 (chat surface / Slack app), Phase 20 (integration breadth), Phase 21 (customer-facing widget + operator inbox). Or pick up Stripe live-mode activation when verification lands. Or the parked follow-ups (deployment cleanup, generator psycopg2 bug).
-
-Phase 16 prod demo passed 2026-05-18. Phase 17 closed in test mode 2026-05-17. Live-mode activation submitted, waiting on Stripe verification.
+Phase 16 prod demo passed 2026-05-18. Phase 17 closed in test mode 2026-05-17. Live-mode Stripe activation submitted, waiting on verification.
 
 ## Phase 12C: drop a README, get a team
 
@@ -476,11 +474,90 @@ Hand the dashboard to someone non-technical with no explanation. Watch where the
 
 ## Phase 19: Chat surface (Slack first, then Teams)
 
-Operationalizes the "chat-first surface" wedge from the 2026-05-17 decision. Sequenced after Phase 18 because the dashboard product needs to be polished before a chat surface bolts on top.
+Operationalizes the "chat-first surface" wedge from the 2026-05-17 decision. Sequenced after Phase 18 because the dashboard product needs to be polished before a chat surface bolts on top. A Slack-native experience extends the wedge — non-technical users prefer working in chat over a separate dashboard, and the chat surface gives Lightsei a placement next to the work people are already doing.
 
-Rough shape: (1) Lightsei Slack app published to the App Directory, OAuth links a Slack workspace to a Lightsei workspace; (2) `@mention` Lightsei in a channel to address the team, Polaris-style orchestration routes the request to the right bot; (3) bot outputs (PDFs, dashboards, files) post into the channel; (4) per-channel and DM scoping respects Phase 16's trust zones. Microsoft Teams app is a follow-up using the same primitives. Demo: in a Slack channel, `@Lightsei pull our MRR for last month`, watch a bot in the team handle it inline.
+**Design choices locked 2026-05-19.**
 
-Detailed sub-tasks deferred until promoted to NOW.
+- **Slack app shape: one published Lightsei app, customers install.** Single app submitted to the Slack App Directory. Each Lightsei workspace installs it to their Slack workspace via standard OAuth. Standard SaaS pattern, single app to maintain, single review process with Slack. Switch trigger: customers need scopes the published app can't request (e.g. enterprise-grid-only permissions) — at that point we offer a per-customer self-hosted variant alongside.
+- **Inbound transport: Events API webhook.** Slack POSTs each event to `https://api.lightsei.com/slack/events`. Standard pattern, doesn't require a persistent process per workspace, scales with backend instances. Signature verification via Slack's signing secret. Switch trigger: a customer can't expose their Slack workspace to public webhooks (rare) — at that point we add Socket Mode support alongside.
+- **Bot routing: Polaris-orchestrated auto-routing.** `@Lightsei pull our MRR` on Slack → command dispatched to Polaris (or a chat-specific orchestrator) → Polaris picks the best specialist based on capability + channel zone → specialist runs → response posts back to the channel. Reuses the orchestrator concept the dashboard already runs on. Switch trigger: orchestrator routing is wrong often enough that customers prefer explicit channel-bot binding — at that point we add per-channel bot allow-lists alongside auto-routing.
+- **Trust-zone × channel: per-channel sensitivity level.** Each Slack channel gets a `sensitivity_level` on the Lightsei side (configured in the dashboard). When a Slack event lands, Polaris only routes to bots whose `sensitivity_level` matches the channel's. A `#internal-finance` channel (set to `internal` or `sensitive`) won't reach a `public` bot. End-to-end the wedge story: PII bots can't be reached from non-PII channels; public-side bots can't be reached from PII channels. Switch trigger: customers want a more granular per-bot channel allow-list — at that point we layer it on top.
+
+### 19.1 — Schema for Slack workspaces + channels + event idempotency
+
+Three new tables in a single alembic migration:
+
+- `slack_workspaces`: `slack_team_id` (PK, comes from Slack OAuth), `lightsei_workspace_id` (FK, the Lightsei workspace the install is bound to), `bot_token_encrypted` (Slack bot OAuth token, encrypted via secrets_crypto.encrypt), `bot_user_id` (Slack user id for the bot), `team_name` (the Slack workspace's display name; for the dashboard), `installed_at`, `installed_by_user_id` (Lightsei user who clicked install), `revoked_at` (nullable; set when the install is removed).
+- `slack_channels`: `(slack_team_id, channel_id)` composite PK, `lightsei_workspace_id` (FK), `channel_name` (most-recent cached label), `sensitivity_level` (default `internal`, validated against `_VALID_SENSITIVITY_LEVELS`), `opted_in` (default `false`; channels are silent until the operator opts them in), `created_at`, `updated_at`.
+- `slack_events`: `event_id` (PK, from Slack's `event.event_id`), `slack_team_id`, `received_at`, `kind`. Used purely for idempotency — Slack retries deliveries, we ignore anything we've already seen.
+
+SQLAlchemy models + alembic migration + validation. No endpoints in this sub-task; just the storage backbone the rest of Phase 19 reads.
+
+### 19.2 — Slack OAuth (start + callback)
+
+Two new endpoints + a `backend/slack_oauth.py` helper module mirroring `backend/google_oauth.py`'s shape:
+
+- `GET /slack/oauth/start` (authed) — generates a state token, persists it in a short-lived `slack_oauth_pending_states` table, returns `{authorization_url, state}`. Dashboard navigates the browser to `authorization_url`.
+- `GET /slack/oauth/callback?code&state` — verifies state, exchanges code for tokens via `https://slack.com/api/oauth.v2.access`, stores the encrypted bot token + Slack team metadata in `slack_workspaces`. Redirects browser back to `/integrations/slack?installed=true`.
+
+Configured via env: `LIGHTSEI_SLACK_CLIENT_ID`, `LIGHTSEI_SLACK_CLIENT_SECRET`, `LIGHTSEI_SLACK_SIGNING_SECRET`, `LIGHTSEI_SLACK_REDIRECT_URI` (defaults to `https://api.lightsei.com/slack/oauth/callback`).
+
+### 19.3 — Slack events webhook + signature verification
+
+`POST /slack/events` — receives events from Slack:
+
+- **URL verification handshake**: Slack pings the endpoint at config time with `{type: "url_verification", challenge: "..."}`; we echo the challenge.
+- **Signature verification**: every other request carries `X-Slack-Signature` + `X-Slack-Request-Timestamp`. We HMAC-SHA256 over `v0:{timestamp}:{body}` with the signing secret; mismatch → 400 (never 5xx, same logic as the Stripe webhook).
+- **Idempotency**: `events.event_id` checked against `slack_events`. Already-seen → 200 + no-op.
+- **Event routing**: `app_mention` events (the user `@Lightsei`d the app in a channel) get queued onto the existing `generation_jobs` table as kind `slack_orchestration`. The 19.4 chat orchestrator handler picks it up.
+
+### 19.4 — Chat orchestrator handler
+
+New handler in `backend/jobs.py` registry for `kind='slack_orchestration'`. Pure module `backend/slack_orchestrator.py` owns the logic:
+
+- Inputs: `{slack_team_id, channel_id, user_id, text, thread_ts?}` (the mention payload).
+- Looks up the channel's `sensitivity_level`, opted-in flag. If `opted_in=false` → post a friendly "this channel isn't connected to Lightsei yet; an admin can opt in via /integrations/slack" and return.
+- Calls Anthropic with a routing prompt: "given the user's request `{text}` and the available bots `{list with name + summary + sensitivity_level}` filtered to bots whose `sensitivity_level == channel.sensitivity_level`, which bot should handle this?" Returns `{target_bot, why}`.
+- Dispatches a command of kind `slack.respond` to the chosen bot with payload `{text, channel_id, slack_team_id, thread_ts, user_id}`. The bot's `@lightsei.on_command("slack.respond")` handler runs whatever logic, then calls `lightsei.post_slack(channel_id, response_text)` (19.5) to reply.
+
+### 19.5 — SDK helper: `lightsei.post_slack` + `slack:respond` capability
+
+- New SDK helper `lightsei.post_slack(channel: str, text: str, thread_ts: str = None)` — calls a Lightsei backend endpoint that uses the workspace's stored bot token to call Slack's `chat.postMessage`. Bot code never sees the raw Slack token; the backend mediates.
+- New capability `'slack:respond'` (gated like other capabilities — bots without it get `LightseiCapabilityError` if they try to call `post_slack`).
+- Compliance preset's `internal` and `public` hint mappings gain `'slack:respond'` automatically (those are the bots that should be reachable from chat). `pii` + `sensitive` bots don't get it by default.
+
+### 19.6 — Per-channel sensitivity config endpoint + page
+
+`/integrations/slack` (dashboard) — lists installed Slack workspaces; for each, lists channels with their current `sensitivity_level` + opted-in flag. Operator sets these in the dashboard:
+
+- `GET /workspaces/me/slack/channels` — paginated list of `(slack_team_id, channel_id, channel_name, sensitivity_level, opted_in)`.
+- `PATCH /workspaces/me/slack/channels/{slack_team_id}/{channel_id}` — operator changes `sensitivity_level` and/or `opted_in`.
+- Channels appear in the list automatically the first time the Lightsei bot sees an event from them; default `sensitivity_level=internal`, `opted_in=false`.
+
+### 19.7 — Dashboard /integrations/slack page
+
+Dashboard surface for the operator:
+
+- "Connect Slack" button → kicks off OAuth via `GET /slack/oauth/start`.
+- After connection: list of connected Slack workspaces with their channels grouped by sensitivity_level. Each channel has an opt-in toggle + a sensitivity-level select. The wedge surface: operator sees which bots can be reached from which channel + sets the zone.
+- Disconnect button → revokes the install (sets `revoked_at` on the workspace row + revokes the token via `https://slack.com/api/auth.revoke`).
+
+### 19.8 — Tests
+
+Per the existing pattern (tests live with the code they cover):
+
+- 19.1: schema + validation (matches `test_auth_billing_schema.py` shape).
+- 19.2: OAuth state lifecycle, code exchange (mocked Slack API), token decryption round-trip.
+- 19.3: signature verification (real HMAC), URL verification, idempotency on duplicate event delivery, bad-signature returns 400.
+- 19.4: orchestrator routes to a same-zone bot, refuses cross-zone routing, posts friendly opt-in nudge when channel is not opted in.
+- 19.5: `lightsei.post_slack` raises `LightseiCapabilityError` without the `slack:respond` capability, succeeds with it.
+- 19.6 + 19.7: dashboard `tsc --noEmit` clean; integration-shaped test for the channel patch endpoint.
+
+### 19.9 — Demo
+
+Install the Lightsei Slack app to a Slack workspace. Connect it to a Lightsei workspace via OAuth from `/integrations/slack`. Configure two channels: `#data` (sensitivity `internal`, opted in) routing to atlas; `#research` (sensitivity `public`, opted in) routing to vega. In `#data`, type `@Lightsei pull our MRR for last month` — watch atlas pick it up, run, post the response inline. In `#research`, type `@Lightsei find recent Series B SaaS funding` — watch vega pick it up. Try `@Lightsei` in `#research` with a PII-shaped request — Polaris refuses because no PII-zone bot is reachable from `#research`.
+
+Phase 19 closes when the wedge story extends end-to-end into Slack: trust zones enforced at the channel × bot boundary, no leaks possible via chat surface.
 
 ## Phase 20: Integration breadth (MCP wrappers + connector marketplace)
 
