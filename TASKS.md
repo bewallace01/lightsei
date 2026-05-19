@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 19.2 — Slack OAuth backend. 19.1 shipped 2026-05-19.**
+> **Phase 19.3 — Slack events webhook + signature verification. 19.1 + 19.2 shipped 2026-05-19.**
 
-Phase 19 (chat surface) running. 19.1 shipped 2026-05-19 — alembic 0032 + SlackWorkspace + SlackChannel + SlackEvent models + 11 tests, 769/769 backend green. The schema backbone every other 19.x sub-task reads from is in place.
+Phase 19 (chat surface) running. 19.1 + 19.2 shipped 2026-05-19 — schema backbone (workspaces + channels + events + oauth_pending_states) + Slack OAuth helper module + `/slack/oauth/start` + `/slack/oauth/callback` endpoints + 25 tests. Backend at 783 passing.
 
-NOW is 19.2: Slack OAuth start + callback endpoints, `backend/slack_oauth.py` helper module mirroring `google_oauth.py`'s shape, encrypted bot-token storage on `slack_workspaces.bot_token_encrypted`.
+NOW is 19.3: `POST /slack/events` endpoint with Slack signing-secret HMAC verification, URL-verification handshake, idempotency via the slack_events table, event router that queues `app_mention` events onto the generation_jobs table as kind `slack_orchestration` (handler comes in 19.4).
 
 Phase 18 code-complete 2026-05-19. Phase 16 prod demo passed. Phase 17 in test mode; live-mode awaiting Stripe verification.
 
@@ -495,9 +495,13 @@ Three new tables in a single alembic migration:
 
 SQLAlchemy models + alembic migration + validation. No endpoints in this sub-task; just the storage backbone the rest of Phase 19 reads.
 
-### 19.2 — Slack OAuth (start + callback)
+### 19.2 — Slack OAuth (start + callback) ✅ shipped 2026-05-19
 
-Two new endpoints + a `backend/slack_oauth.py` helper module mirroring `backend/google_oauth.py`'s shape:
+Alembic 0033 (`slack_oauth_pending_states` table) + `backend/slack_oauth.py` helper module + two endpoints in main.py + 14 tests landed. The Slack-install flow works end-to-end against a stubbed Slack OAuth endpoint; production needs the Slack app credentials in env before /slack/oauth/start can complete.
+
+Helper module mirrors google_oauth.py shape: `is_configured()`, `new_state()`, `build_authorization_url(state, scopes?)`, `exchange_code_for_token(code)`, `SlackOAuthError`. Default bot scopes: `app_mentions:read`, `chat:write`, `channels:read`, `users:read`.
+
+Two endpoints:
 
 - `GET /slack/oauth/start` (authed) — generates a state token, persists it in a short-lived `slack_oauth_pending_states` table, returns `{authorization_url, state}`. Dashboard navigates the browser to `authorization_url`.
 - `GET /slack/oauth/callback?code&state` — verifies state, exchanges code for tokens via `https://slack.com/api/oauth.v2.access`, stores the encrypted bot token + Slack team metadata in `slack_workspaces`. Redirects browser back to `/integrations/slack?installed=true`.
@@ -1024,6 +1028,19 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-19 — Phase 19.2 shipped: Slack OAuth (start + callback)
+
+Alembic 0033 (`slack_oauth_pending_states`) + `backend/slack_oauth.py` helper module + two endpoints in main.py + 14 tests. Slack install flow runs end-to-end against a stubbed Slack OAuth endpoint; production needs Slack-app credentials in env.
+
+- **`backend/slack_oauth.py`** mirrors `google_oauth.py` shape: `is_configured()`, `new_state()`, `build_authorization_url(state, scopes?)`, `exchange_code_for_token(code)`, `SlackOAuthError`. Default bot scopes: `app_mentions:read`, `chat:write`, `channels:read`, `users:read`. httpx.post stubbable for tests.
+- **`GET /slack/oauth/start`** (authed, session token): generates state, persists in `slack_oauth_pending_states` (10-min TTL, FK to lightsei_workspace_id + installed_by_user_id for audit), returns `{authorization_url, state}`. 503 when not configured. 400 when called via API key (install must be operator-driven).
+- **`GET /slack/oauth/callback?code&state`**: validates state, single-use (deletes the pending row before exchange to prevent double-consume), calls `exchange_code_for_token`, encrypts the bot token via `secrets_crypto.encrypt` + stores as ASCII-encoded bytes in `slack_workspaces.bot_token_encrypted`, then 303 redirects to `<dashboard>/integrations/slack?installed=true`. Re-install path updates the existing row in place (clears `revoked_at`) so the partial-unique index doesn't reject.
+- **HTML error rendering** for the callback's error paths (cancelled / expired state / exchange failure) since the user is in a browser — a JSON 4xx would render as raw text. Small inline HTML with a "back to integrations" link.
+
+**Verification:** 14 new tests in `backend/tests/test_slack_oauth.py` (pure helpers: is_configured detection, new_state randomness, authorization URL params, exchange happy + ok-false + 5xx + transport-error paths; endpoints: 503 when not configured, state persistence, callback creates the slack_workspaces row + roundtrips the encrypted token through secrets_crypto, single-use state, unknown-state HTML 400, user-cancel HTML 400, re-install updates existing row without duplicate insert). Full backend suite: **783 passed in 153s** (was 769, +14 new). 0 regressions.
+
+**What this unblocks:** 19.3 (events webhook) reads `slack_workspaces.bot_token_encrypted` to call back to Slack on the bot's behalf when responses go out (19.5). 19.7 (dashboard /integrations/slack page) kicks off the install via /slack/oauth/start. Slack-app credentials need to be created + registered in env before production install flow works — same pattern as the Stripe / Google OAuth setup.
 
 ### 2026-05-19 — Phase 19.1 shipped: Slack chat-surface schema
 

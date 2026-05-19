@@ -8,8 +8,9 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import desc, func, select, text
 from sqlalchemy.orm import Session
@@ -58,6 +59,8 @@ from models import (
     NotificationDelivery,
     OAuthPendingState,
     Run,
+    SlackOAuthPendingState,
+    SlackWorkspace,
     Session as SessionRow,
     Thread,
     ThreadMessage,
@@ -4384,6 +4387,194 @@ async def stripe_webhook(request: Request, session: Session = Depends(get_sessio
 
     session.flush()
     return {"status": "ok", "type": event_type, "workspace_id": workspace_id}
+
+
+# ---------- Phase 19.2: Slack OAuth ---------- #
+
+
+# How long the state row in slack_oauth_pending_states is valid. Has to
+# cover the user's hop out to Slack's consent screen + back. 10 minutes
+# is generous; reduce later if abandoned-flow rows pile up.
+SLACK_OAUTH_STATE_TTL = timedelta(minutes=10)
+
+
+@app.get("/slack/oauth/start")
+def slack_oauth_start(
+    redirect_after: Optional[str] = None,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 19.2: kick off the Slack app install flow.
+
+    Returns `{authorization_url, state}` — the dashboard navigates the
+    browser to authorization_url. State is persisted to
+    slack_oauth_pending_states with the Lightsei workspace id + the
+    operator's user id so the callback can rebind to the right
+    workspace on return.
+
+    503 if the Slack OAuth client isn't configured (env vars not set);
+    fail loud rather than redirecting the user into a half-configured
+    flow that errors out on Slack's end.
+
+    `redirect_after` is where the dashboard wants the user to land
+    post-install (defaults to /integrations/slack?installed=true in
+    the callback).
+    """
+    import slack_oauth as _so
+
+    if not _so.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Slack OAuth is not configured on this backend. Set "
+                "LIGHTSEI_SLACK_CLIENT_ID + LIGHTSEI_SLACK_CLIENT_SECRET."
+            ),
+        )
+    if auth.user is None:
+        # Slack install is always operator-driven; can't be initiated
+        # by an API-key-only context because we need to track who
+        # clicked install on the audit trail.
+        raise HTTPException(
+            status_code=400,
+            detail="Slack install must be initiated by a logged-in user",
+        )
+
+    now = utcnow()
+    state = _so.new_state()
+
+    session.add(SlackOAuthPendingState(
+        state=state,
+        lightsei_workspace_id=auth.workspace_id,
+        installed_by_user_id=auth.user.id,
+        redirect_after=redirect_after,
+        created_at=now,
+        expires_at=now + SLACK_OAUTH_STATE_TTL,
+    ))
+    session.flush()
+
+    return {
+        "authorization_url": _so.build_authorization_url(state=state),
+        "state": state,
+    }
+
+
+@app.get("/slack/oauth/callback")
+def slack_oauth_callback(
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    session: Session = Depends(get_session),
+) -> Any:
+    """Phase 19.2: complete the Slack install.
+
+    Slack redirects the user's browser here after the consent screen.
+    We validate the state, exchange the code for a bot token, encrypt
+    + persist the bot token in slack_workspaces, then redirect the
+    browser to the dashboard's /integrations/slack page.
+
+    Error paths render a small HTML body the user can read and act on,
+    not a JSON 4xx, because the user is in a browser tab — this is the
+    one Lightsei endpoint that's expected to render directly to a
+    person rather than feed a JS fetch.
+    """
+    import slack_oauth as _so
+    import secrets_crypto
+
+    dashboard_base = os.environ.get(
+        "LIGHTSEI_DASHBOARD_BASE_URL", "https://app.lightsei.com"
+    ).rstrip("/")
+
+    def _html_error(title: str, message: str) -> Response:
+        body = (
+            "<!doctype html><html><head><meta charset=utf-8>"
+            "<title>Slack install — Lightsei</title>"
+            "<style>body{font:14px/1.5 -apple-system,sans-serif;"
+            "max-width:480px;margin:64px auto;padding:0 16px;color:#111}"
+            "h1{font-size:18px;font-weight:600;margin-bottom:8px}"
+            "p{color:#555;margin:8px 0}a{color:#4f46e5}</style></head>"
+            f"<body><h1>{title}</h1><p>{message}</p>"
+            f"<p><a href=\"{dashboard_base}/integrations\">"
+            "← back to integrations</a></p></body></html>"
+        )
+        return Response(content=body, media_type="text/html", status_code=400)
+
+    if error:
+        # Slack hands back ?error=access_denied if the user cancelled
+        # on the consent screen.
+        return _html_error(
+            "Slack install was cancelled",
+            f"Slack returned an error: {error}. You can try again from "
+            "the integrations page.",
+        )
+
+    if not code or not state:
+        return _html_error(
+            "Invalid Slack install link",
+            "The Slack install callback was missing required parameters. "
+            "Start the install again from the integrations page.",
+        )
+
+    pending = session.get(SlackOAuthPendingState, state)
+    now = utcnow()
+    if pending is None or pending.expires_at <= now:
+        return _html_error(
+            "Slack install link expired",
+            "The install link is no longer valid (expired or already used). "
+            "Start a fresh install from the integrations page.",
+        )
+
+    workspace_id = pending.lightsei_workspace_id
+    installed_by_user_id = pending.installed_by_user_id
+    redirect_after = pending.redirect_after
+    # Single-use: drop the pending row before doing the exchange so a
+    # parallel callback with the same state can't double-consume.
+    session.delete(pending)
+    session.flush()
+
+    try:
+        claims = _so.exchange_code_for_token(code=code)
+    except _so.SlackOAuthError as exc:
+        return _html_error(
+            "Slack install didn't complete",
+            f"The token exchange with Slack failed: {exc}. Try installing again.",
+        )
+
+    # Encrypt + store. The bot token is xoxb-... — sensitive enough that
+    # we never log it; secrets_crypto.encrypt mirrors the workspace-
+    # secret encryption path. Store as ASCII bytes of the base64 blob
+    # so the LargeBinary column doesn't need a schema change.
+    encrypted_blob = secrets_crypto.encrypt(claims["access_token"])
+    token_bytes = encrypted_blob.encode("ascii")
+
+    # If this Slack workspace was previously installed (and not revoked),
+    # update the existing row in place rather than inserting a new one —
+    # the partial-unique index would otherwise reject the new row.
+    existing = session.get(SlackWorkspace, claims["team_id"])
+    if existing is not None:
+        existing.lightsei_workspace_id = workspace_id
+        existing.team_name = claims["team_name"]
+        existing.bot_token_encrypted = token_bytes
+        existing.bot_user_id = claims["bot_user_id"]
+        existing.installed_by_user_id = installed_by_user_id
+        existing.installed_at = now
+        existing.revoked_at = None
+    else:
+        session.add(SlackWorkspace(
+            slack_team_id=claims["team_id"],
+            lightsei_workspace_id=workspace_id,
+            team_name=claims["team_name"],
+            bot_token_encrypted=token_bytes,
+            bot_user_id=claims["bot_user_id"],
+            installed_by_user_id=installed_by_user_id,
+            installed_at=now,
+        ))
+    session.flush()
+
+    target = redirect_after or f"{dashboard_base}/integrations/slack?installed=true"
+    # 303 makes the browser switch from GET to GET (which is what we
+    # want — Slack's redirect was a GET; we're handing off to the
+    # dashboard which is also GET).
+    return RedirectResponse(target, status_code=303)
 
 
 def _serialize_command(c: Command) -> dict[str, Any]:

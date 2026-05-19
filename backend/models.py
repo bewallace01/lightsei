@@ -1264,6 +1264,45 @@ class SlackChannel(Base):
     )
 
 
+class SlackOAuthPendingState(Base):
+    """Phase 19.2: short-lived state store for the Slack OAuth
+    start → callback hop.
+
+    Same shape as `OAuthPendingState` (Phase 17.3, Google OAuth) but
+    without the PKCE `code_verifier` column — Slack's OAuth v2 flow
+    doesn't use PKCE. Separate table keeps Google's per-row schema
+    assumptions out of the Slack flow's way.
+    """
+
+    __tablename__ = "slack_oauth_pending_states"
+
+    state: Mapped[str] = mapped_column(String(128), primary_key=True)
+    lightsei_workspace_id: Mapped[str] = mapped_column(
+        String, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    installed_by_user_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    # Where the dashboard wanted the user to land post-callback.
+    # Defaults to /integrations/slack in the handler if null.
+    redirect_after: Mapped[Optional[str]] = mapped_column(
+        String(512), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_slack_oauth_pending_states_expires_at",
+            "expires_at",
+        ),
+    )
+
+
 class SlackEvent(Base):
     """Phase 19.1: idempotency log for inbound Slack events.
 
