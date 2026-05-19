@@ -23,12 +23,18 @@ type NavItem =
       children: { href: string; label: string; hint?: string }[];
     };
 
+// Phase 18.1: roles-first nav. Top-level reflects what a non-technical
+// first-time user is here to do (manage their team, see activity, check
+// trust zones, hook up integrations, manage their account). Developer-
+// flavored surfaces (drop-a-zip, raw deployments, validators, docs) live
+// under an "Advanced" dropdown so the top bar stays uncluttered.
+// Polaris is no longer top-level — it's a regular agent in My team.
+// Home is reachable via the Logo (which already links to /), so we don't
+// need a redundant "home" item.
 const NAV: NavItem[] = [
-  { kind: "link", href: "/", label: "home" },
-  { kind: "link", href: "/polaris", label: "polaris" },
   {
     kind: "group",
-    label: "agents",
+    label: "My team",
     children: [
       {
         href: "/agents",
@@ -36,35 +42,25 @@ const NAV: NavItem[] = [
         hint: "Roster, pinned models, schedules, recent activity",
       },
       {
-        href: "/agents/generate",
-        label: "✨ generate from description",
-        hint: "Describe a bot, Lightsei generates one",
-      },
-      {
         href: "/agents/team-from-readme",
         label: "✨ propose a team from README",
         hint: "Drop a README, get a constellation",
       },
       {
-        href: "/agents/new",
-        label: "drop a zip",
-        hint: "Upload a pre-zipped bot directory",
+        href: "/agents/generate",
+        label: "✨ generate one bot from a description",
+        hint: "Describe a bot, Lightsei generates one",
       },
       {
-        href: "/deployments",
-        label: "deployments",
-        hint: "What the worker is running, plus history",
-      },
-      {
-        href: "/zones",
-        label: "trust zones",
-        hint: "Workspace topology by sensitivity level",
+        href: "/polaris",
+        label: "polaris",
+        hint: "Workspace orchestrator. Cron-scheduled, dispatches.",
       },
     ],
   },
   {
     kind: "group",
-    label: "activity",
+    label: "Activity",
     children: [
       {
         href: "/runs",
@@ -88,9 +84,10 @@ const NAV: NavItem[] = [
       },
     ],
   },
+  { kind: "link", href: "/zones", label: "Trust zones" },
   {
     kind: "group",
-    label: "integrations",
+    label: "Integrations",
     children: [
       {
         href: "/notifications",
@@ -102,14 +99,35 @@ const NAV: NavItem[] = [
         label: "github",
         hint: "Push-to-deploy + Polaris doc fetch",
       },
+    ],
+  },
+  { kind: "link", href: "/account", label: "Account" },
+  {
+    kind: "group",
+    label: "Advanced",
+    children: [
+      {
+        href: "/deployments",
+        label: "deployments",
+        hint: "What the worker is running, plus history",
+      },
+      {
+        href: "/agents/new",
+        label: "drop a zip",
+        hint: "Upload a pre-zipped bot directory (skip code-gen)",
+      },
       {
         href: "/validators",
         label: "validators",
         hint: "Per-event rules: edit, disable, or change mode",
       },
+      {
+        href: "/getting-started",
+        label: "docs",
+        hint: "SDK init flow, agent author guide",
+      },
     ],
   },
-  { kind: "link", href: "/getting-started", label: "docs" },
 ];
 
 

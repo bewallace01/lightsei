@@ -7,13 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 16 prod demo PASSED 2026-05-18. Phase 17 closed in test mode 2026-05-17. Phase 18 is up next.**
+> **Phase 18.2 — empty states + first-action CTAs on primary surfaces. Spec locked 2026-05-18; 18.1 shipped 2026-05-18.**
 
-Phase 16 prod demo: ran on prod 2026-05-18 with the Coral fake-SaaS README + Compliance preset. Acts 1-5 of the demo runbook passed — planner produced clean two-chain split with per-bot zone reasoning, `/zones` rendered isolated topology, SDK refused vega's internet call + send_command attempts with crystal-clear errors. Act 6 (handoff_span) skipped because Railway worker had bots queued without ticking (separate follow-up). The wedge claim is now demoable to a prospect in ~5 minutes.
+Phase 18 (dashboard polish) is the strategic-pivot roadmap's next P0 phase. 18.1 shipped 2026-05-18 — top nav restructured to roles-first (`My team / Activity / Trust zones / Integrations / Account / Advanced`). 18.2 follows: rewrite empty states on home / /agents / /zones / /runs so a freshly-signed-up workspace sees a useful CTA instead of a blank table. Closes the gap between "I just signed up" and "I just dropped a README" — currently most non-technical users don't make it across.
 
-Phase 17 demo: ran in Stripe test mode on prod 2026-05-17. Live-mode activation submitted, waiting on Stripe verification.
-
-NOW: pick a next phase. **Phase 18 (dashboard polish)** is next in the strategic-pivot roadmap. Worker investigation is parked as a quick follow-up.
+Phase 16 prod demo passed 2026-05-18. Phase 17 closed in test mode 2026-05-17. Live-mode activation submitted, waiting on Stripe verification.
 
 ## Phase 12C: drop a README, get a team
 
@@ -395,11 +393,50 @@ Phase 17 closes (test mode). Live-mode activation parked until ready to take rea
 
 ## Phase 18: Dashboard polish (the dashboard is the product)
 
-Operationalizes "dashboard is the primary surface" from the 2026-05-17 decision. Promoted from "deferred forever" to high-priority in the same update.
+Operationalizes "dashboard is the primary surface" from the 2026-05-17 decision. Promoted from "deferred forever" to high-priority in the same update. The dashboard is now where non-technical buyers experience the product; current IA + visuals reflect the previous developer-tool era. Phase 18 closes that gap.
 
-Rough shape: (1) IA pass so top-level nav makes sense to a non-technical first-time user (My team, Activity, Integrations, Trust zones, Billing, Settings; developer surfaces tucked under Advanced); (2) first-run onboarding flow that walks a new user from empty dashboard to first deployed bot in five minutes; (3) visual design pass on the headline surfaces (constellation map, agent detail, team-from-README flow); (4) inline help and tooltips on technical terms. Demo: hand the product to someone non-technical with no explanation, watch where they get stuck, fix those things.
+**Design choices locked 2026-05-18.**
 
-Detailed sub-tasks deferred until promoted to NOW.
+- **IA shape: roles-first, not surface-first.** Top-level nav = `My team / Activity / Trust zones / Integrations / Account` + Advanced dropdown. Polaris becomes a regular agent (no longer top-level). Docs / SDK pages / deployments / manual generate live under Advanced. Switch trigger: a power-user audience emerges that genuinely wants top-level access to /deployments and /docs — at that point we re-add them with a per-workspace toggle.
+- **Onboarding shape: dismissible checklist, not full guided tour.** A first-run user sees a checklist widget on the home page (add ANTHROPIC_API_KEY → drop a README → deploy a team → see /zones); dismissible permanently per workspace. No modal takeovers, no forced wizard. Switch trigger: completion rate from data shows users dismiss without completing — at that point, switch to a more aggressive first-time-only modal.
+- **Visual pass scope: constellation + agent detail first.** Two surfaces non-technical users see most. Other pages (runs, cost, dispatch) keep current Tailwind defaults until Phase 18.5+. Switch trigger: a buyer complains specifically about one of the deferred pages.
+- **Inline help: minimal first pass.** Tooltips only on the 8-10 most-confusing terms (sensitivity zone, capability, dispatch chain, etc.). Long-form explanations link to docs. Switch trigger: support tickets cluster around a specific term — annotate that one next.
+
+### 18.1 — IA pass (nav restructure) ✅ shipped 2026-05-18
+
+Restructured `dashboard/app/Header.tsx`. Top-level: `My team / Activity / Trust zones / Integrations / Account / Advanced`. Polaris demoted from top-level to a regular agent in `My team`. Docs / drop-a-zip / deployments / validators moved under Advanced. Home dropped from nav (Logo links to `/`). Account is now a top-level link (workspace switcher dropdown still has Log out + display info). Build clean across all 26 routes.
+
+### 18.2 — Empty states + first-action CTAs
+
+Every primary surface (home, /agents, /zones, /runs) should render a useful empty state when the workspace has zero bots. Today most pages render a blank table or a "no records" placeholder; replace with explicit CTAs that route to the next-best action. Specifically: home page empty state → big "Drop a README to build your team" card linking to `/agents/team-from-readme`. /agents empty → same. /zones empty → "Your team will appear here once you deploy. Drop a README to start." /runs empty → "No bot runs yet. Bots tick on their schedule or react to commands; once a run lands, you'll see it here."
+
+### 18.3 — First-run onboarding checklist
+
+Add a dismissible checklist widget that surfaces on the home page when a workspace hasn't completed key setup steps. Steps: (1) add ANTHROPIC_API_KEY workspace secret; (2) drop a README to plan a team; (3) deploy a team; (4) visit /zones to see the topology; (5) set a sensitivity_level + capabilities on at least one agent (or use the Compliance preset). Each step links to its respective surface, shows a green check when completed, and the whole widget hides itself once all 5 are done. Per-workspace dismissed flag stored on the workspace row + carried in the workspace serializer.
+
+### 18.4 — Visual pass on the constellation map
+
+Polish `dashboard/app/Constellation.tsx`. Goals: clearer node hierarchy (orchestrator visibly distinct from specialists from messengers), readable labels at all zoom levels, hover tooltips with agent summary + zone chip, color-coding subtle enough that the per-agent star-tints (per [[feedback]] memory) still feel like the primary identity. Cross-zone edges (when present) drawn in red with a thicker stroke + a tooltip explaining the policy implication. Mobile-responsive (the canvas dominates the home page; broken on narrow screens today).
+
+### 18.5 — Visual pass on the agent detail page
+
+Polish `dashboard/app/agents/[name]/page.tsx`. Current layout puts equally-weighted sections in a long vertical stack; readers don't know which to look at first. Target layout: top hero (name + zone chip + status + quick actions), middle two columns (left = config: sensitivity / capabilities / cross-zone / capabilities; right = recent runs + quality signal), bottom collapsed "Advanced" panel (raw bot.py viewer, scheduling, raw command/manifest, SDK init snippet). The Advanced panel is collapsed by default. Trust-zone editor stays in the middle config column.
+
+### 18.6 — Polish team-from-README flow
+
+The three-phase flow (plan → review → deploy → success) is functional but visually unsignposted. Add a progress indicator at the top, clearer "next-step" affordances at each transition, and better failure messaging when a bot's code generation fails (the psycopg2 failure during the Coral demo was a real example of where the failure copy could be friendlier — link to "edit the request and retry" rather than just showing the error).
+
+### 18.7 — Inline help + tooltips
+
+Add a `<Tooltip>` component that wraps a term with a small "(?)" affordance; hover opens a tooltip with a 1-2 line explanation. Apply to 8-10 terms surfaced in the Phase 16 + 17 UI: `sensitivity zone`, `capability`, `dispatch chain`, `cross-zone dispatch`, `quality signal`, `verdict`, `workspace secret`, `command kind`, `orchestrator / specialist / messenger`, `handoff span`. Long-form explanations link to docs (which now lives under Advanced).
+
+### 18.8 — Tests
+
+Per the existing test pattern: `tsc --noEmit` clean across all routes after each sub-task; dashboard `next build` green; a small integration test that confirms the nav exposes the new top-level items + tucks the old ones under Advanced. No backend changes in Phase 18, so backend test suite count should be unchanged.
+
+### 18.9 — Demo
+
+Hand the dashboard to someone non-technical with no explanation. Watch where they get stuck (signup → home → "now what?" → ...). Capture the friction in a short note + use it to prioritize Phase 18.x follow-ups. Demo passes when a first-time non-technical user lands a deployed Compliance team from a README in under 5 minutes with no help.
 
 ## Phase 19: Chat surface (Slack first, then Teams)
 
@@ -872,6 +909,23 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-18 — Phase 18 spec locked + 18.1 (IA pass) shipped
+
+Phase 18 (dashboard polish) gets a 9-sub-task spec covering IA pass, empty states, first-run checklist, visual passes on constellation + agent detail, team-from-README polish, inline help, tests, demo. Design choices locked: roles-first nav, dismissible checklist (not modal wizard), visual pass scoped to constellation + agent detail first, tooltip-only inline help (long-form via docs).
+
+**18.1 IA pass shipped.** `dashboard/app/Header.tsx` rewritten:
+
+- Top-level reads: `My team / Activity / Trust zones / Integrations / Account / Advanced`.
+- Polaris demoted from top-level to a regular agent in `My team` dropdown.
+- "Home" dropped from top-level (the Logo already links to `/`).
+- `docs / drop-a-zip / deployments / validators` moved under Advanced.
+- `Account` promoted to top-level link (workspace switcher dropdown still shows Log out + workspace metadata).
+- Sparkle prefixes (`✨`) preserved on the AI-driven affordances (`team from README`, `generate from description`, `cost insights`).
+
+**Verification:** `npx tsc --noEmit` clean. `npx next build` green; all 26 routes still build. Every previously-reachable route still reachable through the new nav (My team, Activity, Integrations, Account top-level links; Advanced dropdown covers the legacy developer surfaces).
+
+**What this unblocks:** the rest of Phase 18 can land against a clean nav. 18.2 (empty states) targets the surfaces a non-technical user lands on first; 18.3 (first-run checklist) writes the first-time-onboarding affordance against the home page.
 
 ### 2026-05-18 — Phase 16 prod demo PASSED on Coral fake-SaaS README
 
