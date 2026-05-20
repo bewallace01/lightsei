@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import html
 import json
 import os
 import secrets as _stdlib_secrets
@@ -59,6 +60,7 @@ from models import (
     NotificationDelivery,
     OAuthPendingState,
     Run,
+    SlackChannel,
     SlackEvent,
     SlackOAuthPendingState,
     SlackWorkspace,
@@ -4486,15 +4488,18 @@ def slack_oauth_callback(
     ).rstrip("/")
 
     def _html_error(title: str, message: str) -> Response:
+        safe_title = html.escape(title)
+        safe_message = html.escape(message)
+        safe_dashboard_base = html.escape(dashboard_base, quote=True)
         body = (
             "<!doctype html><html><head><meta charset=utf-8>"
-            "<title>Slack install — Lightsei</title>"
+            "<title>Slack install - Lightsei</title>"
             "<style>body{font:14px/1.5 -apple-system,sans-serif;"
             "max-width:480px;margin:64px auto;padding:0 16px;color:#111}"
             "h1{font-size:18px;font-weight:600;margin-bottom:8px}"
             "p{color:#555;margin:8px 0}a{color:#4f46e5}</style></head>"
-            f"<body><h1>{title}</h1><p>{message}</p>"
-            f"<p><a href=\"{dashboard_base}/integrations\">"
+            f"<body><h1>{safe_title}</h1><p>{safe_message}</p>"
+            f"<p><a href=\"{safe_dashboard_base}/integrations\">"
             "← back to integrations</a></p></body></html>"
         )
         return Response(content=body, media_type="text/html", status_code=400)
@@ -4547,10 +4552,50 @@ def slack_oauth_callback(
     encrypted_blob = secrets_crypto.encrypt(claims["access_token"])
     token_bytes = encrypted_blob.encode("ascii")
 
-    # If this Slack workspace was previously installed (and not revoked),
-    # update the existing row in place rather than inserting a new one —
-    # the partial-unique index would otherwise reject the new row.
+    # Preserve the one-active-install invariants before we mutate the
+    # binding. The token exchange has already happened because Slack only
+    # tells us team_id after that back-channel call.
     existing = session.get(SlackWorkspace, claims["team_id"])
+    if (
+        existing is not None
+        and existing.revoked_at is None
+        and existing.lightsei_workspace_id != workspace_id
+    ):
+        return _html_error(
+            "Slack workspace already connected",
+            "This Slack workspace is already connected to another Lightsei "
+            "workspace. Disconnect it there before installing it here.",
+        )
+
+    active_for_workspace = session.execute(
+        select(SlackWorkspace).where(
+            SlackWorkspace.lightsei_workspace_id == workspace_id,
+            SlackWorkspace.revoked_at.is_(None),
+            SlackWorkspace.slack_team_id != claims["team_id"],
+        )
+    ).scalar_one_or_none()
+    if active_for_workspace is not None:
+        return _html_error(
+            "Lightsei workspace already has Slack connected",
+            "This Lightsei workspace is already connected to a different "
+            "Slack workspace. Disconnect that install before connecting "
+            "another Slack workspace.",
+        )
+
+    ownership_changed = (
+        existing is not None and existing.lightsei_workspace_id != workspace_id
+    )
+    if ownership_changed:
+        stale_channels = session.execute(
+            select(SlackChannel).where(
+                SlackChannel.slack_team_id == claims["team_id"]
+            )
+        ).scalars().all()
+        for channel in stale_channels:
+            session.delete(channel)
+
+    # If this Slack workspace was previously installed, update the existing
+    # row in place rather than inserting a duplicate primary key.
     if existing is not None:
         existing.lightsei_workspace_id = workspace_id
         existing.team_name = claims["team_name"]
