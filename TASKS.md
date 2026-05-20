@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 19.4 — chat orchestrator handler. 19.1 + 19.2 + 19.3 shipped 2026-05-19.**
+> **Phase 19.5 — SDK helper `lightsei.post_slack` + `slack:respond` capability. 19.1-19.4 shipped 2026-05-19.**
 
-Phase 19 (chat surface) running. 19.1-19.3 shipped 2026-05-19 — schema backbone + Slack OAuth + events webhook with signature verification + idempotency + app_mention → generation_jobs queue. Backend at **802 passing** (was 758 at start of Phase 19; +44 over 3 sub-tasks).
+Phase 19 (chat surface) running. 19.1-19.4 shipped 2026-05-19 — schema + Slack OAuth + signed webhook + chat orchestrator with Polaris-style routing. Backend at **811 passing** (+53 across Phase 19 so far; started at 758).
 
-NOW is 19.4: chat orchestrator handler. Pure module `backend/slack_orchestrator.py` registered to handle `kind='slack_orchestration'` jobs. Reads the channel's sensitivity_level + opted_in flag; if opted in, calls Anthropic with a routing prompt over bots whose zone matches the channel's zone; dispatches a `slack.respond` command to the chosen bot. (19.5 ships the SDK `post_slack` helper + capability.)
+NOW is 19.5: SDK helper `lightsei.post_slack(channel, text, thread_ts?)` calls a backend endpoint that decrypts the workspace's bot token + invokes `slack_client.post_message`. New capability `'slack:respond'` gated like other Phase 16 capabilities — bots without it raise `LightseiCapabilityError`. Compliance preset's internal + public hint mappings grant it automatically; pii + sensitive bots don't get it (default-deny).
 
 Phase 18 code-complete 2026-05-19. Phase 16 prod demo passed. Phase 17 in test mode; live-mode awaiting Stripe verification.
 
@@ -519,7 +519,9 @@ Configured via env: `LIGHTSEI_SLACK_CLIENT_ID`, `LIGHTSEI_SLACK_CLIENT_SECRET`, 
 - **Idempotency**: `events.event_id` checked against `slack_events`. Already-seen → 200 + no-op.
 - **Event routing**: `app_mention` events (the user `@Lightsei`d the app in a channel) get queued onto the existing `generation_jobs` table as kind `slack_orchestration`. The 19.4 chat orchestrator handler picks it up.
 
-### 19.4 — Chat orchestrator handler
+### 19.4 — Chat orchestrator handler ✅ shipped 2026-05-19
+
+`backend/slack_client.py` (Slack API client wrapper) + `backend/slack_orchestrator.py` (handler + Anthropic routing) + 9 tests. Handler registered for `kind='slack_orchestration'`. Anthropic + Slack both stubbed in tests via monkeypatch.
 
 New handler in `backend/jobs.py` registry for `kind='slack_orchestration'`. Pure module `backend/slack_orchestrator.py` owns the logic:
 
@@ -1030,6 +1032,33 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-19 — Phase 19.4 shipped: chat orchestrator handler
+
+`backend/slack_client.py` (Slack API wrapper) + `backend/slack_orchestrator.py` (handler with Anthropic-driven routing) + 9 tests. Anthropic + Slack stubbed in tests via monkeypatch; backend at **811 passing** (was 802; +9 new).
+
+- **`slack_client.post_message(session, slack_team_id, channel, text, thread_ts?)`**: decrypts the workspace's bot token from `slack_workspaces.bot_token_encrypted` (ASCII bytes → secrets_crypto.decrypt), calls `chat.postMessage`. Raises `SlackClientError` on missing/revoked workspace, undecryptable token, ok:false envelope, or transport failure. Reusable by 19.4 error paths + 19.5 SDK helper.
+- **`slack_orchestrator.run_slack_orchestration_job(session, workspace_id, payload)`**: the chat router itself. Flow:
+  1. Look up the channel; auto-discover (insert silent default) on first sight.
+  2. Opt-in gate: if `opted_in=false`, post a friendly Slack nudge with a link to `/integrations/slack` and skip.
+  3. Filter agents by zone match AND `slack:respond` capability. No candidates → post "no bots available" + skip.
+  4. Anthropic routing call with a strict-mode `pick_bot` tool returning `{target_agent, why}`. Wraps the multi-second LLM call with `session.commit()` per the Railway Postgres idle-in-transaction lesson.
+  5. Dispatches a `slack.respond` command (via Phase 11.2's Command queue) to the chosen bot with the full message payload. The bot's handler will reply via 19.5's `lightsei.post_slack`.
+  6. LLM picks a non-candidate bot → post routing-failed nudge.
+- **Handler registered** via `_register()` at module-load time in `slack_orchestrator.py`; `backend/jobs.py._load_default_handlers()` imports the module so the registration fires on startup.
+
+**Verification**: 9 new tests in `backend/tests/test_slack_orchestrator.py`:
+- Channel auto-discovery: first event in an unknown channel inserts a silent row + posts the not-connected nudge.
+- Opt-in gate: existing-but-unopted channel posts the same nudge.
+- No same-zone bots: posts "no bots available" + skips.
+- Zone-match but no `slack:respond` capability: bot still filtered out.
+- Happy path: Anthropic picks a candidate, Command row enqueued with full payload, no nudge posted (the bot will post its own response via 19.5).
+- LLM picks an unknown bot: defensive — posts routing-failed nudge.
+- Missing ANTHROPIC_API_KEY: posts setup nudge + skips.
+- Anthropic error (5xx, rate limit): posts routing-failed nudge.
+- **Zone-mismatch wedge enforcement**: PII bot with `slack:respond` is filtered out of a public-zoned channel. The wedge claim applied to the chat boundary.
+
+**What this unblocks**: 19.5 (SDK helper) wires bot code into `slack_client.post_message` via a Lightsei backend endpoint. 19.7 (dashboard `/integrations/slack` page) lets the operator opt channels in (without that step, every event lands on the not-connected nudge path).
 
 ### 2026-05-19 — Phase 19.3 shipped: Slack events webhook + signature verification
 
