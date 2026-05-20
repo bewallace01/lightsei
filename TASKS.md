@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 19.3 — Slack events webhook + signature verification. 19.1 + 19.2 shipped 2026-05-19.**
+> **Phase 19.4 — chat orchestrator handler. 19.1 + 19.2 + 19.3 shipped 2026-05-19.**
 
-Phase 19 (chat surface) running. 19.1 + 19.2 shipped 2026-05-19 — schema backbone (workspaces + channels + events + oauth_pending_states) + Slack OAuth helper module + `/slack/oauth/start` + `/slack/oauth/callback` endpoints + 25 tests. Backend at 783 passing.
+Phase 19 (chat surface) running. 19.1-19.3 shipped 2026-05-19 — schema backbone + Slack OAuth + events webhook with signature verification + idempotency + app_mention → generation_jobs queue. Backend at **802 passing** (was 758 at start of Phase 19; +44 over 3 sub-tasks).
 
-NOW is 19.3: `POST /slack/events` endpoint with Slack signing-secret HMAC verification, URL-verification handshake, idempotency via the slack_events table, event router that queues `app_mention` events onto the generation_jobs table as kind `slack_orchestration` (handler comes in 19.4).
+NOW is 19.4: chat orchestrator handler. Pure module `backend/slack_orchestrator.py` registered to handle `kind='slack_orchestration'` jobs. Reads the channel's sensitivity_level + opted_in flag; if opted in, calls Anthropic with a routing prompt over bots whose zone matches the channel's zone; dispatches a `slack.respond` command to the chosen bot. (19.5 ships the SDK `post_slack` helper + capability.)
 
 Phase 18 code-complete 2026-05-19. Phase 16 prod demo passed. Phase 17 in test mode; live-mode awaiting Stripe verification.
 
@@ -508,7 +508,9 @@ Two endpoints:
 
 Configured via env: `LIGHTSEI_SLACK_CLIENT_ID`, `LIGHTSEI_SLACK_CLIENT_SECRET`, `LIGHTSEI_SLACK_SIGNING_SECRET`, `LIGHTSEI_SLACK_REDIRECT_URI` (defaults to `https://api.lightsei.com/slack/oauth/callback`).
 
-### 19.3 — Slack events webhook + signature verification
+### 19.3 — Slack events webhook + signature verification ✅ shipped 2026-05-19
+
+`backend/slack_events.py` helper module + `POST /slack/events` endpoint + 19 tests landed. Slack signature verification (HMAC-SHA256 over `v0:{ts}:{body}`) is exercised for real against a stub signing secret — tests compute valid signatures rather than mock the verification path.
 
 `POST /slack/events` — receives events from Slack:
 
@@ -1028,6 +1030,27 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-19 — Phase 19.3 shipped: Slack events webhook + signature verification
+
+`backend/slack_events.py` helper module + `POST /slack/events` endpoint in `main.py` + 19 tests. Signature verification (HMAC-SHA256 over `v0:{ts}:{body}`) is exercised for real against a stub signing secret — tests compute valid signatures rather than mock the verification path.
+
+- **`backend/slack_events.py`** owns the signing-secret read + the verifier. `verify_signature(body, timestamp_header, signature_header, now_s?)` raises `SlackSignatureError` on: missing secret config, missing headers, non-integer timestamp, timestamp outside the 5-minute tolerance window, or signature mismatch. `now_s` injectable for tests so we don't have to fight a clock.
+- **`POST /slack/events`** in main.py does five things in order:
+  1. **URL-verification handshake**: if `type=='url_verification'`, echo the `challenge` field. Works WITHOUT the signing secret configured — Slack pings before we've necessarily set up env, and the handshake is what registers the endpoint in the first place.
+  2. **Signature verification**: HMAC + 5-minute timestamp window. Mismatch → 400 (NOT 5xx, which would make Slack retry forever).
+  3. **Idempotency check**: insert into slack_events; IntegrityError on duplicate (slack_team_id, event_id) → 200 + `status: "duplicate"`. The schema's PK does the work.
+  4. **Workspace lookup**: if the slack_team_id has no slack_workspaces row OR the row is revoked, 200 + `status: "ignored"`. Don't process events for teams we don't know about.
+  5. **Event routing**: `app_mention` events enqueue a `generation_jobs` row with `kind='slack_orchestration'` carrying `(slack_team_id, channel_id, user_id, text, thread_ts, ts, slack_event_id)`. The 19.4 handler picks it up. Other event types get 200 + `status: "ignored"`.
+
+**Verification**: 19 new tests in `backend/tests/test_slack_events.py`:
+- Pure helpers: signing-secret env detection, valid-signature pass, bad-signature reject, stale-timestamp reject, missing-headers reject, non-integer-timestamp reject, missing-secret reject.
+- URL handshake: echoes challenge with valid signature; works without signing secret; 400 when challenge field missing.
+- Endpoint: 400 on bad signature; 400 on missing signing secret; duplicate event_id → no-op; app_mention enqueues a slack_orchestration job with the expected payload + `workspace_id` set to the Lightsei workspace; ignored when slack workspace not installed; ignored when install revoked; unknown event type → 200 ignored; missing envelope fields → 200 ignored.
+
+Full backend suite: **802 passed in 151s** (was 783, +19 new). 0 regressions.
+
+**What this unblocks**: 19.4 (chat orchestrator handler) reads the queued `slack_orchestration` jobs and decides which bot responds. 19.5 (SDK `post_slack` helper) writes back to Slack using the encrypted bot token persisted in 19.2.
 
 ### 2026-05-19 — Phase 19.2 shipped: Slack OAuth (start + callback)
 

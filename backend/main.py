@@ -59,6 +59,7 @@ from models import (
     NotificationDelivery,
     OAuthPendingState,
     Run,
+    SlackEvent,
     SlackOAuthPendingState,
     SlackWorkspace,
     Session as SessionRow,
@@ -4575,6 +4576,161 @@ def slack_oauth_callback(
     # want — Slack's redirect was a GET; we're handing off to the
     # dashboard which is also GET).
     return RedirectResponse(target, status_code=303)
+
+
+# ---------- Phase 19.3: Slack events webhook ---------- #
+
+
+# Event types we route into the generation_jobs queue. Anything else
+# is acknowledged with 200 + ignored so Slack stops retrying — the
+# events webhook config in 19.7 will request only the events we
+# handle, but Slack sometimes sends events we didn't subscribe to
+# (e.g. when the app is added to a new channel).
+_HANDLED_SLACK_EVENT_TYPES = {
+    "app_mention",
+}
+
+
+@app.post("/slack/events")
+async def slack_events(
+    request: Request, session: Session = Depends(get_session)
+) -> dict[str, Any]:
+    """Phase 19.3: Slack events webhook.
+
+    Slack POSTs every subscribed event here (mentions, slash commands,
+    membership changes). We:
+
+    1. Echo the URL-verification challenge so Slack accepts the endpoint
+       at configuration time.
+    2. Verify the X-Slack-Signature HMAC + timestamp window so attackers
+       can't forge events.
+    3. Check idempotency against slack_events: Slack retries delivery up
+       to 3 times within an hour; we treat a duplicate event_id as
+       already-handled.
+    4. Route app_mention events onto the generation_jobs queue as kind
+       'slack_orchestration'. The 19.4 chat orchestrator handler picks
+       them up + decides which bot responds.
+    5. Acknowledge anything else with 200 + ignored.
+
+    Returns 400 (not 5xx) on bad signature or missing config so Slack
+    stops retrying a permanently-broken delivery.
+    """
+    import slack_events as _se
+
+    payload_bytes = await request.body()
+
+    # ---- Pre-parse for URL verification ---- #
+    # Slack pings the endpoint at config time with a JSON body of
+    # {type: "url_verification", challenge: "..."}. The signature is
+    # included on this request too, but we want to handle the handshake
+    # even on a fresh deployment where the signing secret might not
+    # yet be in env. So: try to parse first; if it's a URL verification
+    # and there's no challenge to verify against, just echo.
+    try:
+        body_json = json.loads(payload_bytes.decode("utf-8"))
+    except Exception:
+        # Not JSON; reject. Slack only ever sends JSON.
+        raise HTTPException(status_code=400, detail="payload is not valid JSON")
+
+    if body_json.get("type") == "url_verification":
+        # Echo the challenge so Slack accepts the endpoint. Slack still
+        # signs this request, but the URL-verification handshake is
+        # what registers the endpoint in the first place, so we don't
+        # gate it on signing-secret config.
+        challenge = body_json.get("challenge")
+        if not isinstance(challenge, str):
+            raise HTTPException(
+                status_code=400,
+                detail="url_verification missing challenge",
+            )
+        return {"challenge": challenge}
+
+    # ---- Signature verification ---- #
+    if not _se.is_signing_configured():
+        import logging as _logging
+        _logging.getLogger("lightsei.slack_events").warning(
+            "slack events webhook hit but LIGHTSEI_SLACK_SIGNING_SECRET is not set"
+        )
+        raise HTTPException(
+            status_code=400, detail="signing secret not configured"
+        )
+
+    try:
+        _se.verify_signature(
+            body=payload_bytes,
+            timestamp_header=request.headers.get("x-slack-request-timestamp"),
+            signature_header=request.headers.get("x-slack-signature"),
+        )
+    except _se.SlackSignatureError as exc:
+        raise HTTPException(status_code=400, detail=f"bad signature: {exc}")
+
+    # ---- Idempotency check ---- #
+    event = body_json.get("event") or {}
+    event_id = body_json.get("event_id")
+    slack_team_id = body_json.get("team_id") or body_json.get("api_app_id")
+    if not event_id or not slack_team_id:
+        # Malformed envelope. Still 200 + ignore so Slack doesn't retry.
+        return {"status": "ignored", "reason": "missing_event_id_or_team_id"}
+
+    # Try to insert the idempotency row first. If it's a duplicate,
+    # IntegrityError signals we've already handled this; return 200 +
+    # no-op so Slack stops retrying.
+    from sqlalchemy.exc import IntegrityError
+    now = utcnow()
+    try:
+        session.add(SlackEvent(
+            slack_team_id=slack_team_id,
+            event_id=event_id,
+            kind=event.get("type") or "unknown",
+            received_at=now,
+        ))
+        session.flush()
+    except IntegrityError:
+        session.rollback()
+        return {"status": "duplicate", "event_id": event_id}
+
+    # ---- Event routing ---- #
+    event_type = event.get("type") or ""
+    if event_type not in _HANDLED_SLACK_EVENT_TYPES:
+        # Acknowledge + ignore. The Slack-app config in 19.7 will
+        # subscribe only to events we handle, but Slack still sends
+        # some events implicitly (membership_changed, etc.).
+        return {"status": "ignored", "type": event_type}
+
+    # Look up the Lightsei workspace from the slack_team_id so the
+    # orchestrator job runs against the right workspace.
+    sw = session.get(SlackWorkspace, slack_team_id)
+    if sw is None or sw.revoked_at is not None:
+        # Slack workspace isn't connected to a Lightsei workspace
+        # (revoked or never installed). Drop the event silently.
+        return {"status": "ignored", "reason": "slack_workspace_not_installed"}
+
+    # Queue an orchestration job. The 19.4 handler reads (slack_team_id,
+    # channel_id, user_id, text, thread_ts?) from the payload + decides
+    # which bot responds.
+    from jobs import enqueue_job
+    job_id = str(uuid.uuid4())
+    enqueue_job(
+        session,
+        job_id=job_id,
+        workspace_id=sw.lightsei_workspace_id,
+        kind="slack_orchestration",
+        request_payload={
+            "slack_team_id": slack_team_id,
+            "channel_id": event.get("channel"),
+            "user_id": event.get("user"),
+            "text": event.get("text") or "",
+            "thread_ts": event.get("thread_ts"),
+            "ts": event.get("ts"),
+            "slack_event_id": event_id,
+        },
+    )
+
+    return {
+        "status": "queued",
+        "type": event_type,
+        "job_id": job_id,
+    }
 
 
 def _serialize_command(c: Command) -> dict[str, Any]:
