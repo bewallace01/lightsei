@@ -240,6 +240,38 @@ def test_unopted_channel_posts_nudge_and_skips(client, alice, monkeypatch):
     assert len(posts) == 1
 
 
+def test_channel_from_prior_workspace_resets_to_silent(client, alice, bob, monkeypatch):
+    """Stale channel settings from a prior owner must not authorize dispatch."""
+    old_ws_id = alice["workspace"]["id"]
+    current_ws_id = bob["workspace"]["id"]
+    _install_slack_workspace(current_ws_id, slack_team_id="T_TRANSFERRED")
+    _opt_in_channel(
+        old_ws_id,
+        "T_TRANSFERRED",
+        "C_FINANCE",
+        sensitivity="public",
+    )
+    _add_agent(current_ws_id, "atlas", "public", ["slack:respond"])
+
+    posts = _stub_slack_post(monkeypatch)
+
+    with session_scope() as s:
+        result = slack_orchestrator.run_slack_orchestration_job(
+            s,
+            current_ws_id,
+            _make_payload(slack_team_id="T_TRANSFERRED", channel_id="C_FINANCE"),
+        )
+
+    assert result["status"] == "skipped"
+    assert result["reason"] == "channel_not_opted_in"
+    assert len(posts) == 1
+    with session_scope() as s:
+        channel = s.get(SlackChannel, ("T_TRANSFERRED", "C_FINANCE"))
+        assert channel.lightsei_workspace_id == current_ws_id
+        assert channel.sensitivity_level == "internal"
+        assert channel.opted_in is False
+
+
 # ---------- No-candidates path ---------- #
 
 
@@ -379,6 +411,34 @@ def test_missing_anthropic_key_posts_setup_nudge(client, alice, monkeypatch):
     assert result["reason"] == "missing_anthropic_key"
     assert len(posts) == 1
     assert "anthropic" in posts[0]["text"].lower()
+
+
+def test_corrupt_anthropic_key_posts_setup_nudge(client, alice, monkeypatch):
+    """A present but undecryptable key should not make Slack go silent."""
+    ws_id = alice["workspace"]["id"]
+    _install_slack_workspace(ws_id)
+    _opt_in_channel(ws_id, "T_ORCH", sensitivity="internal")
+    _add_agent(ws_id, "atlas", "internal", ["slack:respond"])
+    with session_scope() as s:
+        s.add(WorkspaceSecret(
+            workspace_id=ws_id,
+            name="ANTHROPIC_API_KEY",
+            encrypted_value="not-a-valid-encrypted-value",
+            created_at=_now(),
+            updated_at=_now(),
+        ))
+
+    posts = _stub_slack_post(monkeypatch)
+
+    with session_scope() as s:
+        result = slack_orchestrator.run_slack_orchestration_job(
+            s, ws_id, _make_payload(),
+        )
+
+    assert result["status"] == "failed"
+    assert result["reason"] == "decrypt_anthropic_key"
+    assert len(posts) == 1
+    assert "anthropic api key" in posts[0]["text"].lower()
 
 
 def test_anthropic_error_posts_routing_failed_nudge(client, alice, monkeypatch):

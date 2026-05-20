@@ -28,6 +28,7 @@ import slack_oauth as so
 import secrets_crypto
 from db import session_scope
 from models import (
+    SlackChannel,
     SlackOAuthPendingState,
     SlackWorkspace,
 )
@@ -262,6 +263,18 @@ def test_oauth_callback_handles_user_cancel(client):
     assert "cancelled" in r.text.lower()
 
 
+def test_oauth_callback_escapes_slack_error_html(client):
+    """Slack's error value is query-string input. Render it as text."""
+    r = client.get(
+        "/slack/oauth/callback",
+        params={"error": "<script>alert(1)</script>"},
+        follow_redirects=False,
+    )
+    assert r.status_code == 400
+    assert "<script>" not in r.text
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in r.text
+
+
 def test_oauth_callback_reinstall_updates_existing_row(client, alice, monkeypatch):
     """If a Slack workspace was previously connected and now re-installs
     (e.g. re-authed after a revoke), update the existing row rather
@@ -315,3 +328,100 @@ def test_oauth_callback_reinstall_updates_existing_row(client, alice, monkeypatc
             select(SlackWorkspace).where(SlackWorkspace.slack_team_id == "T_REINSTALL")
         ).scalars().all()
         assert len(rows) == 1
+
+
+def test_oauth_callback_refuses_active_cross_workspace_rebind(
+    client, alice, bob, monkeypatch
+):
+    """An active Slack install belongs to one Lightsei workspace.
+
+    A second workspace must not be able to take over the binding or reuse
+    the first workspace's channel opt-in settings.
+    """
+    start1 = client.get(
+        "/slack/oauth/start",
+        headers=auth_headers(alice["session_token"]),
+    ).json()
+    monkeypatch.setattr(
+        "slack_oauth.httpx.post",
+        lambda *a, **kw: _fake_token_response(team_id="T_SHARED"),
+    )
+    first = client.get(
+        f"/slack/oauth/callback?code=first&state={start1['state']}",
+        follow_redirects=False,
+    )
+    assert first.status_code == 303
+
+    with session_scope() as s:
+        s.add(SlackChannel(
+            slack_team_id="T_SHARED",
+            channel_id="C_FINANCE",
+            lightsei_workspace_id=alice["workspace"]["id"],
+            channel_name="finance",
+            sensitivity_level="public",
+            opted_in=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        ))
+
+    start2 = client.get(
+        "/slack/oauth/start",
+        headers=auth_headers(bob["session_token"]),
+    ).json()
+    monkeypatch.setattr(
+        "slack_oauth.httpx.post",
+        lambda *a, **kw: _fake_token_response(
+            access_token="xoxb-bob-should-not-own",
+            team_id="T_SHARED",
+        ),
+    )
+    second = client.get(
+        f"/slack/oauth/callback?code=second&state={start2['state']}",
+        follow_redirects=False,
+    )
+
+    assert second.status_code == 400
+    assert "already connected" in second.text.lower()
+    with session_scope() as s:
+        row = s.get(SlackWorkspace, "T_SHARED")
+        assert row.lightsei_workspace_id == alice["workspace"]["id"]
+        channel = s.get(SlackChannel, ("T_SHARED", "C_FINANCE"))
+        assert channel.lightsei_workspace_id == alice["workspace"]["id"]
+        assert channel.opted_in is True
+
+
+def test_oauth_callback_second_active_install_returns_html_error(
+    client, alice, monkeypatch
+):
+    """A workspace with an active Slack install gets a 400, not a DB 500."""
+    start1 = client.get(
+        "/slack/oauth/start",
+        headers=auth_headers(alice["session_token"]),
+    ).json()
+    monkeypatch.setattr(
+        "slack_oauth.httpx.post",
+        lambda *a, **kw: _fake_token_response(team_id="T_FIRST_ACTIVE"),
+    )
+    first = client.get(
+        f"/slack/oauth/callback?code=first&state={start1['state']}",
+        follow_redirects=False,
+    )
+    assert first.status_code == 303
+
+    start2 = client.get(
+        "/slack/oauth/start",
+        headers=auth_headers(alice["session_token"]),
+    ).json()
+    monkeypatch.setattr(
+        "slack_oauth.httpx.post",
+        lambda *a, **kw: _fake_token_response(team_id="T_SECOND_ACTIVE"),
+    )
+    second = client.get(
+        f"/slack/oauth/callback?code=second&state={start2['state']}",
+        follow_redirects=False,
+    )
+
+    assert second.status_code == 400
+    assert "different slack workspace" in second.text.lower()
+    with session_scope() as s:
+        assert s.get(SlackWorkspace, "T_SECOND_ACTIVE") is None

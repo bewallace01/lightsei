@@ -184,7 +184,7 @@ def run_slack_orchestration_job(
     channel = session.get(SlackChannel, (slack_team_id, channel_id))
     if channel is None:
         # First time we've seen this channel. Insert with safe defaults
-        # — silent, internal zone — so the operator can opt it in from
+        # so the operator can opt it in from
         # the dashboard.
         channel = SlackChannel(
             slack_team_id=slack_team_id,
@@ -197,6 +197,15 @@ def run_slack_orchestration_job(
             updated_at=_utcnow(),
         )
         session.add(channel)
+        session.flush()
+    elif channel.lightsei_workspace_id != workspace_id:
+        # Ownership can change after a revoked Slack reinstall. Never let
+        # opt-in or sensitivity settings from the prior Lightsei workspace
+        # authorize dispatch in the current one.
+        channel.lightsei_workspace_id = workspace_id
+        channel.sensitivity_level = "internal"
+        channel.opted_in = False
+        channel.updated_at = _utcnow()
         session.flush()
 
     # ---- 2. Opt-in gate. ---- #
@@ -258,6 +267,13 @@ def run_slack_orchestration_job(
     try:
         anthropic_key = secrets_crypto.decrypt(secret_row.encrypted_value)
     except Exception:
+        _try_post_to_slack(
+            session, slack_team_id, channel_id,
+            "Lightsei couldn't read this workspace's Anthropic API key. "
+            "An admin can re-save it from "
+            "<https://app.lightsei.com/account|/account>.",
+            thread_ts=thread_ts,
+        )
         return {"status": "failed", "reason": "decrypt_anthropic_key"}
 
     # Close the read transaction before the LLM call — Railway Postgres
