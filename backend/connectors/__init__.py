@@ -134,6 +134,18 @@ def _gmail_invoke(*, tool_name: str, payload: dict, access_token: str) -> dict:
     )
 
 
+def _calendar_manifest() -> list[ConnectorToolManifest]:
+    from . import google_calendar as _cal
+    return _cal.MANIFEST()
+
+
+def _calendar_invoke(*, tool_name: str, payload: dict, access_token: str) -> dict:
+    from . import google_calendar as _cal
+    return _cal.INVOKE(
+        tool_name=tool_name, payload=payload, access_token=access_token,
+    )
+
+
 CONNECTOR_REGISTRY: dict[str, ConnectorSpec] = {
     "gmail": ConnectorSpec(
         name="gmail",
@@ -176,8 +188,8 @@ CONNECTOR_REGISTRY: dict[str, ConnectorSpec] = {
             "Use for scheduling, conflict detection, or weekly-meeting "
             "digest bots."
         ),
-        manifest=_empty_manifest,
-        invoke=_not_implemented_invoke("google_calendar"),
+        manifest=_calendar_manifest,
+        invoke=_calendar_invoke,
     ),
     "google_drive": ConnectorSpec(
         name="google_drive",

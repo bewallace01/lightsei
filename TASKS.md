@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 20.4 — Google Calendar connector. 20.1 + 20.2 + 20.3 shipped 2026-05-20.**
+> **Phase 20.5 — Google Drive connector. 20.1 + 20.2 + 20.3 + 20.4 shipped 2026-05-20.**
 
-Phase 20 (integration breadth) running. 20.1-20.3 shipped — schema + Google OAuth + Gmail implementation. Backend at **894 passing** (+58 across Phase 20; started at 836).
+Phase 20 (integration breadth) running. 20.1-20.4 shipped — schema + Google OAuth + Gmail + Calendar. Backend at **911 passing** (+75 across Phase 20; started at 836).
 
-NOW is 20.4: `backend/connectors/google_calendar.py` — same shape as Gmail (MANIFEST + INVOKE + per-tool functions). Tools: list_events, get_event, create_event, update_event, delete_event, list_calendars, find_free_slots.
+NOW is 20.5: `backend/connectors/google_drive.py` — final per-connector implementation. Tools: list_files, search_files, get_file_metadata, download_file_content, upload_file, create_folder, copy_file. After 20.5, all three v1 connectors are real and the registry has no stubs.
 
 Phase 19 code-complete 2026-05-20. Phase 18 code-complete 2026-05-19. Phase 16 prod demo passed. Phase 17 in test mode; live-mode awaiting Stripe verification.
 
@@ -630,7 +630,9 @@ Two endpoints:
 - `INVOKE(tool_name, payload, access_token)` dispatches to the right function. Each function makes the corresponding Gmail API call via `httpx`.
 - Token-refresh wrapper: if a call returns 401, refresh the access_token using the stored refresh_token + retry once. Update the install row's encrypted_tokens.
 
-### 20.4 — Google Calendar connector implementation
+### 20.4 — Google Calendar connector implementation ✅ shipped 2026-05-20
+
+`backend/connectors/google_calendar.py` ships the second real connector INVOKE: 7 tools wrapping Calendar v3. Same shape as Gmail (20.3). 17 new tests. Registry wired. Drive remains the only still-stubbed connector.
 
 `backend/connectors/google_calendar.py`. Tools: `list_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `list_calendars`, `find_free_slots`.
 
@@ -1161,6 +1163,25 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-20 — Phase 20.4 shipped: Google Calendar connector implementation
+
+`backend/connectors/google_calendar.py` ships the second real connector INVOKE: 7 tools wrapping Calendar v3 (list_events, get_event, create_event, update_event, delete_event, list_calendars, find_free_slots). Same shape as Gmail (20.3) — MANIFEST + dispatcher + per-tool functions + private `_request` helper. Same exception semantics (401 → `ConnectorAuthExpired`; other 4xx/5xx + transport → `ConnectorCallError`). Defaults `calendar_id` to `"primary"` so bot code can omit it.
+
+Per-tool notes:
+- `list_events` clamps `max_results` to 250 (Calendar's cap), default 25; supports `time_min`/`time_max`/`query`/`single_events`.
+- `create_event` requires `summary`+`start`+`end`; optional `description`/`location`/`attendees`/`send_updates`. `start`/`end` accept either `{dateTime}` or `{date}` (all-day) shapes verbatim — bot code doesn't have to re-format.
+- `update_event` is partial — only the fields passed land in the PATCH body; 422-shaped error when zero fields supplied.
+- `delete_event` returns `{deleted_event_id, calendar_id}` since DELETE's 204 has no body.
+- `find_free_slots` posts to `/freeBusy` with `items=[{id: ...}]`; returns `{busy_by_calendar: {id: [busy_intervals]}}`. Caller subtracts from the window to compute free slots.
+
+**Verification**: 17 new tests in `backend/tests/test_connector_google_calendar.py`. Covers MANIFEST shape (7 tools), registry wiring, list_events defaults + clamp + query + 401 handling, get_event missing-id + happy, create_event POST body + missing-required, update_event partial PATCH + at-least-one-field check, delete_event 204 echo with deleted id, list_calendars, find_free_slots single + multi calendar + missing-window, unknown-tool dispatcher error.
+
+The 20.1 stub test now targets only `google_drive` (gmail + calendar both real).
+
+Full backend suite: **911 passed in 161s** (was 894, +17 new). 0 regressions. Observed the known `test_app_mention_enqueues_orchestration_job` flake; cleared on re-run.
+
+**What this unblocks**: 20.5 (Drive) follows the same pattern. After 20.5, all three v1 connectors have real INVOKE + the registry has no stubs.
 
 ### 2026-05-20 — Phase 20.3 shipped: Gmail connector implementation
 
