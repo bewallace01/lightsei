@@ -332,12 +332,13 @@ def test_connector_spec_rejects_invalid_zone():
 # ---------- Stub invoke behavior ---------- #
 
 
-def test_invoke_raises_not_implemented_before_phase_20_3():
+def test_invoke_raises_not_implemented_for_still_stubbed_connectors():
     """The 20.1 stubs raise ConnectorNotImplementedError so the bot-
     callable endpoint in 20.6 can surface 'this connector isn't
-    ready yet' rather than crash."""
-    spec = CONNECTOR_REGISTRY["gmail"]
-    with pytest.raises(ConnectorNotImplementedError) as exc:
-        spec.invoke(tool_name="send_email", payload={}, access_token="t")
-    assert "gmail" in str(exc.value)
-    assert "send_email" in str(exc.value)
+    ready yet' rather than crash. Gmail's INVOKE is real as of 20.3;
+    Calendar + Drive are still stubbed until 20.4 + 20.5."""
+    for name in ("google_calendar", "google_drive"):
+        spec = CONNECTOR_REGISTRY[name]
+        with pytest.raises(ConnectorNotImplementedError) as exc:
+            spec.invoke(tool_name="list_events", payload={}, access_token="t")
+        assert name in str(exc.value)

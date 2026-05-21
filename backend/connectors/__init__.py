@@ -51,6 +51,26 @@ class ConnectorNotImplementedError(NotImplementedError):
     isn't ready yet' rather than a stack trace."""
 
 
+class ConnectorAuthExpired(Exception):
+    """Raised by per-connector INVOKE functions when the upstream API
+    returns 401 (token expired / revoked). The 20.6 bot-callable
+    endpoint catches this, refreshes the access_token via the
+    connector's OAuth helper, updates the install row's
+    encrypted_tokens, and retries the call once. A second 401 after
+    refresh surfaces as 502 to the bot since the install is dead."""
+
+
+class ConnectorCallError(Exception):
+    """Catch-all for non-auth API errors (4xx/5xx other than 401,
+    transport failure, malformed response). The 20.6 endpoint
+    converts this to 502 with a generic message + the upstream
+    error code in _debug."""
+
+    def __init__(self, message: str, *, upstream_status: int | None = None):
+        super().__init__(message)
+        self.upstream_status = upstream_status
+
+
 @dataclass(frozen=True)
 class ConnectorSpec:
     """Metadata + dispatch surface for one connector.
@@ -102,6 +122,18 @@ def _empty_manifest() -> list[ConnectorToolManifest]:
 # ---------- v1 connector set: Gmail + Google Calendar + Google Drive ---------- #
 
 
+def _gmail_manifest() -> list[ConnectorToolManifest]:
+    from . import gmail as _gmail_mod
+    return _gmail_mod.MANIFEST()
+
+
+def _gmail_invoke(*, tool_name: str, payload: dict, access_token: str) -> dict:
+    from . import gmail as _gmail_mod
+    return _gmail_mod.INVOKE(
+        tool_name=tool_name, payload=payload, access_token=access_token,
+    )
+
+
 CONNECTOR_REGISTRY: dict[str, ConnectorSpec] = {
     "gmail": ConnectorSpec(
         name="gmail",
@@ -122,8 +154,8 @@ CONNECTOR_REGISTRY: dict[str, ConnectorSpec] = {
             "internal notifications, customer-reply automation, or "
             "digest-from-inbox bots."
         ),
-        manifest=_empty_manifest,
-        invoke=_not_implemented_invoke("gmail"),
+        manifest=_gmail_manifest,
+        invoke=_gmail_invoke,
     ),
     "google_calendar": ConnectorSpec(
         name="google_calendar",

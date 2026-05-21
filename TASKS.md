@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 20.3 — Gmail connector implementation. 20.1 + 20.2 shipped 2026-05-20.**
+> **Phase 20.4 — Google Calendar connector. 20.1 + 20.2 + 20.3 shipped 2026-05-20.**
 
-Phase 20 (integration breadth) running. 20.1 + 20.2 shipped — schema + registry + Google OAuth flow + connector install endpoints. Backend at **877 passing** (+41 over Phase 20 so far; phase started at 836).
+Phase 20 (integration breadth) running. 20.1-20.3 shipped — schema + Google OAuth + Gmail implementation. Backend at **894 passing** (+58 across Phase 20; started at 836).
 
-NOW is 20.3: `backend/connectors/gmail.py` — MANIFEST + INVOKE implementing send_email, search_inbox, get_thread, list_labels, add_label, mark_read. Token-refresh-on-401 wrapper.
+NOW is 20.4: `backend/connectors/google_calendar.py` — same shape as Gmail (MANIFEST + INVOKE + per-tool functions). Tools: list_events, get_event, create_event, update_event, delete_event, list_calendars, find_free_slots.
 
 Phase 19 code-complete 2026-05-20. Phase 18 code-complete 2026-05-19. Phase 16 prod demo passed. Phase 17 in test mode; live-mode awaiting Stripe verification.
 
@@ -620,7 +620,9 @@ Two endpoints:
 - `GET /connectors/google/start?type=gmail` (authed): generates state, persists with `connector_type` + `workspace_id` + `installed_by_user_id`, returns `{authorization_url, state}`.
 - `GET /connectors/google/callback?code&state`: exchanges code, persists `connector_installations` row with encrypted tokens, redirects to `/integrations?installed={type}`.
 
-### 20.3 — Gmail connector implementation
+### 20.3 — Gmail connector implementation ✅ shipped 2026-05-20
+
+`backend/connectors/gmail.py` (new) + `ConnectorAuthExpired` + `ConnectorCallError` added to `connectors/__init__.py` + 17 tests + registry wiring. Gmail INVOKE is now real; Calendar + Drive still stubbed until 20.4/20.5.
 
 `backend/connectors/gmail.py`:
 
@@ -1159,6 +1161,34 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-20 — Phase 20.3 shipped: Gmail connector implementation
+
+`backend/connectors/gmail.py` ships the first real connector INVOKE: 6 tools (send_email, search_inbox, get_thread, list_labels, add_label, mark_read) calling the Gmail v1 REST API via httpx. `ConnectorAuthExpired` + `ConnectorCallError` exceptions added to `backend/connectors/__init__.py` for shared use across all per-connector modules. CONNECTOR_REGISTRY's gmail entry rewired from the 20.1 stub to the real manifest + invoke.
+
+- **MANIFEST** returns MCP-flavored tool definitions (Anthropic tool-use input_schema shape). send_email requires to+subject+body; cc+bcc optional. search_inbox takes a Gmail-syntax `query` + optional `max_results` (clamped 1-100, default 20).
+- **`_send_email`** builds an RFC2822 message via `email.message.EmailMessage` → base64url-encoded `raw` → `POST /messages/send`. Returns `{id, thread_id, label_ids}`.
+- **`_search_inbox`** does a list call then per-message metadata calls to surface `{id, thread_id, from, subject, snippet, date, label_ids}` per result. N+1 calls per page is acceptable for the v1; can batch later if a customer hits the rate limit.
+- **`_get_thread`** fetches the full thread.
+- **`_list_labels`**, **`_add_label`**, **`_mark_read`** are thin wrappers over `/labels` + `/messages/{id}/modify`.
+- **`_request`** is the HTTP helper. 401 → raises `ConnectorAuthExpired` (so 20.6 can refresh + retry); other 4xx/5xx → `ConnectorCallError` with `upstream_status`; transport failure → `ConnectorCallError`.
+
+**Verification**: 17 new tests in `backend/tests/test_connector_gmail.py` (httpx stubbed, no Gmail network calls):
+- MANIFEST: lists all 6 tools, send_email schema requires to+subject+body.
+- Registry: gmail entry's manifest is non-empty (stub gone).
+- send_email: base64url-encoded RFC2822 includes to/subject/body, Authorization header set, missing fields raise, 401 raises `ConnectorAuthExpired`, 403 raises `ConnectorCallError` (NOT auth-expired — 20.6 shouldn't burn a refresh on it), transport failure raises.
+- search_inbox: lists+fetches metadata for each result, empty result set, max_results clamped to 100, default 20.
+- get_thread: returns full thread with messages.
+- list_labels: returns label list.
+- add_label: POST /modify with addLabelIds.
+- mark_read: POST /modify with removeLabelIds=[UNREAD].
+- Dispatcher: unknown tool_name raises `ConnectorCallError`.
+
+One 20.1 test (`test_invoke_raises_not_implemented_before_phase_20_3`) updated to target the still-stubbed `google_calendar` + `google_drive` connectors since gmail's INVOKE is now real.
+
+Full backend suite: **894 passed in 160s** (was 877, +17 new). 0 regressions.
+
+**What this unblocks**: 20.4 (Calendar) + 20.5 (Drive) follow the same pattern (MANIFEST + INVOKE + per-tool functions + _request helper). The shared `ConnectorAuthExpired` + `ConnectorCallError` exceptions are reused so 20.6's refresh-then-retry logic doesn't need per-connector branching.
 
 ### 2026-05-20 — Phase 20.2 shipped: Google OAuth connector install flow
 
