@@ -1840,6 +1840,28 @@ export async function startSlackOAuth(): Promise<{
   };
 }
 
+export async function completeSlackOAuth(
+  code: string,
+  state: string,
+): Promise<{ ok: boolean; redirect_after: string; slack_team_id: string }> {
+  return (await authedJson("/slack/oauth/complete", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ code, state }),
+  })) as { ok: boolean; redirect_after: string; slack_team_id: string };
+}
+
+export async function completeConnectorGoogleOAuth(
+  code: string,
+  state: string,
+): Promise<{ ok: boolean; connector_type: string; redirect_after: string }> {
+  return (await authedJson("/connectors/google/complete", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ code, state }),
+  })) as { ok: boolean; connector_type: string; redirect_after: string };
+}
+
 export async function fetchSlackWorkspaces(
   options?: { includeRevoked?: boolean },
 ): Promise<SlackWorkspaceSummary[]> {

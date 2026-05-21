@@ -227,6 +227,14 @@ def test_refresh_invalid_grant_raises(monkeypatch):
 # ---------- Endpoint tests ---------- #
 
 
+def _complete_connector_oauth(client, state: str, session_token: str, code: str = "abc"):
+    return client.post(
+        "/connectors/google/complete",
+        headers=auth_headers(session_token),
+        json={"code": code, "state": state},
+    )
+
+
 def test_start_503_when_not_configured(client, alice, monkeypatch):
     monkeypatch.delenv("LIGHTSEI_GOOGLE_CLIENT_ID")
     r = client.get(
@@ -263,9 +271,8 @@ def test_start_persists_state_with_connector_type(client, alice):
         assert row.code_verifier  # PKCE verifier persisted
 
 
-def test_callback_creates_install_row(client, alice, monkeypatch):
-    """Happy path: start → callback → encrypted token blob persisted →
-    303 redirect with ?installed=gmail."""
+def test_complete_creates_install_row(client, alice, monkeypatch):
+    """Happy path: start, dashboard completion, encrypted token blob persisted."""
     start = client.get(
         "/connectors/google/start?type=google_calendar",
         headers=auth_headers(alice["session_token"]),
@@ -284,24 +291,10 @@ def test_callback_creates_install_row(client, alice, monkeypatch):
         ),
     )
 
-    r = client.get(
-        f"/connectors/google/callback?code=abc&state={state}",
-        follow_redirects=False,
-    )
-    assert r.status_code == 303
-    assert "/integrations?installed=google_calendar" in r.headers["location"]
+    r = _complete_connector_oauth(client, state, alice["session_token"])
+    assert r.status_code == 200, r.text
+    assert r.json()["redirect_after"] == "/integrations?installed=google_calendar"
 
-    # Verify the install row + token blob roundtrip.
-    with session_scope() as s:
-        row = s.execute(
-            select(ConnectorInstallation).where(
-                ConnectorInstallation.workspace_id == alice["workspace"]["id"],
-                ConnectorInstallation.connector_type == "google_calendar",
-            ).limit(1)
-        ).scalar_one_or_none() if False else None
-
-    # The above one-liner gymnastics fails when sqlalchemy isn't
-    # in scope; use a plain session_scope block instead.
     from sqlalchemy import select as _select
     with session_scope() as s:
         rows = s.execute(
@@ -325,7 +318,7 @@ def test_callback_creates_install_row(client, alice, monkeypatch):
         assert s.get(ConnectorOAuthPendingState, state) is None
 
 
-def test_callback_reinstall_updates_existing_row(client, alice, monkeypatch):
+def test_complete_reinstall_updates_existing_row(client, alice, monkeypatch):
     """Re-running the install for a connector that's already active
     should update the existing row, not insert a duplicate that
     would violate the partial-unique index."""
@@ -338,11 +331,10 @@ def test_callback_reinstall_updates_existing_row(client, alice, monkeypatch):
         "connectors.google_oauth.httpx.post",
         lambda *a, **kw: _fake_exchange_response(access_token="first-access"),
     )
-    r1 = client.get(
-        f"/connectors/google/callback?code=first&state={start1['state']}",
-        follow_redirects=False,
+    r1 = _complete_connector_oauth(
+        client, start1["state"], alice["session_token"], code="first",
     )
-    assert r1.status_code == 303
+    assert r1.status_code == 200, r1.text
 
     # Second install — same connector, different token.
     start2 = client.get(
@@ -353,11 +345,10 @@ def test_callback_reinstall_updates_existing_row(client, alice, monkeypatch):
         "connectors.google_oauth.httpx.post",
         lambda *a, **kw: _fake_exchange_response(access_token="second-access"),
     )
-    r2 = client.get(
-        f"/connectors/google/callback?code=second&state={start2['state']}",
-        follow_redirects=False,
+    r2 = _complete_connector_oauth(
+        client, start2["state"], alice["session_token"], code="second",
     )
-    assert r2.status_code == 303
+    assert r2.status_code == 200, r2.text
 
     # Exactly one active install for gmail. Token = the second one.
     from sqlalchemy import select as _select
@@ -375,28 +366,23 @@ def test_callback_reinstall_updates_existing_row(client, alice, monkeypatch):
         assert payload["access_token"] == "second-access"
 
 
-def test_callback_html_400_on_unknown_state(client):
-    r = client.get(
-        "/connectors/google/callback?code=x&state=does-not-exist",
-        follow_redirects=False,
-    )
+def test_complete_400_on_unknown_state(client, alice):
+    r = _complete_connector_oauth(client, "does-not-exist", alice["session_token"])
     assert r.status_code == 400
-    assert "text/html" in r.headers["content-type"]
-    assert "expired" in r.text.lower() or "no longer valid" in r.text.lower()
+    assert r.json()["detail"]["error"] == "invalid_state"
 
 
-def test_callback_html_400_on_user_cancel(client):
+def test_callback_forwards_user_cancel_to_dashboard(client):
     r = client.get(
         "/connectors/google/callback?error=access_denied",
         follow_redirects=False,
     )
-    assert r.status_code == 400
-    assert "cancelled" in r.text.lower()
+    assert r.status_code == 303
+    assert "/integrations/google/callback?error=access_denied" in r.headers["location"]
 
 
-def test_callback_html_400_on_exchange_failure(client, alice, monkeypatch):
-    """Token exchange fails (Google returns 400) → HTML 400 with the
-    error reason, not a 5xx."""
+def test_complete_400_on_exchange_failure(client, alice, monkeypatch):
+    """Token exchange failures are rejected without storing an install."""
     start = client.get(
         "/connectors/google/start?type=google_drive",
         headers=auth_headers(alice["session_token"]),
@@ -405,15 +391,14 @@ def test_callback_html_400_on_exchange_failure(client, alice, monkeypatch):
         "connectors.google_oauth.httpx.post",
         lambda *a, **kw: _fake_exchange_response(status=400),
     )
-    r = client.get(
-        f"/connectors/google/callback?code=bad&state={start['state']}",
-        follow_redirects=False,
+    r = _complete_connector_oauth(
+        client, start["state"], alice["session_token"], code="bad",
     )
     assert r.status_code == 400
-    assert "didn" in r.text.lower()  # "didn't complete"
+    assert r.json()["detail"]["error"] == "exchange_failed"
 
 
-def test_callback_html_400_on_unknown_connector_in_state(client, alice, monkeypatch):
+def test_complete_400_on_unknown_connector_in_state(client, alice, monkeypatch):
     """Defensive: someone hand-crafts a state row with a connector
     that's been removed from the registry. Should render HTML 400,
     not crash."""
@@ -434,9 +419,31 @@ def test_callback_html_400_on_unknown_connector_in_state(client, alice, monkeypa
         "connectors.google_oauth.httpx.post",
         lambda *a, **kw: _fake_exchange_response(),
     )
-    r = client.get(
-        "/connectors/google/callback?code=x&state=bogus-state",
-        follow_redirects=False,
-    )
+    r = _complete_connector_oauth(client, "bogus-state", alice["session_token"])
     assert r.status_code == 400
-    assert "unknown" in r.text.lower() or "no longer recognized" in r.text.lower()
+    assert r.json()["detail"]["error"] == "unknown_connector"
+
+
+def test_complete_rejects_different_user(client, alice, bob, monkeypatch):
+    start = client.get(
+        "/connectors/google/start?type=gmail",
+        headers=auth_headers(alice["session_token"]),
+    ).json()
+    monkeypatch.setattr(
+        "connectors.google_oauth.httpx.post",
+        lambda *a, **kw: _fake_exchange_response(access_token="stolen"),
+    )
+
+    r = _complete_connector_oauth(client, start["state"], bob["session_token"])
+    assert r.status_code == 403
+    assert r.json()["detail"]["error"] == "oauth_state_owner_mismatch"
+
+    from sqlalchemy import select as _select
+    with session_scope() as s:
+        rows = s.execute(
+            _select(ConnectorInstallation).where(
+                ConnectorInstallation.workspace_id == alice["workspace"]["id"],
+                ConnectorInstallation.connector_type == "gmail",
+            )
+        ).scalars().all()
+        assert rows == []

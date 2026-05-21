@@ -25,7 +25,7 @@ import slack_client
 import zone_presets as zp
 from capabilities import KNOWN_CAPABILITIES
 from db import session_scope
-from models import Agent, SlackWorkspace
+from models import Agent, SlackChannel, SlackWorkspace
 from tests.conftest import auth_headers
 
 
@@ -78,6 +78,27 @@ def _install_slack(workspace_id: str, slack_team_id: str = "T_RESPOND") -> str:
     return slack_team_id
 
 
+def _add_channel(
+    workspace_id: str,
+    *,
+    slack_team_id: str = "T_RESPOND",
+    channel_id: str = "C_DATA",
+    sensitivity_level: str = "internal",
+    opted_in: bool = True,
+) -> None:
+    with session_scope() as s:
+        s.add(SlackChannel(
+            slack_team_id=slack_team_id,
+            channel_id=channel_id,
+            lightsei_workspace_id=workspace_id,
+            channel_name=channel_id,
+            sensitivity_level=sensitivity_level,
+            opted_in=opted_in,
+            created_at=_now(),
+            updated_at=_now(),
+        ))
+
+
 def _add_agent(
     workspace_id: str,
     name: str,
@@ -102,6 +123,7 @@ def test_respond_happy_path(client, alice, monkeypatch):
     slack_client.post_message + returns {ok, ts, channel}."""
     ws_id = alice["workspace"]["id"]
     _install_slack(ws_id)
+    _add_channel(ws_id, channel_id="C_DATA")
     _add_agent(ws_id, "vega", ["slack:respond"])
 
     sent: list[dict] = []
@@ -142,6 +164,7 @@ def test_respond_403_when_capability_missing(client, alice):
     catches this as LightseiCapabilityError."""
     ws_id = alice["workspace"]["id"]
     _install_slack(ws_id)
+    _add_channel(ws_id, channel_id="C")
     _add_agent(ws_id, "atlas", ["internet"])  # no slack:respond
 
     r = client.post(
@@ -162,6 +185,7 @@ def test_respond_404_when_agent_unknown(client, alice):
     so the SDK can distinguish "your bot isn't in this workspace"
     from "your bot lacks the capability." Different fixes."""
     _install_slack(alice["workspace"]["id"])
+    _add_channel(alice["workspace"]["id"], channel_id="C")
     r = client.post(
         "/slack/respond",
         headers=auth_headers(alice["api_key"]["plaintext"]),
@@ -191,6 +215,7 @@ def test_respond_400_when_install_revoked(client, alice):
     """Revoked installs don't count — same 400 path as no-install."""
     ws_id = alice["workspace"]["id"]
     _install_slack(ws_id)
+    _add_channel(ws_id, channel_id="C")
     with session_scope() as s:
         row = s.get(SlackWorkspace, "T_RESPOND")
         row.revoked_at = _now()
@@ -211,6 +236,7 @@ def test_respond_502_when_slack_rejects(client, alice, monkeypatch):
     _debug for ops; user-facing message is generic."""
     ws_id = alice["workspace"]["id"]
     _install_slack(ws_id)
+    _add_channel(ws_id, channel_id="C_NOPE")
     _add_agent(ws_id, "vega", ["slack:respond"])
 
     def _boom(**kwargs):
@@ -227,6 +253,39 @@ def test_respond_502_when_slack_rejects(client, alice, monkeypatch):
     detail = r.json()["detail"]
     assert detail["error"] == "slack_post_failed"
     assert "not_in_channel" in detail["_debug"]
+
+
+def test_respond_403_when_channel_not_opted_in(client, alice):
+    ws_id = alice["workspace"]["id"]
+    _install_slack(ws_id)
+    _add_channel(ws_id, channel_id="C_SILENT", opted_in=False)
+    _add_agent(ws_id, "vega", ["slack:respond"])
+
+    r = client.post(
+        "/slack/respond",
+        headers=auth_headers(alice["api_key"]["plaintext"]),
+        json={"source_agent": "vega", "channel": "C_SILENT", "text": "hi"},
+    )
+    assert r.status_code == 403
+    assert r.json()["detail"]["error"] == "slack_channel_not_allowed"
+
+
+def test_respond_403_when_channel_zone_mismatch(client, alice):
+    ws_id = alice["workspace"]["id"]
+    _install_slack(ws_id)
+    _add_channel(ws_id, channel_id="C_PUBLIC", sensitivity_level="public")
+    _add_agent(ws_id, "vega", ["slack:respond"], sensitivity_level="internal")
+
+    r = client.post(
+        "/slack/respond",
+        headers=auth_headers(alice["api_key"]["plaintext"]),
+        json={"source_agent": "vega", "channel": "C_PUBLIC", "text": "hi"},
+    )
+    assert r.status_code == 403
+    detail = r.json()["detail"]
+    assert detail["error"] == "slack_channel_zone_mismatch"
+    assert detail["agent_sensitivity_level"] == "internal"
+    assert detail["channel_sensitivity_level"] == "public"
 
 
 def test_respond_401_without_auth(client):

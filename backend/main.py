@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import html
 import json
 import os
 import secrets as _stdlib_secrets
@@ -7,12 +8,13 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
+from urllib.parse import urlencode, urlparse
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import desc, func, select, text
+from sqlalchemy import desc, func, select, text, update
 from sqlalchemy.orm import Session
 
 import limits
@@ -526,6 +528,70 @@ def _serialize_workspace(w: Workspace) -> dict[str, Any]:
         "free_credits_remaining_usd": float(w.free_credits_remaining_usd or 0),
         "has_stripe_customer": bool(w.stripe_customer_id),
     }
+
+
+def _dashboard_base_url() -> str:
+    return os.environ.get(
+        "LIGHTSEI_DASHBOARD_BASE_URL", "https://app.lightsei.com"
+    ).rstrip("/")
+
+
+def _dashboard_url(path: str) -> str:
+    if not path.startswith("/"):
+        path = f"/{path}"
+    return f"{_dashboard_base_url()}{path}"
+
+
+def _safe_dashboard_path(value: Optional[str], default: str) -> str:
+    """Return a dashboard-local path, falling back on unsafe redirects."""
+    if not value:
+        return default
+    parsed = urlparse(value)
+    if parsed.scheme or parsed.netloc:
+        base = urlparse(_dashboard_base_url())
+        if parsed.scheme != base.scheme or parsed.netloc != base.netloc:
+            return default
+        path = parsed.path or "/"
+        if parsed.query:
+            path = f"{path}?{parsed.query}"
+        if parsed.fragment:
+            path = f"{path}#{parsed.fragment}"
+        return path
+    if value.startswith("/") and not value.startswith("//"):
+        return value
+    return default
+
+
+def _oauth_callback_redirect(path: str, params: dict[str, str]) -> RedirectResponse:
+    return RedirectResponse(
+        f"{_dashboard_url(path)}?{urlencode(params)}",
+        status_code=303,
+    )
+
+
+def _html_error_response(
+    *,
+    title: str,
+    heading: str,
+    message: str,
+    back_path: str = "/integrations",
+    status_code: int = 400,
+) -> Response:
+    safe_title = html.escape(title)
+    safe_heading = html.escape(heading)
+    safe_message = html.escape(message)
+    safe_back = html.escape(_dashboard_url(back_path), quote=True)
+    body = (
+        "<!doctype html><html><head><meta charset=utf-8>"
+        f"<title>{safe_title}</title>"
+        "<style>body{font:14px/1.5 -apple-system,sans-serif;"
+        "max-width:480px;margin:64px auto;padding:0 16px;color:#111}"
+        "h1{font-size:18px;font-weight:600;margin-bottom:8px}"
+        "p{color:#555;margin:8px 0}a{color:#4f46e5}</style></head>"
+        f"<body><h1>{safe_heading}</h1><p>{safe_message}</p>"
+        f"<p><a href=\"{safe_back}\">Back to integrations</a></p></body></html>"
+    )
+    return Response(content=body, media_type="text/html", status_code=status_code)
 
 
 app = FastAPI(title="Lightsei Backend", version="0.5.0")
@@ -4467,80 +4533,95 @@ def slack_oauth_callback(
     code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,
-    session: Session = Depends(get_session),
 ) -> Any:
-    """Phase 19.2: complete the Slack install.
+    """Phase 19.2: Slack's browser callback.
 
-    Slack redirects the user's browser here after the consent screen.
-    We validate the state, exchange the code for a bot token, encrypt
-    + persist the bot token in slack_workspaces, then redirect the
-    browser to the dashboard's /integrations/slack page.
-
-    Error paths render a small HTML body the user can read and act on,
-    not a JSON 4xx, because the user is in a browser tab — this is the
-    one Lightsei endpoint that's expected to render directly to a
-    person rather than feed a JS fetch.
+    The backend must not bind Slack tokens from this unauthenticated
+    hop. It forwards the authorization response to the dashboard, which
+    completes the exchange through /slack/oauth/complete with the
+    initiating Lightsei session token attached.
     """
+    params: dict[str, str] = {}
+    if error:
+        params["error"] = error
+    if code:
+        params["code"] = code
+    if state:
+        params["state"] = state
+    if not params:
+        params["error"] = "missing_params"
+    return _oauth_callback_redirect("/integrations/slack/oauth/callback", params)
+
+
+class SlackOAuthCompleteIn(BaseModel):
+    code: str = Field(min_length=1, max_length=2048)
+    state: str = Field(min_length=1, max_length=128)
+
+
+@app.post("/slack/oauth/complete")
+def slack_oauth_complete(
+    body: SlackOAuthCompleteIn,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Complete a Slack install from an authenticated dashboard request."""
     import slack_oauth as _so
     import secrets_crypto
 
-    dashboard_base = os.environ.get(
-        "LIGHTSEI_DASHBOARD_BASE_URL", "https://app.lightsei.com"
-    ).rstrip("/")
-
-    def _html_error(title: str, message: str) -> Response:
-        body = (
-            "<!doctype html><html><head><meta charset=utf-8>"
-            "<title>Slack install — Lightsei</title>"
-            "<style>body{font:14px/1.5 -apple-system,sans-serif;"
-            "max-width:480px;margin:64px auto;padding:0 16px;color:#111}"
-            "h1{font-size:18px;font-weight:600;margin-bottom:8px}"
-            "p{color:#555;margin:8px 0}a{color:#4f46e5}</style></head>"
-            f"<body><h1>{title}</h1><p>{message}</p>"
-            f"<p><a href=\"{dashboard_base}/integrations\">"
-            "← back to integrations</a></p></body></html>"
-        )
-        return Response(content=body, media_type="text/html", status_code=400)
-
-    if error:
-        # Slack hands back ?error=access_denied if the user cancelled
-        # on the consent screen.
-        return _html_error(
-            "Slack install was cancelled",
-            f"Slack returned an error: {error}. You can try again from "
-            "the integrations page.",
+    if auth.user is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Slack install must be completed by a logged-in user",
         )
 
-    if not code or not state:
-        return _html_error(
-            "Invalid Slack install link",
-            "The Slack install callback was missing required parameters. "
-            "Start the install again from the integrations page.",
-        )
-
-    pending = session.get(SlackOAuthPendingState, state)
+    pending = session.get(SlackOAuthPendingState, body.state)
     now = utcnow()
     if pending is None or pending.expires_at <= now:
-        return _html_error(
-            "Slack install link expired",
-            "The install link is no longer valid (expired or already used). "
-            "Start a fresh install from the integrations page.",
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_state",
+                "message": (
+                    "Slack install state is unknown or expired. Start the "
+                    "install again from the integrations page."
+                ),
+            },
+        )
+
+    if (
+        pending.installed_by_user_id != auth.user.id
+        or pending.lightsei_workspace_id != auth.workspace_id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "oauth_state_owner_mismatch",
+                "message": (
+                    "This Slack install was started by a different Lightsei "
+                    "user. Start a fresh install from your own dashboard."
+                ),
+            },
         )
 
     workspace_id = pending.lightsei_workspace_id
     installed_by_user_id = pending.installed_by_user_id
-    redirect_after = pending.redirect_after
-    # Single-use: drop the pending row before doing the exchange so a
-    # parallel callback with the same state can't double-consume.
+    redirect_after = _safe_dashboard_path(
+        pending.redirect_after,
+        "/integrations/slack?installed=true",
+    )
     session.delete(pending)
     session.flush()
 
     try:
-        claims = _so.exchange_code_for_token(code=code)
+        claims = _so.exchange_code_for_token(code=body.code)
     except _so.SlackOAuthError as exc:
-        return _html_error(
-            "Slack install didn't complete",
-            f"The token exchange with Slack failed: {exc}. Try installing again.",
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "exchange_failed",
+                "message": "Slack token exchange failed. Try installing again.",
+                "_debug": str(exc),
+            },
         )
 
     # Encrypt + store. The bot token is xoxb-... — sensitive enough that
@@ -4572,13 +4653,18 @@ def slack_oauth_callback(
             installed_by_user_id=installed_by_user_id,
             installed_at=now,
         ))
+    session.execute(
+        update(SlackChannel)
+        .where(SlackChannel.slack_team_id == claims["team_id"])
+        .values(lightsei_workspace_id=workspace_id, updated_at=now)
+    )
     session.flush()
 
-    target = redirect_after or f"{dashboard_base}/integrations/slack?installed=true"
-    # 303 makes the browser switch from GET to GET (which is what we
-    # want — Slack's redirect was a GET; we're handing off to the
-    # dashboard which is also GET).
-    return RedirectResponse(target, status_code=303)
+    return {
+        "ok": True,
+        "redirect_after": redirect_after,
+        "slack_team_id": claims["team_id"],
+    }
 
 
 # ---------- Phase 19.3: Slack events webhook ---------- #
@@ -4814,91 +4900,111 @@ def connector_google_oauth_callback(
     code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,
-    session: Session = Depends(get_session),
 ) -> Any:
-    """Phase 20.2: complete the connector install.
+    """Phase 20.2: Google connector browser callback.
 
-    Validates state, single-use'd (drops the pending row before
-    exchange), trades the code for tokens, encrypts the {access_token,
-    refresh_token, expires_at} blob, persists a ConnectorInstallation
-    row (or updates an existing one in place for re-install), redirects
-    the browser back to the dashboard.
-
-    Renders HTML 400s on error paths so a browser tab gets a useful
-    page rather than JSON (same pattern as 19.2's Slack callback).
+    This unauthenticated browser hop only forwards code and state to the
+    dashboard. The authenticated /connectors/google/complete endpoint
+    performs the token exchange after checking the Lightsei user that
+    started the install.
     """
+    params: dict[str, str] = {}
+    if error:
+        params["error"] = error
+    if code:
+        params["code"] = code
+    if state:
+        params["state"] = state
+    if not params:
+        params["error"] = "missing_params"
+    return _oauth_callback_redirect("/integrations/google/callback", params)
+
+
+class ConnectorGoogleOAuthCompleteIn(BaseModel):
+    code: str = Field(min_length=1, max_length=2048)
+    state: str = Field(min_length=1, max_length=128)
+
+
+@app.post("/connectors/google/complete")
+def connector_google_oauth_complete(
+    body: ConnectorGoogleOAuthCompleteIn,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Complete a Google connector install from an authenticated dashboard request."""
     import json as _json
     import secrets_crypto
     from connectors import get_connector
     from connectors import google_oauth as _gco
 
-    dashboard_base = os.environ.get(
-        "LIGHTSEI_DASHBOARD_BASE_URL", "https://app.lightsei.com"
-    ).rstrip("/")
-
-    def _html_error(title: str, message: str) -> Response:
-        body = (
-            "<!doctype html><html><head><meta charset=utf-8>"
-            "<title>Connector install — Lightsei</title>"
-            "<style>body{font:14px/1.5 -apple-system,sans-serif;"
-            "max-width:480px;margin:64px auto;padding:0 16px;color:#111}"
-            "h1{font-size:18px;font-weight:600;margin-bottom:8px}"
-            "p{color:#555;margin:8px 0}a{color:#4f46e5}</style></head>"
-            f"<body><h1>{title}</h1><p>{message}</p>"
-            f"<p><a href=\"{dashboard_base}/integrations\">"
-            "← back to integrations</a></p></body></html>"
-        )
-        return Response(content=body, media_type="text/html", status_code=400)
-
-    if error:
-        return _html_error(
-            "Connector install cancelled",
-            f"Google returned an error: {error}. You can try again from "
-            "the integrations page.",
+    if auth.user is None:
+        raise HTTPException(
+            status_code=400,
+            detail="connector install must be completed by a logged-in user",
         )
 
-    if not code or not state:
-        return _html_error(
-            "Invalid install link",
-            "The Google install callback was missing required parameters. "
-            "Start the install again from the integrations page.",
-        )
-
-    pending = session.get(ConnectorOAuthPendingState, state)
+    pending = session.get(ConnectorOAuthPendingState, body.state)
     now = utcnow()
     if pending is None or pending.expires_at <= now:
-        return _html_error(
-            "Install link expired",
-            "The install link is no longer valid (expired or already used). "
-            "Start a fresh install from the integrations page.",
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_state",
+                "message": (
+                    "Connector install state is unknown or expired. Start "
+                    "the install again from the integrations page."
+                ),
+            },
+        )
+
+    if (
+        pending.installed_by_user_id != auth.user.id
+        or pending.workspace_id != auth.workspace_id
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "oauth_state_owner_mismatch",
+                "message": (
+                    "This connector install was started by a different "
+                    "Lightsei user. Start a fresh install from your dashboard."
+                ),
+            },
         )
 
     workspace_id = pending.workspace_id
     installed_by_user_id = pending.installed_by_user_id
     connector_type = pending.connector_type
     verifier = pending.code_verifier
-    redirect_after = pending.redirect_after
-    # Single-use: drop the pending row before exchange so a parallel
-    # callback with the same state can't double-consume.
+    redirect_after = _safe_dashboard_path(
+        pending.redirect_after,
+        f"/integrations?installed={connector_type}",
+    )
     session.delete(pending)
     session.flush()
 
     spec = get_connector(connector_type)
     if spec is None or spec.oauth_provider != "google":
-        return _html_error(
-            "Unknown connector",
-            f"The connector {connector_type!r} is no longer recognized.",
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "unknown_connector",
+                "message": f"The connector {connector_type!r} is no longer recognized.",
+            },
         )
 
     try:
         tokens = _gco.exchange_code_for_tokens(
-            code=code, code_verifier=verifier,
+            code=body.code, code_verifier=verifier,
         )
     except _gco.GoogleConnectorOAuthError as exc:
-        return _html_error(
-            "Install didn't complete",
-            f"The token exchange with Google failed: {exc}. Try again "
-            "from the integrations page.",
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "exchange_failed",
+                "message": "Google token exchange failed. Try installing again.",
+                "_debug": str(exc),
+            },
         )
 
     # Encrypt the token blob. We serialize a JSON dict so the refresh
@@ -4948,8 +5054,11 @@ def connector_google_oauth_callback(
         ))
     session.flush()
 
-    target = redirect_after or f"{dashboard_base}/integrations?installed={connector_type}"
-    return RedirectResponse(target, status_code=303)
+    return {
+        "ok": True,
+        "connector_type": connector_type,
+        "redirect_after": redirect_after,
+    }
 
 
 # ---------- Phase 19.6: operator-facing Slack config endpoints ---------- #
@@ -5045,6 +5154,13 @@ def patch_slack_channel(
     422 if sensitivity_level isn't one of the four valid values.
     """
     from models import is_valid_sensitivity_level
+
+    sw = session.get(SlackWorkspace, slack_team_id)
+    if sw is None or sw.revoked_at is not None or sw.lightsei_workspace_id != auth.workspace_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"channel {slack_team_id!r}/{channel_id!r} not found",
+        )
 
     channel = session.get(SlackChannel, (slack_team_id, channel_id))
     if channel is None or channel.lightsei_workspace_id != auth.workspace_id:
@@ -5211,6 +5327,39 @@ def slack_respond(
                 "message": (
                     "No active Slack install for this workspace. Connect "
                     "Slack from /integrations/slack first."
+                ),
+            },
+        )
+
+    channel = session.get(SlackChannel, (active_install.slack_team_id, body.channel))
+    if (
+        channel is None
+        or channel.lightsei_workspace_id != workspace_id
+        or not channel.opted_in
+    ):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "slack_channel_not_allowed",
+                "channel": body.channel,
+                "message": (
+                    "Slack channel is not opted in for this workspace. "
+                    "Connect the channel from /integrations/slack first."
+                ),
+            },
+        )
+    if channel.sensitivity_level != agent.sensitivity_level:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "slack_channel_zone_mismatch",
+                "channel": body.channel,
+                "agent_name": body.source_agent,
+                "agent_sensitivity_level": agent.sensitivity_level,
+                "channel_sensitivity_level": channel.sensitivity_level,
+                "message": (
+                    "Agent sensitivity level does not match the Slack "
+                    "channel sensitivity level."
                 ),
             },
         )

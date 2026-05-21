@@ -28,6 +28,7 @@ import slack_oauth as so
 import secrets_crypto
 from db import session_scope
 from models import (
+    SlackChannel,
     SlackOAuthPendingState,
     SlackWorkspace,
 )
@@ -172,6 +173,14 @@ def test_exchange_code_transport_error(monkeypatch):
 # ---------- Endpoint tests ---------- #
 
 
+def _complete_slack_oauth(client, state: str, session_token: str):
+    return client.post(
+        "/slack/oauth/complete",
+        headers=auth_headers(session_token),
+        json={"code": "abc123", "state": state},
+    )
+
+
 def test_oauth_start_503_when_not_configured(client, alice, monkeypatch):
     monkeypatch.delenv("LIGHTSEI_SLACK_CLIENT_ID")
     r = client.get(
@@ -200,7 +209,7 @@ def test_oauth_start_persists_state_and_returns_url(client, alice):
         assert row.installed_by_user_id == alice["user"]["id"]
 
 
-def test_oauth_callback_creates_slack_workspace_row(client, alice, monkeypatch):
+def test_oauth_complete_creates_slack_workspace_row(client, alice, monkeypatch):
     """Happy path: state validates, token exchange succeeds, a fresh
     slack_workspaces row lands with the bot token encrypted."""
     # 1. start → grab the state
@@ -216,13 +225,10 @@ def test_oauth_callback_creates_slack_workspace_row(client, alice, monkeypatch):
         lambda *a, **kw: _fake_token_response(team_id="T_NEW_INSTALL"),
     )
 
-    # 3. callback hits — should redirect (303) to the dashboard
-    r = client.get(
-        f"/slack/oauth/callback?code=abc123&state={state}",
-        follow_redirects=False,
-    )
-    assert r.status_code == 303
-    assert "/integrations/slack?installed=true" in r.headers["location"]
+    # 3. dashboard completes with the logged-in user's session token.
+    r = _complete_slack_oauth(client, state, alice["session_token"])
+    assert r.status_code == 200, r.text
+    assert r.json()["redirect_after"] == "/integrations/slack?installed=true"
 
     # 4. verify the row + token roundtrips
     with session_scope() as s:
@@ -240,26 +246,40 @@ def test_oauth_callback_creates_slack_workspace_row(client, alice, monkeypatch):
         assert s.get(SlackOAuthPendingState, state) is None
 
 
-def test_oauth_callback_rejects_unknown_state(client):
-    """Invalid state → HTML 400 with a guidance message, not a JSON 500."""
-    r = client.get(
-        "/slack/oauth/callback?code=abc&state=does-not-exist",
-        follow_redirects=False,
-    )
+def test_oauth_complete_rejects_unknown_state(client, alice):
+    """Invalid state is rejected before any Slack token exchange."""
+    r = _complete_slack_oauth(client, "does-not-exist", alice["session_token"])
     assert r.status_code == 400
-    assert "text/html" in r.headers["content-type"]
-    assert "expired" in r.text.lower() or "no longer valid" in r.text.lower()
+    assert r.json()["detail"]["error"] == "invalid_state"
 
 
 def test_oauth_callback_handles_user_cancel(client):
     """Slack hands back ?error=access_denied if the user cancelled.
-    Surface a friendly HTML page, not a 500."""
+    The backend forwards the browser back to the dashboard callback page."""
     r = client.get(
         "/slack/oauth/callback?error=access_denied",
         follow_redirects=False,
     )
-    assert r.status_code == 400
-    assert "cancelled" in r.text.lower()
+    assert r.status_code == 303
+    assert "/integrations/slack/oauth/callback?error=access_denied" in r.headers["location"]
+
+
+def test_oauth_complete_rejects_different_user(client, alice, bob, monkeypatch):
+    start = client.get(
+        "/slack/oauth/start",
+        headers=auth_headers(alice["session_token"]),
+    ).json()
+    monkeypatch.setattr(
+        "slack_oauth.httpx.post",
+        lambda *a, **kw: _fake_token_response(team_id="T_SHOULD_NOT_INSTALL"),
+    )
+
+    r = _complete_slack_oauth(client, start["state"], bob["session_token"])
+    assert r.status_code == 403
+    assert r.json()["detail"]["error"] == "oauth_state_owner_mismatch"
+
+    with session_scope() as s:
+        assert s.get(SlackWorkspace, "T_SHOULD_NOT_INSTALL") is None
 
 
 def test_oauth_callback_reinstall_updates_existing_row(client, alice, monkeypatch):
@@ -275,10 +295,8 @@ def test_oauth_callback_reinstall_updates_existing_row(client, alice, monkeypatc
         "slack_oauth.httpx.post",
         lambda *a, **kw: _fake_token_response(team_id="T_REINSTALL"),
     )
-    client.get(
-        f"/slack/oauth/callback?code=first&state={start1['state']}",
-        follow_redirects=False,
-    )
+    r1 = _complete_slack_oauth(client, start1["state"], alice["session_token"])
+    assert r1.status_code == 200, r1.text
 
     # Pretend the user revoked + is reinstalling.
     with session_scope() as s:
@@ -297,11 +315,8 @@ def test_oauth_callback_reinstall_updates_existing_row(client, alice, monkeypatc
             team_id="T_REINSTALL",
         ),
     )
-    r2 = client.get(
-        f"/slack/oauth/callback?code=second&state={start2['state']}",
-        follow_redirects=False,
-    )
-    assert r2.status_code == 303
+    r2 = _complete_slack_oauth(client, start2["state"], alice["session_token"])
+    assert r2.status_code == 200, r2.text
 
     with session_scope() as s:
         row = s.get(SlackWorkspace, "T_REINSTALL")
@@ -315,3 +330,48 @@ def test_oauth_callback_reinstall_updates_existing_row(client, alice, monkeypatc
             select(SlackWorkspace).where(SlackWorkspace.slack_team_id == "T_REINSTALL")
         ).scalars().all()
         assert len(rows) == 1
+
+
+def test_oauth_complete_transfer_moves_channels_to_new_workspace(
+    client, alice, bob, monkeypatch,
+):
+    with session_scope() as s:
+        s.add(SlackWorkspace(
+            slack_team_id="T_TRANSFER",
+            lightsei_workspace_id=alice["workspace"]["id"],
+            team_name="Old owner",
+            bot_token_encrypted=secrets_crypto.encrypt("xoxb-old").encode("ascii"),
+            bot_user_id="UOLD",
+            installed_at=datetime.now(timezone.utc),
+        ))
+        s.add(SlackChannel(
+            slack_team_id="T_TRANSFER",
+            channel_id="C_DATA",
+            lightsei_workspace_id=alice["workspace"]["id"],
+            channel_name="data",
+            sensitivity_level="internal",
+            opted_in=True,
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        ))
+
+    start = client.get(
+        "/slack/oauth/start",
+        headers=auth_headers(bob["session_token"]),
+    ).json()
+    monkeypatch.setattr(
+        "slack_oauth.httpx.post",
+        lambda *a, **kw: _fake_token_response(
+            access_token="xoxb-new",
+            team_id="T_TRANSFER",
+        ),
+    )
+
+    r = _complete_slack_oauth(client, start["state"], bob["session_token"])
+    assert r.status_code == 200, r.text
+
+    with session_scope() as s:
+        sw = s.get(SlackWorkspace, "T_TRANSFER")
+        ch = s.get(SlackChannel, ("T_TRANSFER", "C_DATA"))
+        assert sw.lightsei_workspace_id == bob["workspace"]["id"]
+        assert ch.lightsei_workspace_id == bob["workspace"]["id"]
