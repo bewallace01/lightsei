@@ -59,6 +59,7 @@ from models import (
     NotificationDelivery,
     OAuthPendingState,
     Run,
+    SlackChannel,
     SlackEvent,
     SlackOAuthPendingState,
     SlackWorkspace,
@@ -4731,6 +4732,185 @@ async def slack_events(
         "type": event_type,
         "job_id": job_id,
     }
+
+
+# ---------- Phase 19.6: operator-facing Slack config endpoints ---------- #
+
+
+def _serialize_slack_workspace(sw: SlackWorkspace) -> dict[str, Any]:
+    """Surface the bits the dashboard's /integrations/slack page needs.
+    Bot token is NEVER returned — that stays encrypted in storage."""
+    return {
+        "slack_team_id": sw.slack_team_id,
+        "team_name": sw.team_name,
+        "bot_user_id": sw.bot_user_id,
+        "installed_at": sw.installed_at.isoformat(),
+        "installed_by_user_id": sw.installed_by_user_id,
+        "revoked_at": sw.revoked_at.isoformat() if sw.revoked_at else None,
+    }
+
+
+def _serialize_slack_channel(ch: SlackChannel) -> dict[str, Any]:
+    return {
+        "slack_team_id": ch.slack_team_id,
+        "channel_id": ch.channel_id,
+        "channel_name": ch.channel_name,
+        "sensitivity_level": ch.sensitivity_level,
+        "opted_in": ch.opted_in,
+        "created_at": ch.created_at.isoformat(),
+        "updated_at": ch.updated_at.isoformat(),
+    }
+
+
+@app.get("/workspaces/me/slack/workspaces")
+def list_slack_workspaces(
+    include_revoked: bool = False,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """List Slack workspaces connected to this Lightsei workspace.
+
+    By default returns only active installs. Set `include_revoked=true`
+    to see historical installs (useful for an audit log surface).
+    """
+    q = select(SlackWorkspace).where(
+        SlackWorkspace.lightsei_workspace_id == auth.workspace_id
+    )
+    if not include_revoked:
+        q = q.where(SlackWorkspace.revoked_at.is_(None))
+    q = q.order_by(SlackWorkspace.installed_at.desc())
+    rows = session.execute(q).scalars().all()
+    return {"workspaces": [_serialize_slack_workspace(r) for r in rows]}
+
+
+@app.get("/workspaces/me/slack/channels")
+def list_slack_channels(
+    slack_team_id: Optional[str] = None,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """List channels the Lightsei bot has been seen in.
+
+    Filter by `slack_team_id` when the dashboard's already grouped by
+    workspace; otherwise returns all channels across all installs
+    for this Lightsei workspace. Ordered by (opted_in DESC, channel_name)
+    so opted-in channels surface first — they're the actionable ones.
+    """
+    q = select(SlackChannel).where(
+        SlackChannel.lightsei_workspace_id == auth.workspace_id
+    )
+    if slack_team_id:
+        q = q.where(SlackChannel.slack_team_id == slack_team_id)
+    q = q.order_by(SlackChannel.opted_in.desc(), SlackChannel.channel_name)
+    rows = session.execute(q).scalars().all()
+    return {"channels": [_serialize_slack_channel(r) for r in rows]}
+
+
+class SlackChannelPatchIn(BaseModel):
+    """Both fields optional — operator can flip either independently."""
+    sensitivity_level: Optional[str] = Field(default=None, max_length=16)
+    opted_in: Optional[bool] = None
+
+
+@app.patch("/workspaces/me/slack/channels/{slack_team_id}/{channel_id}")
+def patch_slack_channel(
+    slack_team_id: str,
+    channel_id: str,
+    body: SlackChannelPatchIn,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Set the channel's `sensitivity_level` and/or `opted_in`. The
+    chat orchestrator (Phase 19.4) reads these on every event.
+
+    404 if the channel doesn't belong to this Lightsei workspace.
+    422 if sensitivity_level isn't one of the four valid values.
+    """
+    from models import is_valid_sensitivity_level
+
+    channel = session.get(SlackChannel, (slack_team_id, channel_id))
+    if channel is None or channel.lightsei_workspace_id != auth.workspace_id:
+        # Treat cross-workspace as 404 so the existence of a channel
+        # in another tenant doesn't leak through the error code.
+        raise HTTPException(
+            status_code=404,
+            detail=f"channel {slack_team_id!r}/{channel_id!r} not found",
+        )
+
+    if body.sensitivity_level is not None:
+        if not is_valid_sensitivity_level(body.sensitivity_level):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"sensitivity_level {body.sensitivity_level!r} not in "
+                    "{public, internal, sensitive, pii}"
+                ),
+            )
+        channel.sensitivity_level = body.sensitivity_level
+
+    if body.opted_in is not None:
+        channel.opted_in = body.opted_in
+
+    channel.updated_at = utcnow()
+    session.flush()
+    return _serialize_slack_channel(channel)
+
+
+@app.delete("/workspaces/me/slack/workspaces/{slack_team_id}")
+def revoke_slack_workspace(
+    slack_team_id: str,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Revoke a Slack install.
+
+    Sets `revoked_at` on the slack_workspaces row + best-effort calls
+    Slack's `auth.revoke` to invalidate the stored bot token upstream.
+    The row stays in the DB for audit; the partial-unique index from
+    19.1 lets the same Slack workspace re-install after this without
+    a manual cleanup.
+
+    404 if the workspace install doesn't belong to this Lightsei
+    workspace.
+    """
+    sw = session.get(SlackWorkspace, slack_team_id)
+    if sw is None or sw.lightsei_workspace_id != auth.workspace_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"slack workspace {slack_team_id!r} not found",
+        )
+
+    now = utcnow()
+    if sw.revoked_at is None:
+        sw.revoked_at = now
+        session.flush()
+        # Best-effort upstream revoke. Slack returns ok:true on success;
+        # we don't fail the local revoke if Slack rejects (the token
+        # might already be invalidated; the local revoke is what matters
+        # for routing). Logged for ops.
+        try:
+            import secrets_crypto
+            token = secrets_crypto.decrypt(sw.bot_token_encrypted.decode("ascii"))
+            httpx_post = __import__("httpx").post
+            r = httpx_post(
+                "https://slack.com/api/auth.revoke",
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=5.0,
+            )
+            if r.status_code >= 400 or not r.json().get("ok"):
+                import logging as _logging
+                _logging.getLogger("lightsei.slack").warning(
+                    "auth.revoke not ok for %s: %s %s",
+                    slack_team_id, r.status_code, r.text[:200],
+                )
+        except Exception as e:
+            import logging as _logging
+            _logging.getLogger("lightsei.slack").warning(
+                "auth.revoke upstream call failed for %s: %s",
+                slack_team_id, e,
+            )
+
+    return _serialize_slack_workspace(sw)
 
 
 # ---------- Phase 19.5: agent-side Slack response endpoint ---------- #

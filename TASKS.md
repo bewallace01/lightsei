@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 19.6 — per-channel sensitivity config endpoints. 19.1-19.5 shipped.**
+> **Phase 19.7 — dashboard `/integrations/slack` page. 19.1-19.6 shipped.**
 
-Phase 19 (chat surface) running. 19.1-19.5 shipped — schema + Slack OAuth + signed webhook + chat orchestrator + SDK post_slack helper. Backend at **821 passing** (+63 across Phase 19; started at 758).
+Phase 19 (chat surface) running. 19.1-19.6 shipped — schema + Slack OAuth + signed webhook + chat orchestrator + SDK post_slack + 4 channel-config endpoints (list workspaces, list channels, PATCH channel, DELETE workspace). Backend at **836 passing** (+78 across Phase 19; started at 758).
 
-NOW is 19.6: `GET /workspaces/me/slack/channels` (paginated list) + `PATCH /workspaces/me/slack/channels/{slack_team_id}/{channel_id}` (operator sets sensitivity_level + opted_in). The dashboard surface (19.7) renders the list + a per-channel editor that calls into these endpoints.
+NOW is 19.7: dashboard `/integrations/slack` page. "Connect Slack" → POST /slack/oauth/start. Connected-workspace list + channels grouped by sensitivity_level + per-channel sensitivity select + opt-in toggle that call into the 19.6 endpoints. Disconnect button on each workspace.
 
 Phase 18 code-complete 2026-05-19. Phase 16 prod demo passed. Phase 17 in test mode; live-mode awaiting Stripe verification.
 
@@ -538,7 +538,9 @@ New handler in `backend/jobs.py` registry for `kind='slack_orchestration'`. Pure
 - New capability `'slack:respond'` (gated like other capabilities — bots without it get `LightseiCapabilityError` if they try to call `post_slack`).
 - Compliance preset's `internal` and `public` hint mappings gain `'slack:respond'` automatically (those are the bots that should be reachable from chat). `pii` + `sensitive` bots don't get it by default.
 
-### 19.6 — Per-channel sensitivity config endpoint + page
+### 19.6 — Per-channel sensitivity config endpoints ✅ shipped 2026-05-20
+
+Four endpoints + 15 tests. The dashboard page (19.7) consumes these to render the per-channel editor.
 
 `/integrations/slack` (dashboard) — lists installed Slack workspaces; for each, lists channels with their current `sensitivity_level` + opted-in flag. Operator sets these in the dashboard:
 
@@ -1034,6 +1036,25 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-20 — Phase 19.6 shipped: per-channel config endpoints
+
+Four endpoints + 15 tests landed.
+
+- **`GET /workspaces/me/slack/workspaces?include_revoked=false`** — list active Slack installs (or include revoked for an audit log). Bot token never returned in the serializer.
+- **`GET /workspaces/me/slack/channels?slack_team_id=...`** — list channels the Lightsei bot has been seen in. Ordered `opted_in DESC, channel_name` so actionable rows surface first.
+- **`PATCH /workspaces/me/slack/channels/{slack_team_id}/{channel_id}`** — operator sets `sensitivity_level` + `opted_in`. Both optional. 422 on invalid sensitivity. 404 cross-tenant.
+- **`DELETE /workspaces/me/slack/workspaces/{slack_team_id}`** — revoke install: sets `revoked_at` + best-effort calls Slack's `auth.revoke` to invalidate the bot token upstream. Idempotent (second revoke is a no-op + skips the upstream call). Swallows upstream failure (local revoke is what matters for routing).
+
+**Verification**: 15 new tests in `backend/tests/test_slack_channels_api.py`:
+- List workspaces: active-only by default, include_revoked option, never returns bot token, tenant isolation.
+- List channels: returns all for workspace, filter by slack_team_id (using a revoked-+-active-coexist scenario), opted-in surfaces first.
+- PATCH channel: both fields together, just opted_in (sensitivity unchanged), rejects invalid sensitivity, 404 cross-tenant.
+- DELETE workspace: marks revoked + calls auth.revoke (stubbed), idempotent (second call no-op), 404 cross-tenant, swallows upstream failure.
+
+Full backend suite: **836 passed in 156s** (was 821, +15 new). 0 regressions. Same `test_app_mention_enqueues_orchestration_job` flake observed (cleared on re-run); filed as a separate parked task.
+
+**What this unblocks**: 19.7 dashboard `/integrations/slack` page wires the operator-facing UI on top of these endpoints. Connect/disconnect Slack, opt-in channels, set zones.
 
 ### 2026-05-20 — Phase 19.5 shipped: lightsei.post_slack + slack:respond capability
 
