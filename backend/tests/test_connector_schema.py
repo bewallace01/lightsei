@@ -23,7 +23,6 @@ from sqlalchemy.exc import IntegrityError
 
 from connectors import (
     CONNECTOR_REGISTRY,
-    ConnectorNotImplementedError,
     get_connector,
     list_connectors,
 )
@@ -330,14 +329,8 @@ def test_connector_spec_rejects_invalid_zone():
 
 
 # ---------- Stub invoke behavior ---------- #
-
-
-def test_invoke_raises_not_implemented_for_still_stubbed_connectors():
-    """The 20.1 stubs raise ConnectorNotImplementedError so the bot-
-    callable endpoint in 20.6 can surface 'this connector isn't
-    ready yet' rather than crash. Gmail (20.3) + Calendar (20.4) are
-    real; Drive is still stubbed until 20.5."""
-    spec = CONNECTOR_REGISTRY["google_drive"]
-    with pytest.raises(ConnectorNotImplementedError) as exc:
-        spec.invoke(tool_name="list_files", payload={}, access_token="t")
-    assert "google_drive" in str(exc.value)
+# Phase 20.5 shipped Drive (last v1 connector). No registry entries
+# carry the stub invoke anymore. The 20.1 stub machinery
+# (ConnectorNotImplementedError + _not_implemented_invoke) stays in
+# place for future connectors added between sub-tasks; the
+# stub-detection sweep lives in test_connector_google_drive.py.

@@ -146,6 +146,18 @@ def _calendar_invoke(*, tool_name: str, payload: dict, access_token: str) -> dic
     )
 
 
+def _drive_manifest() -> list[ConnectorToolManifest]:
+    from . import google_drive as _drv
+    return _drv.MANIFEST()
+
+
+def _drive_invoke(*, tool_name: str, payload: dict, access_token: str) -> dict:
+    from . import google_drive as _drv
+    return _drv.INVOKE(
+        tool_name=tool_name, payload=payload, access_token=access_token,
+    )
+
+
 CONNECTOR_REGISTRY: dict[str, ConnectorSpec] = {
     "gmail": ConnectorSpec(
         name="gmail",
@@ -210,8 +222,8 @@ CONNECTOR_REGISTRY: dict[str, ConnectorSpec] = {
             "Drive. Use for document-fetch, snapshot-generation, or "
             "knowledge-base bots."
         ),
-        manifest=_empty_manifest,
-        invoke=_not_implemented_invoke("google_drive"),
+        manifest=_drive_manifest,
+        invoke=_drive_invoke,
     ),
 }
 

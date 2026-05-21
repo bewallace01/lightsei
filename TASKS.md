@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 20.5 — Google Drive connector. 20.1 + 20.2 + 20.3 + 20.4 shipped 2026-05-20.**
+> **Phase 20.6 — Bot-callable endpoint + capability + zone gates. 20.1 + 20.2 + 20.3 + 20.4 + 20.5 shipped 2026-05-20.**
 
-Phase 20 (integration breadth) running. 20.1-20.4 shipped — schema + Google OAuth + Gmail + Calendar. Backend at **911 passing** (+75 across Phase 20; started at 836).
+Phase 20 (integration breadth) running. 20.1-20.5 shipped — schema + Google OAuth + Gmail + Calendar + Drive. All three v1 connectors real; registry has no stubs. Backend at **935 passing** (+99 across Phase 20; started at 836).
 
-NOW is 20.5: `backend/connectors/google_drive.py` — final per-connector implementation. Tools: list_files, search_files, get_file_metadata, download_file_content, upload_file, create_folder, copy_file. After 20.5, all three v1 connectors are real and the registry has no stubs.
+NOW is 20.6: `POST /connectors/{type}/{tool}` API-key-authed endpoint. Capability gate (`connector:{type}`), zone gate (bot's `sensitivity_level` must be in connector's `declared_zones`), install lookup, token-refresh-on-401-then-retry, record on `runs`. This is the surface bots actually call to use the connectors shipped in 20.3-20.5.
 
 Phase 19 code-complete 2026-05-20. Phase 18 code-complete 2026-05-19. Phase 16 prod demo passed. Phase 17 in test mode; live-mode awaiting Stripe verification.
 
@@ -636,9 +636,14 @@ Two endpoints:
 
 `backend/connectors/google_calendar.py`. Tools: `list_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `list_calendars`, `find_free_slots`.
 
-### 20.5 — Google Drive connector implementation
+### 20.5 — Google Drive connector implementation ✅ shipped 2026-05-20
 
-`backend/connectors/google_drive.py`. Tools: `list_files`, `search_files`, `get_file_metadata`, `download_file_content`, `upload_file`, `create_folder`, `copy_file`.
+`backend/connectors/google_drive.py` ships the third real connector INVOKE: 7 tools wrapping Drive v3. Same shape as Gmail (20.3) + Calendar (20.4) — `MANIFEST` + `INVOKE` + `_TOOLS` map + `_request` JSON helper. 26 new tests. Registry wired; all three v1 connectors now real.
+
+`backend/connectors/google_drive.py`. Tools: `list_files`, `search_files`, `get_file_metadata`, `download_file_content`, `upload_file`, `create_folder`, `copy_file`. Two notable behaviors that distinguish Drive from Gmail/Calendar:
+
+- `download_file_content` does a metadata pre-fetch to decide between `?alt=media` (regular files) and `/export?mimeType=...` (Google-native Docs/Sheets/Slides/Drawings). Bot code gets a `content_b64` blob plus the resolved `mime_type` — it doesn't need to know whether the file was native or binary. Defaults: Docs → text/plain, Sheets → text/csv, Slides → application/pdf, Drawings → image/png. Pass `export_mime_type` to override.
+- `upload_file` manually constructs the `multipart/related` request body (metadata JSON part + content part with their own content-types, separated by a boundary). httpx's `files=` kwarg uses `multipart/form-data`, which Drive rejects. A second HTTP helper (`_request_bytes`) returns raw bytes for downloads rather than parsing as JSON.
 
 ### 20.6 — Bot-callable endpoint + capability + zone gates
 
@@ -1163,6 +1168,25 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-20 — Phase 20.5 shipped: Google Drive connector implementation
+
+`backend/connectors/google_drive.py` ships the third (and final v1) real connector INVOKE: 7 tools wrapping Drive v3 (`list_files`, `search_files`, `get_file_metadata`, `download_file_content`, `upload_file`, `create_folder`, `copy_file`). Same MANIFEST + INVOKE + `_TOOLS` map + `_request` JSON helper shape as Gmail (20.3) + Calendar (20.4). Same exception semantics (401 → `ConnectorAuthExpired`; other 4xx/5xx + transport → `ConnectorCallError`). Drive's registry entry rewired from the 20.1 stub; all three v1 connectors are now real, registry has no stubs.
+
+Two notable behaviors that distinguish Drive from the other two connectors:
+
+- **`download_file_content` auto-handles Google-native files.** Before downloading, the function does a metadata fetch to read the file's `mimeType`. Regular files use `?alt=media`. Google-native files (Docs/Sheets/Slides/Drawings) hit `/files/{id}/export?mimeType=...` with sensible defaults: Docs → text/plain, Sheets → text/csv, Slides → application/pdf, Drawings → image/png. Bot code gets a base64-encoded `content_b64` blob + the resolved `mime_type` without needing to know which case it hit. Pass `export_mime_type` to override the default export.
+- **`upload_file` manually constructs `multipart/related`.** httpx's `files=` kwarg uses `multipart/form-data`, which Drive rejects for `uploadType=multipart`. The body has to carry one `application/json` part for the metadata followed by one part for the content, separated by a manually-chosen boundary. A second HTTP helper (`_request_bytes`) returns raw bytes for downloads rather than parsing as JSON.
+
+**Verification**: 26 new tests in `backend/tests/test_connector_google_drive.py` (httpx stubbed). Covers MANIFEST shape (all 7 tools); registry wiring (stub gone); list_files defaults + page_size clamp + query passthrough; search_files Drive-query construction + single-quote escaping + missing-text guard; get_file_metadata happy + missing-id; download_file_content for regular files (alt=media) + Google Docs (/export text/plain) + Google Sheets (/export text/csv) + explicit export override + 401-on-download raises `ConnectorAuthExpired`; upload_file multipart/related body shape (json metadata part with `parents`, raw content, multipart boundary in Content-Type header) + invalid-base64 + missing-fields + 401-raises-auth-expired; create_folder mimeType + parent_id; copy_file with new_name+parent_id + no-overrides empty body + missing-id; dispatcher rejects unknown tool name. Plus a registry-wide stub-detection sweep that fails loud if a future connector ships with the 20.1 stub still wired.
+
+The old `test_invoke_raises_not_implemented_for_still_stubbed_connectors` in `test_connector_schema.py` is removed: no v1 connector is stubbed anymore, and the stub-detection sweep now lives in the drive test file (`test_no_more_stubbed_connectors_in_registry`).
+
+Full backend suite: **935 passed in 162s** (was 911, +25 net new from Drive: +26 - 1 removed stale stub test). 0 regressions. Observed the known `test_app_mention_enqueues_orchestration_job` flake (cleared on re-run alone; already filed as #102).
+
+Recurring tool-call bug observed again: the first Write of `google_drive.py` failed silently because the call block also included an `Edit` parameter, which the tool runner rejects. Re-issuing the Write alone landed the file cleanly. Worth a memory: nested tool params in one call fail silently when parameter names collide, same observation as Phase 20.2's migration file.
+
+**What this unblocks**: 20.6 (bot-callable endpoint) can now dispatch into a real INVOKE for any v1 connector — `CONNECTOR_REGISTRY[type].invoke(tool_name, payload, access_token)` returns real upstream results across the board. 20.7 (SDK helpers) maps `lightsei.drive.*` onto these tools.
 
 ### 2026-05-20 — Phase 20.4 shipped: Google Calendar connector implementation
 
