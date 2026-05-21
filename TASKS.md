@@ -7,13 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 20.1 — connector schema + registry. Phase 20 spec locked 2026-05-20.**
+> **Phase 20.2 — Google OAuth helper for connectors. 20.1 shipped 2026-05-20.**
 
-Phase 19 (chat surface) code-complete 2026-05-20: 19.1-19.7 all shipped. Backend at **836 passing**. 19.9 (demo) needs Slack-app console setup; pickable when ready.
+Phase 20 (integration breadth) running. 20.1 shipped 2026-05-20 — alembic 0034 + ConnectorInstallation model + CONNECTOR_REGISTRY with gmail/google_calendar/google_drive + 21 tests. Backend at **857 passing** (+21 over Phase 20.1; phase started at 836).
 
-Phase 20 (integration breadth) spec locked 2026-05-20: MCP-native protocol, Gmail+Calendar+Drive as the v1 connector set, capability-namespaced SDK helpers (`lightsei.gmail.send_email(...)`), per-connector declared zone allow-lists. 10 sub-tasks (20.1 schema → 20.10 demo). 20.1 lays the schema backbone every other 20.x reads from.
+NOW is 20.2: `backend/connectors/google_oauth.py` (separate from the existing sign-in google_oauth.py) + `GET /connectors/google/start?type=gmail` + `GET /connectors/google/callback`. Encrypted-tokens storage that supports refresh-token round-trips.
 
-Phase 18 code-complete 2026-05-19. Phase 16 prod demo passed. Phase 17 in test mode; live-mode awaiting Stripe verification.
+Phase 19 code-complete 2026-05-20. Phase 18 code-complete 2026-05-19. Phase 16 prod demo passed. Phase 17 in test mode; live-mode awaiting Stripe verification.
 
 ## Phase 12C: drop a README, get a team
 
@@ -586,7 +586,9 @@ Operationalizes the "integration breadth as moat" wedge from the 2026-05-17 deci
 - **Bot-side calling: capability-namespaced functions** like `lightsei.gmail.send_email(...)`, `lightsei.calendar.create_event(...)`, `lightsei.drive.list_files(...)`. SDK exposes typed helpers per connector. Each helper enforces the per-connector capability (`connector:gmail`, etc.) before the call. Type-safe + ergonomic. The generic `lightsei.call("connector.tool", payload)` escape hatch will land if/when custom MCP server support arrives.
 - **Trust-zone × connector: per-connector declared zone allow-list.** Each connector module declares which sensitivity zones it's safe to use in. The backend's bot-callable endpoint refuses a call when the bot's zone isn't in the connector's allow-list. Mirrors Phase 16 + Phase 19's per-channel-zone story. Example defaults: HubSpot → `{sensitive, pii}` only (customer data); Gmail → `{internal, sensitive, pii}` (work email); Google Calendar → all four (scheduling crosses zones); Google Drive → `{internal, sensitive, pii}` (workspace docs).
 
-### 20.1 — Connector schema + registry
+### 20.1 — Connector schema + registry ✅ shipped 2026-05-20
+
+Alembic 0034 + `ConnectorInstallation` model + `backend/connectors/__init__.py` with the v1 registry + 21 tests landed. Same shape as Phase 19.1 / 17.1.
 
 Single alembic migration for `connector_installations` (per-workspace per-connector OAuth-token holder):
 
@@ -1155,6 +1157,30 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-20 — Phase 20.1 shipped: connector schema + registry
+
+`backend/alembic/versions/20260520_0034_connector_installations.py` + `ConnectorInstallation` model + `backend/connectors/__init__.py` with the v1 registry + 21 tests. Same shape as Phase 19.1.
+
+- **`connector_installations` table**: per-workspace per-connector OAuth-token holder. Columns: `id` PK, `workspace_id` FK (CASCADE), `connector_type` (string; validated app-side against the registry), `encrypted_tokens` (LargeBinary; serialized JSON of access+refresh tokens + expiry, encrypted via secrets_crypto), `scopes` (JSONB array of granted OAuth scopes — subset of default_scopes since OAuth providers let users decline), `installed_by_user_id` FK (SET NULL on user delete), `external_account_email` (the Google account; surfaced in dashboard), `installed_at`, `revoked_at`. Two indexes: partial-unique `(workspace_id, connector_type) WHERE revoked_at IS NULL` (one active install per type) + a `(workspace_id, installed_at)` browse index for the /integrations page.
+- **`backend/connectors/__init__.py`**: `ConnectorSpec` frozen dataclass (name, display_label, oauth_provider, default_scopes, declared_zones, summary, manifest fn, invoke fn) + `CONNECTOR_REGISTRY` dict with three v1 entries:
+  - **gmail**: declared_zones={internal, sensitive, pii} (excludes public — wedge invariant: a public-zoned research bot has no business in the email inbox).
+  - **google_calendar**: declared_zones=all four (scheduling spans every zone).
+  - **google_drive**: declared_zones={internal, sensitive, pii} (workspace docs are internal at minimum).
+- All three share `oauth_provider='google'` so one OAuth flow covers them all (the point of choosing the Google trio as v1).
+- `ConnectorSpec.__post_init__` validates declared_zones against `_VALID_SENSITIVITY_LEVELS` so a typo fails loud at registry construction rather than silently locking the connector out of every bot's zone.
+- `invoke` placeholders for 20.1 raise `ConnectorNotImplementedError` — 20.3-20.5 swap in real implementations.
+
+**Verification**: 21 new tests in `backend/tests/test_connector_schema.py`:
+- Schema: roundtrip, FK cascade on workspace delete, partial-unique enforcement (one active per type), partial-unique allows different types, partial-unique allows reinstall after revoke, tenant isolation (workspace A + workspace B both install gmail), both indexes exist in pg_indexes.
+- Registry: three v1 entries, every entry has valid declared_zones / default_scopes / oauth_provider, all three Google connectors share `oauth_provider='google'`, Gmail excludes public (wedge invariant), Calendar includes public, Drive excludes public.
+- Lookup helpers: get_connector returns spec, returns None for unknown, list_connectors is stable order.
+- ConnectorSpec.__post_init__ rejects invalid declared_zones at construction time.
+- Stub invoke raises ConnectorNotImplementedError until 20.3-20.5 swap in real implementations.
+
+Full backend suite: **857 passed in 158s** (was 836, +21 new). 0 regressions.
+
+**What this unblocks**: 20.2 (Google OAuth helper) writes to `connector_installations`. 20.3-20.5 (per-connector implementations) swap in real INVOKE functions. 20.6 (bot-callable endpoint) reads from the registry to dispatch tool calls. 20.8 (dashboard /integrations page) iterates `list_connectors()` to render the card grid.
 
 ### 2026-05-20 — Phase 19.7 shipped: dashboard /integrations/slack + Phase 19 code-complete
 

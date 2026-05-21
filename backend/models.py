@@ -1264,6 +1264,65 @@ class SlackChannel(Base):
     )
 
 
+class ConnectorInstallation(Base):
+    """Phase 20.1: per-workspace per-connector OAuth-token holder for
+    the integration-breadth surface.
+
+    One row per active install. `encrypted_tokens` holds the
+    access_token + refresh_token + expires_at as encrypted JSON via the
+    same secrets_crypto path used by WorkspaceSecret + SlackWorkspace.
+
+    The partial-unique index on `(workspace_id, connector_type) WHERE
+    revoked_at IS NULL` enforces one active install per
+    (workspace, connector_type) — a revoke-and-reinstall cycle works
+    cleanly without manual cleanup of the prior row.
+    """
+
+    __tablename__ = "connector_installations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    # Validated app-side against CONNECTOR_REGISTRY in
+    # backend/connectors/__init__.py; keeping the column free-form means
+    # adding a new connector doesn't require a migration.
+    connector_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    encrypted_tokens: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    # The granted scopes (subset of default_scopes — OAuth providers
+    # let users decline). JSONB matches the other ORM JSON columns
+    # (Agent.capabilities, Run.payload, etc.); we never query into it,
+    # just read the whole list when computing capabilities.
+    scopes: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    installed_by_user_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    external_account_email: Mapped[Optional[str]] = mapped_column(
+        String(256), nullable=True
+    )
+    installed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        # One active install per (workspace, connector_type).
+        Index(
+            "ix_connector_installations_ws_type_active",
+            "workspace_id", "connector_type",
+            unique=True,
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+        # Workspace-scoped browse query for the /integrations page.
+        Index(
+            "ix_connector_installations_workspace_installed_at",
+            "workspace_id", "installed_at",
+        ),
+    )
+
+
 class SlackOAuthPendingState(Base):
     """Phase 19.2: short-lived state store for the Slack OAuth
     start → callback hop.
