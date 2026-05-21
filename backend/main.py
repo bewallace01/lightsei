@@ -4733,6 +4733,121 @@ async def slack_events(
     }
 
 
+# ---------- Phase 19.5: agent-side Slack response endpoint ---------- #
+
+
+class SlackRespondIn(BaseModel):
+    """Input to `POST /slack/respond` (Phase 19.5).
+
+    Called from bot code via `lightsei.post_slack(channel, text, ...)`.
+    `source_agent` identifies the bot making the call so the capability
+    gate can check its allow-list."""
+    source_agent: str = Field(min_length=1, max_length=128)
+    channel: str = Field(min_length=1, max_length=128)
+    text: str = Field(min_length=1, max_length=40_000)
+    thread_ts: Optional[str] = Field(default=None, max_length=64)
+
+
+@app.post("/slack/respond")
+def slack_respond(
+    body: SlackRespondIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 19.5: agent-side helper for posting a message to Slack.
+
+    Capability-gated on `slack:respond`. The agent's bot token is
+    never exposed to bot code — the backend resolves the workspace's
+    Slack install, decrypts the stored bot token, and calls
+    chat.postMessage on the agent's behalf.
+
+    Returns the Slack response on success. 4xx surfaces include:
+    - 403 cross_zone_blocked-shape detail when the agent doesn't have
+      the slack:respond capability granted.
+    - 400 when the workspace has no active Slack install (the
+      operator hasn't connected Slack yet).
+    - 502 with a generic "Slack post failed" when Slack rejects the
+      message (channel not found, bot not in channel, etc.).
+    """
+    import slack_client
+
+    # Capability gate. Same shape as the cross-zone block surface from
+    # /agents/{name}/commands so SDK code can map both 403s to the
+    # typed LightseiCapabilityError without parsing free-form strings.
+    agent = session.get(Agent, (workspace_id, body.source_agent))
+    if agent is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"agent {body.source_agent!r} not found in this workspace",
+        )
+    if "slack:respond" not in (agent.capabilities or []):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "capability_missing",
+                "capability": "slack:respond",
+                "agent_name": body.source_agent,
+                "granted": list(agent.capabilities or []),
+                "message": (
+                    f"agent {body.source_agent!r} does not have the "
+                    "'slack:respond' capability. Add it via "
+                    "PATCH /agents/{name}/capabilities or set the "
+                    "Compliance preset's internal / public hint."
+                ),
+            },
+        )
+
+    # Find the active Slack install for this Lightsei workspace. There
+    # can be at most one non-revoked install (partial-unique index).
+    active_install = session.execute(
+        select(SlackWorkspace).where(
+            SlackWorkspace.lightsei_workspace_id == workspace_id,
+            SlackWorkspace.revoked_at.is_(None),
+        ).limit(1)
+    ).scalar_one_or_none()
+    if active_install is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "no_slack_install",
+                "message": (
+                    "No active Slack install for this workspace. Connect "
+                    "Slack from /integrations/slack first."
+                ),
+            },
+        )
+
+    try:
+        result = slack_client.post_message(
+            session=session,
+            slack_team_id=active_install.slack_team_id,
+            channel=body.channel,
+            text=body.text,
+            thread_ts=body.thread_ts,
+        )
+    except slack_client.SlackClientError as exc:
+        # Slack rejected the post (bot not in channel, channel_not_found,
+        # etc.) OR the token is borked. Map to 502 with a clean message;
+        # the raw error goes into _debug for ops.
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "slack_post_failed",
+                "message": "Slack post failed — see _debug for the upstream error.",
+                "_debug": str(exc),
+            },
+        )
+
+    # Return the bits a bot might care about (ts for threading, channel
+    # echo for paranoia). Drop everything else from Slack's response
+    # to keep the surface stable across Slack API changes.
+    return {
+        "ok": True,
+        "ts": result.get("ts"),
+        "channel": result.get("channel"),
+    }
+
+
 def _serialize_command(c: Command) -> dict[str, Any]:
     return {
         "id": c.id,

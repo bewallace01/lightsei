@@ -353,6 +353,109 @@ def get_quality_signal(
     return _impl_get_quality_signal(_client, agent_name, days=days)
 
 
+def post_slack(
+    channel: str,
+    text: str,
+    *,
+    thread_ts: Optional[str] = None,
+    source_agent: Optional[str] = None,
+) -> dict[str, Any]:
+    """Phase 19.5: post a message to Slack from inside a bot.
+
+    Used from `@lightsei.on_command("slack.respond")` handlers
+    (dispatched by the Phase 19.4 chat orchestrator when a user mentions
+    the Lightsei app) to reply back to the channel:
+
+        @lightsei.on_command("slack.respond")
+        def on_slack(payload):
+            answer = compute_response(payload["text"])
+            lightsei.post_slack(
+                channel=payload["channel_id"],
+                text=answer,
+                thread_ts=payload.get("thread_ts"),
+            )
+
+    The bot's Slack bot token never leaves the backend — Lightsei
+    resolves the workspace's install + makes the chat.postMessage
+    call. Bot code only sees the channel id and the response text.
+
+    Raises LightseiCapabilityError if the bot doesn't have the
+    `slack:respond` capability granted. Default-deny: Compliance
+    preset's internal + public hint mappings grant it automatically;
+    pii + sensitive bots need an operator to add it explicitly.
+
+    Returns `{ok, ts, channel}` on success. Raises LightseiError on
+    transport failure or non-2xx response from the backend.
+    """
+    from ._capabilities import check_capability
+    from .errors import LightseiError
+
+    if not channel:
+        raise ValueError("post_slack requires a channel")
+    if not text:
+        raise ValueError("post_slack requires a text body")
+    if _client is None or _client._http is None:
+        raise LightseiError(
+            "post_slack called before lightsei.init() — "
+            "no HTTP client available"
+        )
+
+    # Capability gate. Same fail-open-during-init pattern as
+    # send_command: check_capability returns silently when the cache
+    # hasn't loaded yet (the initial /agents/{name}/capabilities
+    # fetch runs in init() but the first post_slack call might land
+    # before the response).
+    check_capability(_client, "slack:respond")
+
+    src = source_agent or getattr(_client, "_agent_name", None)
+    if not src:
+        raise LightseiError(
+            "post_slack requires source_agent (set via lightsei.init("
+            "agent_name=...) or pass explicitly)"
+        )
+
+    body: dict[str, Any] = {
+        "source_agent": src,
+        "channel": channel,
+        "text": text,
+    }
+    if thread_ts:
+        body["thread_ts"] = thread_ts
+
+    try:
+        r = _client._http.post(
+            "/slack/respond",
+            json=body,
+            timeout=_client.timeout,
+        )
+    except Exception as e:
+        raise LightseiError(f"post_slack transport error: {e}") from e
+
+    if r.status_code >= 400:
+        # 403 capability_missing → typed LightseiCapabilityError so
+        # user code can catch it specifically rather than via a
+        # status-code probe.
+        if r.status_code == 403:
+            try:
+                body_json = r.json()
+            except Exception:
+                body_json = {}
+            detail = body_json.get("detail") if isinstance(body_json, dict) else None
+            if isinstance(detail, dict) and detail.get("error") == "capability_missing":
+                from .errors import LightseiCapabilityError
+                raise LightseiCapabilityError(
+                    capability=str(detail.get("capability") or "slack:respond"),
+                    granted=detail.get("granted") or [],
+                    agent_name=detail.get("agent_name") or src,
+                )
+        raise LightseiError(f"post_slack returned {r.status_code}: {r.text[:300]}")
+
+    try:
+        return r.json()
+    except Exception as e:
+        raise LightseiError(f"post_slack returned non-JSON body: {e}") from e
+
+
 def send_command(
     target_agent: str,
     kind: str,

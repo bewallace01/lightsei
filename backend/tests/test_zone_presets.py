@@ -238,16 +238,19 @@ def test_compliance_preset_uses_hint_when_provided():
 
     internal = zp.apply_preset(zp.COMPLIANCE_TEAM, "specialist", sensitivity_hint="internal")
     assert internal["sensitivity_level"] == "internal"
-    # Internal-zone bots can post to Slack (needs internet) + dispatch
-    # within their chain (needs send_command). They just can't cross to
-    # pii. Validates the rule we picked in HINT_AWARE_PRESETS.
+    # Internal-zone bots can post to Slack (needs internet), dispatch
+    # within their chain (send_command), and respond to chat mentions
+    # (slack:respond, added in Phase 19.5). They just can't cross to pii.
     assert "send_command" in internal["capabilities"]
     assert "internet" in internal["capabilities"]
+    assert "slack:respond" in internal["capabilities"]
     assert internal["dispatches_cross_zone"] is False
 
     public = zp.apply_preset(zp.COMPLIANCE_TEAM, "specialist", sensitivity_hint="public")
     assert public["sensitivity_level"] == "public"
-    assert public["capabilities"] == ["internet"]
+    # Public-zone bots get internet + slack:respond. Phase 19.5 added
+    # slack:respond so the chat orchestrator can route to them.
+    assert set(public["capabilities"]) == {"internet", "slack:respond"}
     assert public["dispatches_cross_zone"] is False
 
 

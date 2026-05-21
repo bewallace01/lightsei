@@ -190,12 +190,16 @@ HINT_AWARE_PRESETS: dict[str, dict[str, dict[str, Any]]] = {
         },
         "internal": {
             "sensitivity_level": "internal",
-            "capabilities": ["send_command", "internet"],
+            # Phase 19.5: slack:respond added so internal bots are
+            # reachable from chat channels in their zone. The
+            # orchestrator (19.4) filters routing candidates on this
+            # capability + zone match.
+            "capabilities": ["send_command", "internet", "slack:respond"],
             "dispatches_cross_zone": False,
         },
         "public": {
             "sensitivity_level": "public",
-            "capabilities": ["internet"],
+            "capabilities": ["internet", "slack:respond"],
             "dispatches_cross_zone": False,
         },
     },

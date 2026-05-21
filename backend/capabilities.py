@@ -37,6 +37,12 @@ from models import (
 KNOWN_CAPABILITIES: frozenset[str] = frozenset({
     "internet",
     "send_command",
+    # Phase 19.5: required for lightsei.post_slack(). Granted by the
+    # Compliance preset's `internal` and `public` hint mappings (those
+    # bots are chat-reachable). pii + sensitive don't get it by default
+    # — a PII bot literally cannot post to Slack until an operator
+    # explicitly adds the capability.
+    "slack:respond",
 })
 
 # Structural prefix accepted by the validator without requiring each

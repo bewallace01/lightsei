@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 19.5 — SDK helper `lightsei.post_slack` + `slack:respond` capability. 19.1-19.4 shipped 2026-05-19.**
+> **Phase 19.6 — per-channel sensitivity config endpoints. 19.1-19.5 shipped.**
 
-Phase 19 (chat surface) running. 19.1-19.4 shipped 2026-05-19 — schema + Slack OAuth + signed webhook + chat orchestrator with Polaris-style routing. Backend at **811 passing** (+53 across Phase 19 so far; started at 758).
+Phase 19 (chat surface) running. 19.1-19.5 shipped — schema + Slack OAuth + signed webhook + chat orchestrator + SDK post_slack helper. Backend at **821 passing** (+63 across Phase 19; started at 758).
 
-NOW is 19.5: SDK helper `lightsei.post_slack(channel, text, thread_ts?)` calls a backend endpoint that decrypts the workspace's bot token + invokes `slack_client.post_message`. New capability `'slack:respond'` gated like other Phase 16 capabilities — bots without it raise `LightseiCapabilityError`. Compliance preset's internal + public hint mappings grant it automatically; pii + sensitive bots don't get it (default-deny).
+NOW is 19.6: `GET /workspaces/me/slack/channels` (paginated list) + `PATCH /workspaces/me/slack/channels/{slack_team_id}/{channel_id}` (operator sets sensitivity_level + opted_in). The dashboard surface (19.7) renders the list + a per-channel editor that calls into these endpoints.
 
 Phase 18 code-complete 2026-05-19. Phase 16 prod demo passed. Phase 17 in test mode; live-mode awaiting Stripe verification.
 
@@ -530,7 +530,9 @@ New handler in `backend/jobs.py` registry for `kind='slack_orchestration'`. Pure
 - Calls Anthropic with a routing prompt: "given the user's request `{text}` and the available bots `{list with name + summary + sensitivity_level}` filtered to bots whose `sensitivity_level == channel.sensitivity_level`, which bot should handle this?" Returns `{target_bot, why}`.
 - Dispatches a command of kind `slack.respond` to the chosen bot with payload `{text, channel_id, slack_team_id, thread_ts, user_id}`. The bot's `@lightsei.on_command("slack.respond")` handler runs whatever logic, then calls `lightsei.post_slack(channel_id, response_text)` (19.5) to reply.
 
-### 19.5 — SDK helper: `lightsei.post_slack` + `slack:respond` capability
+### 19.5 — SDK helper: `lightsei.post_slack` + `slack:respond` capability ✅ shipped 2026-05-20
+
+`'slack:respond'` capability added to `KNOWN_CAPABILITIES`; Compliance preset's internal + public hint mappings grant it automatically (pii + sensitive don't get it — wedge intact). `POST /slack/respond` backend endpoint resolves the workspace's Slack install, decrypts the bot token, calls `slack_client.post_message`. SDK helper `lightsei.post_slack(channel, text, thread_ts?)` capability-gates the call (raises `LightseiCapabilityError` without slack:respond) + posts to the backend. 10 new tests.
 
 - New SDK helper `lightsei.post_slack(channel: str, text: str, thread_ts: str = None)` — calls a Lightsei backend endpoint that uses the workspace's stored bot token to call Slack's `chat.postMessage`. Bot code never sees the raw Slack token; the backend mediates.
 - New capability `'slack:respond'` (gated like other capabilities — bots without it get `LightseiCapabilityError` if they try to call `post_slack`).
@@ -1032,6 +1034,32 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-20 — Phase 19.5 shipped: lightsei.post_slack + slack:respond capability
+
+`backend/capabilities.py` `KNOWN_CAPABILITIES` gains `'slack:respond'`. `backend/zone_presets.py` Compliance hint mappings: internal + public get slack:respond added; pii + sensitive don't (wedge intact). `POST /slack/respond` backend endpoint capability-gates + invokes `slack_client.post_message`. SDK helper `lightsei.post_slack(channel, text, thread_ts?)` runs the capability gate via `check_capability` then POSTs to the endpoint. 10 new tests; 1 stale Compliance-preset assertion updated to reflect the slack:respond grant.
+
+- **`POST /slack/respond`**: API-key authed, takes `{source_agent, channel, text, thread_ts?}`. Returns 404 if the agent isn't in the workspace, 403 `capability_missing` (structured detail so SDK can map to `LightseiCapabilityError`) if slack:respond isn't granted, 400 `no_slack_install` if there's no active install, 502 `slack_post_failed` (with raw error in `_debug`) when Slack rejects. Happy path returns `{ok, ts, channel}` so threading still works for follow-up messages.
+- **SDK `lightsei.post_slack`**: same fail-open-during-init pattern as `send_command`. Maps the backend's 403 capability_missing detail to `LightseiCapabilityError` with the bot's granted-capabilities list for clean error reporting. Requires `source_agent` either explicitly or via the active `lightsei.init(agent_name=...)` context.
+- **Wedge invariant test**: explicit assertion that `pii` and `sensitive` Compliance hints do NOT include slack:respond. A PII bot literally cannot post to Slack until an operator overrides the preset.
+
+**Verification**: 10 new tests in `backend/tests/test_slack_respond.py`:
+- `slack:respond` is in `KNOWN_CAPABILITIES`.
+- Compliance preset grants it on internal + public hint mappings.
+- Compliance preset withholds it on pii + sensitive (wedge enforcement).
+- Happy path: 200 with `{ok, ts, channel}` + `slack_client.post_message` called with expected args.
+- 403 capability_missing when bot lacks slack:respond (with structured detail).
+- 404 when source_agent unknown in workspace.
+- 400 no_slack_install when no active install.
+- 400 no_slack_install when install revoked.
+- 502 slack_post_failed when slack_client raises (`not_in_channel`, etc.).
+- 401/403 when no auth.
+
+Stale assertion in `test_compliance_preset_uses_hint_when_provided` updated to reflect the slack:respond grant on internal + public.
+
+Full backend suite: **821 passed in 154s** (was 811, +10 new). 0 regressions.
+
+**What this unblocks**: a Slack-routed bot can now post a response back. The orchestrator (19.4) dispatches `slack.respond` to the chosen bot; the bot's `@lightsei.on_command("slack.respond")` handler calls `lightsei.post_slack(channel, text, thread_ts)` to reply. End-to-end mention → response now works in code. 19.6 (dashboard config endpoints) + 19.7 (dashboard page) wire the operator-facing surface.
 
 ### 2026-05-19 — Phase 19.4 shipped: chat orchestrator handler
 
