@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 20.7 — SDK namespaced helpers. 20.1-20.5 shipped 2026-05-20; 20.6 shipped 2026-05-21.**
+> **Phase 20.8 — Dashboard /integrations index + per-connector cards. 20.1-20.5 shipped 2026-05-20; 20.6 + 20.7 shipped 2026-05-21.**
 
 Phase 20 (integration breadth) running. 20.1-20.6 shipped — schema + Google OAuth + Gmail + Calendar + Drive + bot-callable endpoint. Backend at **951 passing** (+115 across Phase 20; started at 836).
 
@@ -659,26 +659,20 @@ Two endpoints:
 8. On `ConnectorCallError`: 502 `connector_call_failed` with `_debug={upstream_status, error}`.
 9. Drop a `Run` row + a `connector_call_completed` (or `_failed`) `Event` row for observability. `sensitivity_level` snapshotted from the agent so zone-rollup queries stay historically correct; `cost_usd=0` (no Anthropic tokens burned by a connector call). Failure path commits before raising so the audit row survives the get_session rollback.
 
-### 20.7 — SDK namespaced helpers
+### 20.7 — SDK namespaced helpers ✅ shipped 2026-05-21
 
-`sdk/lightsei/connectors/__init__.py` re-exports per-connector submodules:
+`sdk/lightsei/connectors/{gmail,google_calendar,google_drive}.py` ship as typed wrappers over the 20.6 bot-callable endpoint. Re-exported at the package root as `lightsei.gmail` / `lightsei.calendar` / `lightsei.drive`. Each per-tool function funnels through `sdk/lightsei/_connectors.py::_invoke(...)` which centralizes the four cross-cutting concerns: local capability check (saves a backend round-trip when obviously misconfigured), `source_agent` resolution (explicit kwarg wins over `lightsei.init(agent_name=...)`), POST + result-envelope unwrap, and typed error mapping (403 capability_missing → `LightseiCapabilityError`, 403 connector_zone_mismatch → new `LightseiConnectorZoneError`, other 4xx/5xx + transport → `LightseiError`).
 
-- `sdk/lightsei/connectors/gmail.py` — typed Python functions `send_email(to, subject, body, ...)`, `search_inbox(query, limit=20)`, etc.
-- `sdk/lightsei/connectors/google_calendar.py` — `list_events(...)`, `create_event(...)`, etc.
-- `sdk/lightsei/connectors/google_drive.py` — `list_files(...)`, etc.
+`LightseiConnectorZoneError` is the new typed exception added in `sdk/lightsei/errors.py`. Subclass of `LightseiError` (so user code catching the base class still catches it) but carries `connector_type` / `agent_name` / `agent_sensitivity_level` / `declared_zones` so handlers can introspect the refusal without parsing strings. Parallel to `LightseiCrossZoneError` (which is for *dispatch* cross-zone) but conceptually distinct.
 
-Each function:
-1. Calls `check_capability(client, f"connector:{type}")` — raises `LightseiCapabilityError` if not granted.
-2. Resolves `source_agent` from explicit kwarg or `lightsei.init(agent_name=...)` context.
-3. POSTs to the backend's `/connectors/{type}/{tool}` endpoint.
-4. Returns the response.
+Drive ships two extra convenience wrappers: `download_file_bytes(file_id)` → `(bytes, mime_type, name)` and `upload_file_bytes(name=..., content=bytes, ...)`. Both base64 round-trip the content transparently so bot code never sees the wire encoding. The raw `download_file_content` / `upload_file` are still exposed for callers who already have base64 strings.
 
 Bot code reads cleanly:
 ```python
 @lightsei.on_command("slack.respond")
 def handle(payload):
-    upcoming = lightsei.calendar.list_events(time_min="now", days=7)
-    unread = lightsei.gmail.search_inbox("is:unread label:^t", limit=10)
+    upcoming = lightsei.calendar.list_events(time_min="2026-05-21T00:00:00Z")
+    unread = lightsei.gmail.search_inbox("is:unread", max_results=10)
     summary = format_digest(upcoming, unread)
     lightsei.post_slack(payload["channel_id"], summary)
 ```
@@ -1171,6 +1165,49 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-21 — Phase 20.7 shipped: SDK namespaced connector helpers
+
+`sdk/lightsei/connectors/` ships as a new package with three per-connector submodules (`gmail.py`, `google_calendar.py`, `google_drive.py`) and a shared `sdk/lightsei/_connectors.py::_invoke(...)` helper that all per-tool functions funnel through. Re-exported at the package root as `lightsei.gmail`, `lightsei.calendar`, `lightsei.drive` — bot code reads `lightsei.gmail.send_email(to=..., subject=..., body=...)` directly without importing a deeper path.
+
+Each per-tool function takes typed kwargs (no JSON dicts in the public surface — bot code shouldn't have to remember the wire shape of the Gmail API), funnels through `_invoke`, and returns the unwrapped result. `_invoke` is the load-bearing module:
+
+1. **Local capability check** via `check_capability(_client, f"connector:{type}")`. Raises `LightseiCapabilityError` before any HTTP call when the local cache says no — saves a backend round-trip on obvious misconfigurations. The remote endpoint still enforces (so a stale cache can't grant access); this is a UX shortcut.
+2. **`source_agent` resolution**: explicit kwarg wins over `_client.agent_name` (set by `lightsei.init(agent_name=...)`). If neither is set, raises `LightseiError` with a clear message before sending anything.
+3. **POST `/connectors/{type}/{tool}`** with `{source_agent, payload}` shape matching the Phase 20.6 endpoint.
+4. **Error mapping** in `_raise_typed_error`:
+   - 403 `capability_missing` → `LightseiCapabilityError` (with `capability`, `granted`, `agent_name` from the detail)
+   - 403 `connector_zone_mismatch` → `LightseiConnectorZoneError` (new exception class)
+   - Any other 4xx/5xx → `LightseiError` with `f"connector {type}.{tool} failed: {status} ({error_code}): {message}"`
+   - Transport errors → `LightseiError` with a `transport error: ...` message
+5. **Result unwrap**: backend's `{ok: True, result: ...}` envelope is stripped so wrapper functions return just the upstream result (callers shouldn't have to deal with the SDK's transport envelope).
+
+`LightseiConnectorZoneError` is the new exception class in `sdk/lightsei/errors.py`. Subclass of `LightseiError` (so user code catching the base class still catches it). Attributes: `connector_type`, `agent_name`, `agent_sensitivity_level`, `declared_zones`. Conceptually parallel to `LightseiCrossZoneError` (which is for *dispatch* across zones in Phase 16.4) but distinct — different invariant, different remediation. Both surface as 403s with distinct `error` keys; both deserve their own catchable class.
+
+Drive's per-tool wrappers ship with two extra convenience helpers worth calling out:
+- `download_file_bytes(file_id)` → `(content_bytes, mime_type, name)`. Wraps `download_file_content` and does the base64 decode. Bot code that wants raw bytes never sees `content_b64`.
+- `upload_file_bytes(name=..., content=bytes, mime_type=...)`. Wraps `upload_file` and does the base64 encode. Bot code passes raw bytes.
+
+The raw `download_file_content` / `upload_file` are still exposed for callers who already have base64 strings (e.g. piping from another system). Same connector, two ergonomic surfaces.
+
+`sdk/lightsei/__init__.py` adds the new exports: imports `gmail`, `google_calendar as calendar`, `google_drive as drive` from the connectors package, and imports + re-exports both new exception classes (`LightseiCapabilityError` was previously only an internal class — it's now public). Bot code can `from lightsei import LightseiConnectorZoneError` for typed except blocks.
+
+**Verification**: 19 new tests in `sdk/tests/test_connectors.py`:
+
+- `LightseiConnectorZoneError` shape: attributes populated, subclass of `LightseiError`.
+- Capability gate: refuses before any HTTP when local cache says no; passes through when granted; request body has the right `{source_agent, payload}` shape.
+- `source_agent` resolution: explicit kwarg wins; missing-everywhere raises `LightseiError` with a clear message.
+- Response unwrapping: strips `{ok: true, result: ...}` envelope; gracefully handles missing-envelope bodies.
+- Error mapping: 403 capability_missing → typed `LightseiCapabilityError` (the typed shape works even when local cache wrongly grants — server's truth is no); 403 connector_zone_mismatch → typed `LightseiConnectorZoneError`; 400 connector_not_installed → plain `LightseiError`; 502 connector_call_failed → plain `LightseiError` carrying the upstream code in the message.
+- Per-connector wrappers (one tool each): `lightsei.gmail.send_email` threads `cc` correctly; `lightsei.calendar.list_events` omits None kwargs (keeps the payload tight for debugging); `lightsei.drive.list_files` threads `query` + `page_size`; `lightsei.drive.download_file_bytes` decodes base64; `lightsei.drive.upload_file_bytes` encodes base64.
+- Transport failure: backend unreachable → `LightseiError` with "transport" in the message.
+- Pre-init guard: `lightsei.gmail.list_labels()` before `lightsei.init()` raises a clean `LightseiError` rather than an `AttributeError` on `_http=None`.
+
+Custom HTTP fake (`connector_fake`) modeled on `test_basic.fake_backend` but tailored to the connector endpoint shape — captures `/connectors/{type}/{tool}` POST bodies for assertion, serves `/agents/{name}` with the capability list, and returns a configurable status + body for the connector call. Tests never hit Google or the real backend.
+
+Full SDK suite: **120 passed in 32s** (was 101, +19 net new). 0 regressions. Full backend suite: **950 passed + 1 flake** (#102 `test_app_mention_enqueues_orchestration_job`, passed solo on re-run as usual). Same baseline as 20.6, no regressions.
+
+**What this unblocks**: 20.8 (dashboard `/integrations` page) is the final per-connector surface — the install button kicks off `/connectors/google/start`, the connected indicator surfaces the install row, the per-connector card lists which capabilities a bot needs. Bot code can already use the connectors today via the SDK; the dashboard surface lets non-engineer operators wire them up.
 
 ### 2026-05-21 — Phase 20.6 shipped: bot-callable connector endpoint
 

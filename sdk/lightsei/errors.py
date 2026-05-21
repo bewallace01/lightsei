@@ -56,6 +56,47 @@ class LightseiCrossZoneError(LightseiError):
         )
 
 
+class LightseiConnectorZoneError(LightseiError):
+    """Raised when a bot calls an installed connector that refuses
+    its trust zone.
+
+    Phase 20.6: each connector declares which sensitivity zones can
+    use it (e.g. Gmail's declared_zones excludes 'public', so a
+    public-zoned research bot literally cannot send email even if it
+    has the connector:gmail capability). Backend returns 403 with
+    `connector_zone_mismatch`; the SDK surfaces it as this exception
+    so user code can catch the trust-zone violation specifically.
+
+    Attributes:
+        connector_type: which connector refused the call.
+        agent_name: who tried to call it.
+        agent_sensitivity_level: the agent's zone.
+        declared_zones: the connector's allow-list.
+    """
+
+    def __init__(
+        self,
+        connector_type: str,
+        agent_name: Optional[str],
+        agent_sensitivity_level: Optional[str],
+        declared_zones: Optional[list[str]] = None,
+        message: Optional[str] = None,
+    ):
+        self.connector_type = connector_type
+        self.agent_name = agent_name
+        self.agent_sensitivity_level = agent_sensitivity_level
+        self.declared_zones = list(declared_zones or [])
+        super().__init__(
+            message
+            or (
+                f"connector {connector_type!r} refuses calls from "
+                f"{agent_sensitivity_level!r}-zoned bots "
+                f"(agent {agent_name!r}). Declared zones: "
+                f"{self.declared_zones}."
+            ),
+        )
+
+
 class LightseiCapabilityError(LightseiError):
     """Raised when an op requires a capability the agent doesn't have.
 

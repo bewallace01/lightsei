@@ -27,7 +27,13 @@ from ._instance import TooManyInstancesError
 from ._quality_signal import get_quality_signal as _impl_get_quality_signal
 from ._secrets import get_secret as _impl_get_secret
 from ._track import track
-from .errors import LightseiError, LightseiPolicyError
+from .connectors import gmail, google_calendar as calendar, google_drive as drive
+from .errors import (
+    LightseiCapabilityError,
+    LightseiConnectorZoneError,
+    LightseiError,
+    LightseiPolicyError,
+)
 
 _log = logging.getLogger("lightsei")
 
@@ -71,7 +77,12 @@ __all__ = [
     "current_dispatch_chain_id",
     "LightseiError",
     "LightseiPolicyError",
+    "LightseiCapabilityError",
+    "LightseiConnectorZoneError",
     "TooManyInstancesError",
+    "gmail",
+    "calendar",
+    "drive",
 ]
 
 
