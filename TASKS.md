@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 19 code-complete 2026-05-20 pending Slack app console setup + demo.**
+> **Phase 20.1 — connector schema + registry. Phase 20 spec locked 2026-05-20.**
 
-Phase 19 (chat surface) is code-complete: 19.1-19.7 all shipped on 2026-05-19/05-20. Schema + Slack OAuth + signed events webhook + chat orchestrator + SDK `post_slack` + 4 channel-config endpoints + dashboard `/integrations/slack` page. Backend at **836 passing** (+78 across Phase 19; started at 758). Dashboard `tsc --noEmit` clean; `next build` builds 27 routes (was 26).
+Phase 19 (chat surface) code-complete 2026-05-20: 19.1-19.7 all shipped. Backend at **836 passing**. 19.9 (demo) needs Slack-app console setup; pickable when ready.
 
-19.8 (tests) folded into each sub-task. 19.9 (demo) needs Slack app console setup — create the Lightsei Slack app, configure scopes + redirect URI + event subscriptions, set the four env vars on Railway, then run through `@Lightsei pull our MRR` in a Slack channel.
+Phase 20 (integration breadth) spec locked 2026-05-20: MCP-native protocol, Gmail+Calendar+Drive as the v1 connector set, capability-namespaced SDK helpers (`lightsei.gmail.send_email(...)`), per-connector declared zone allow-lists. 10 sub-tasks (20.1 schema → 20.10 demo). 20.1 lays the schema backbone every other 20.x reads from.
 
 Phase 18 code-complete 2026-05-19. Phase 16 prod demo passed. Phase 17 in test mode; live-mode awaiting Stripe verification.
 
@@ -579,9 +579,126 @@ Phase 19 closes when the wedge story extends end-to-end into Slack: trust zones 
 
 Operationalizes the "integration breadth as moat" wedge from the 2026-05-17 decision. Viktor's 3000+ integrations is a marketing number; the v1 target is the priority set non-technical users actually use, then grow.
 
-Rough shape: (1) wrap a priority connector set (Slack, Gmail, Google Calendar, Google Drive, Notion, Linear, Jira, Asana, Stripe, HubSpot, Salesforce, GitHub, Figma, Confluence, Box, OneDrive, Outlook, Discord, Airtable, Webflow) as MCP-style integrations callable from bots; (2) browseable `/integrations` UI to connect, OAuth handled; (3) each integration declares which trust zones it can be used in (ties to Phase 16); (4) custom MCP support for the long tail (paste a URL or upload a manifest, get an integration). Demo: a non-technical user connects Slack, Gmail, and Stripe in 90 seconds, deploys a weekly-revenue-digest bot that uses all three.
+**Design choices locked 2026-05-20.**
 
-Detailed sub-tasks deferred until promoted to NOW.
+- **Connector protocol: MCP-native (Anthropic's Model Context Protocol).** Adopt Anthropic's MCP spec for manifest + tool-call shape. Lets us plug into the MCP ecosystem (community-built MCP servers + Claude SDK's native tool integration). Trade-off: tighter coupling to Anthropic's MCP roadmap. Implementation: bundled MCP-style modules in `backend/connectors/` for v1 — each module exports a MANIFEST + an INVOKE function. We can later swap to externally-hosted MCP servers per-connector without changing the SDK or call signatures.
+- **Initial v1 connector set: Gmail + Google Calendar + Google Drive.** Three connectors share Google's OAuth flow (one OAuth integration covers all three); high user value (everyone has Google Workspace); sets the pattern for subsequent OAuth-based connectors. Switch trigger: a real prospect needs a non-Google connector before the demo arc is complete — at that point we add HubSpot or Slack alongside.
+- **Bot-side calling: capability-namespaced functions** like `lightsei.gmail.send_email(...)`, `lightsei.calendar.create_event(...)`, `lightsei.drive.list_files(...)`. SDK exposes typed helpers per connector. Each helper enforces the per-connector capability (`connector:gmail`, etc.) before the call. Type-safe + ergonomic. The generic `lightsei.call("connector.tool", payload)` escape hatch will land if/when custom MCP server support arrives.
+- **Trust-zone × connector: per-connector declared zone allow-list.** Each connector module declares which sensitivity zones it's safe to use in. The backend's bot-callable endpoint refuses a call when the bot's zone isn't in the connector's allow-list. Mirrors Phase 16 + Phase 19's per-channel-zone story. Example defaults: HubSpot → `{sensitive, pii}` only (customer data); Gmail → `{internal, sensitive, pii}` (work email); Google Calendar → all four (scheduling crosses zones); Google Drive → `{internal, sensitive, pii}` (workspace docs).
+
+### 20.1 — Connector schema + registry
+
+Single alembic migration for `connector_installations` (per-workspace per-connector OAuth-token holder):
+
+- `id` (UUID PK).
+- `workspace_id` FK (CASCADE).
+- `connector_type` (string, e.g. `'gmail'`, `'google_calendar'`, `'google_drive'`).
+- `encrypted_tokens` (LargeBinary, holds the access_token + refresh_token + expires_at as encrypted JSON).
+- `scopes` (string array, the OAuth scopes that were granted).
+- `installed_by_user_id` FK (SET NULL on user delete; audit).
+- `installed_at`, `revoked_at` timestamps.
+- `external_account_email` (the Google account the connector is bound to; surfaced in the dashboard so the operator knows which account they connected).
+- Composite partial-unique index `(workspace_id, connector_type) WHERE revoked_at IS NULL` — one active install per (workspace, connector_type).
+
+Plus `backend/connectors/__init__.py` with the hardcoded `CONNECTOR_REGISTRY` mapping `connector_type → ConnectorSpec` (name, display label, declared_zones, default_scopes, OAuth provider, MANIFEST function returning MCP tool list).
+
+### 20.2 — Google OAuth helper for connectors
+
+`backend/connectors/google_oauth.py` (separate from the existing `google_oauth.py` which is for sign-in only). Mirrors that file's shape but:
+
+- Adds `redirect_after_install` to the pending-state row (so the dashboard can be told where to land post-install).
+- Returns `access_token + refresh_token + expires_in + scope + email` from the exchange.
+- Supports scope deltas (re-installing with new scopes — Google handles this transparently when `prompt=consent` is set).
+- Encrypted refresh_token storage so we can refresh access_tokens without re-prompting the user.
+
+Two endpoints:
+
+- `GET /connectors/google/start?type=gmail` (authed): generates state, persists with `connector_type` + `workspace_id` + `installed_by_user_id`, returns `{authorization_url, state}`.
+- `GET /connectors/google/callback?code&state`: exchanges code, persists `connector_installations` row with encrypted tokens, redirects to `/integrations?installed={type}`.
+
+### 20.3 — Gmail connector implementation
+
+`backend/connectors/gmail.py`:
+
+- `MANIFEST` exports MCP tool definitions for: `send_email`, `search_inbox`, `get_thread`, `list_labels`, `add_label`, `mark_read`.
+- `INVOKE(tool_name, payload, access_token)` dispatches to the right function. Each function makes the corresponding Gmail API call via `httpx`.
+- Token-refresh wrapper: if a call returns 401, refresh the access_token using the stored refresh_token + retry once. Update the install row's encrypted_tokens.
+
+### 20.4 — Google Calendar connector implementation
+
+`backend/connectors/google_calendar.py`. Tools: `list_events`, `get_event`, `create_event`, `update_event`, `delete_event`, `list_calendars`, `find_free_slots`.
+
+### 20.5 — Google Drive connector implementation
+
+`backend/connectors/google_drive.py`. Tools: `list_files`, `search_files`, `get_file_metadata`, `download_file_content`, `upload_file`, `create_folder`, `copy_file`.
+
+### 20.6 — Bot-callable endpoint + capability + zone gates
+
+`POST /connectors/{connector_type}/{tool_name}` (API-key authed):
+
+- Body: `{source_agent, payload}`.
+- Capability gate: bot's `capabilities` list must include `connector:{type}` (existing Phase 16.3 mechanism — already validated as a known prefix in `capabilities.py`).
+- Zone gate: bot's `sensitivity_level` must be in the connector's `declared_zones`. Refused with 403 `connector_zone_mismatch` if not.
+- Looks up the workspace's active install for the connector; 400 `connector_not_installed` if absent.
+- Decrypts the access_token (refresh if expired), calls `CONNECTOR_REGISTRY[type].invoke(tool_name, payload, access_token)`, returns the result.
+- Records the call on `runs` for cost/quality observability (no Anthropic tokens but useful for "what is this bot actually doing in production?").
+
+### 20.7 — SDK namespaced helpers
+
+`sdk/lightsei/connectors/__init__.py` re-exports per-connector submodules:
+
+- `sdk/lightsei/connectors/gmail.py` — typed Python functions `send_email(to, subject, body, ...)`, `search_inbox(query, limit=20)`, etc.
+- `sdk/lightsei/connectors/google_calendar.py` — `list_events(...)`, `create_event(...)`, etc.
+- `sdk/lightsei/connectors/google_drive.py` — `list_files(...)`, etc.
+
+Each function:
+1. Calls `check_capability(client, f"connector:{type}")` — raises `LightseiCapabilityError` if not granted.
+2. Resolves `source_agent` from explicit kwarg or `lightsei.init(agent_name=...)` context.
+3. POSTs to the backend's `/connectors/{type}/{tool}` endpoint.
+4. Returns the response.
+
+Bot code reads cleanly:
+```python
+@lightsei.on_command("slack.respond")
+def handle(payload):
+    upcoming = lightsei.calendar.list_events(time_min="now", days=7)
+    unread = lightsei.gmail.search_inbox("is:unread label:^t", limit=10)
+    summary = format_digest(upcoming, unread)
+    lightsei.post_slack(payload["channel_id"], summary)
+```
+
+### 20.8 — Dashboard /integrations page index + per-connector cards
+
+New `/integrations` page (separate from `/integrations/slack` which keeps the chat-specific UI). Card grid: one card per connector in the registry (Gmail / Calendar / Drive + Slack from Phase 19). Each card shows:
+
+- Connector name + logo (text-only icon for now; can ship real logos in a polish pass).
+- Declared zones (chips).
+- Connect button (if not installed) → routes to the OAuth start endpoint.
+- Connected indicator + the external account email + a Disconnect button (if installed).
+
+The existing `/integrations/slack` page becomes a per-connector detail page; `/integrations/gmail`, `/integrations/google-calendar`, `/integrations/google-drive` follow the same pattern but are minimal (just connect / disconnect + bot capability hint — no per-channel config since these don't have a Slack-channel-equivalent).
+
+### 20.9 — Tests
+
+Per the existing pattern (tests live alongside the code they cover):
+
+- 20.1: schema + partial-unique-index + tenant isolation tests (mirrors test_slack_schema.py shape).
+- 20.2: Google OAuth state lifecycle, token exchange (httpx-stubbed), token refresh round-trip, scope-delta re-install.
+- 20.3-20.5: per-connector unit tests with httpx-stubbed Google API responses. One happy path + one error path per tool.
+- 20.6: bot-callable endpoint capability gate, zone gate (connector_zone_mismatch), connector_not_installed, token-refresh-on-401-then-retry.
+- 20.7: SDK helpers — capability check, source_agent resolution, error path mapping.
+- 20.8: dashboard `tsc --noEmit` clean; `next build` green; integration card renders connected/disconnected states.
+
+### 20.10 — Demo
+
+Connect Gmail + Google Calendar + Google Drive from `/integrations`. Deploy a "weekly digest" bot via team-from-README that:
+
+1. Reads upcoming events from Calendar (`lightsei.calendar.list_events(days=7)`).
+2. Searches unread emails in Gmail (`lightsei.gmail.search_inbox("is:unread", limit=10)`).
+3. Lists recent files in Drive (`lightsei.drive.list_files(modified_after="-7d", limit=20)`).
+4. Formats a digest + posts to a Slack channel via `lightsei.post_slack` (Phase 19.5).
+
+The demo proves: bot code reads cleanly, OAuth was a single click per connector, trust-zone enforcement (a `pii`-zoned bot can use these connectors because they're declared safe in pii; a `public`-zoned bot can't touch Gmail by default — declared zones exclude public). End-to-end activation in under 5 minutes.
 
 ## Phase 21: Customer-facing chat widget + operator inbox
 
