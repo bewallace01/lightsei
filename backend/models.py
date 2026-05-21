@@ -1323,6 +1323,41 @@ class ConnectorInstallation(Base):
     )
 
 
+class ConnectorOAuthPendingState(Base):
+    """Phase 20.2: short-lived state store for the connector-install
+    OAuth hop. Mirrors SlackOAuthPendingState shape but adds
+    `connector_type` (so the callback knows which connector to bind
+    the resulting install to) + `code_verifier` (PKCE handshake)."""
+
+    __tablename__ = "connector_oauth_pending_states"
+
+    state: Mapped[str] = mapped_column(String(128), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    installed_by_user_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    connector_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    code_verifier: Mapped[str] = mapped_column(String(128), nullable=False)
+    redirect_after: Mapped[Optional[str]] = mapped_column(
+        String(512), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_connector_oauth_pending_states_expires_at",
+            "expires_at",
+        ),
+    )
+
+
 class SlackOAuthPendingState(Base):
     """Phase 19.2: short-lived state store for the Slack OAuth
     start → callback hop.

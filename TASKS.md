@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 20.2 — Google OAuth helper for connectors. 20.1 shipped 2026-05-20.**
+> **Phase 20.3 — Gmail connector implementation. 20.1 + 20.2 shipped 2026-05-20.**
 
-Phase 20 (integration breadth) running. 20.1 shipped 2026-05-20 — alembic 0034 + ConnectorInstallation model + CONNECTOR_REGISTRY with gmail/google_calendar/google_drive + 21 tests. Backend at **857 passing** (+21 over Phase 20.1; phase started at 836).
+Phase 20 (integration breadth) running. 20.1 + 20.2 shipped — schema + registry + Google OAuth flow + connector install endpoints. Backend at **877 passing** (+41 over Phase 20 so far; phase started at 836).
 
-NOW is 20.2: `backend/connectors/google_oauth.py` (separate from the existing sign-in google_oauth.py) + `GET /connectors/google/start?type=gmail` + `GET /connectors/google/callback`. Encrypted-tokens storage that supports refresh-token round-trips.
+NOW is 20.3: `backend/connectors/gmail.py` — MANIFEST + INVOKE implementing send_email, search_inbox, get_thread, list_labels, add_label, mark_read. Token-refresh-on-401 wrapper.
 
 Phase 19 code-complete 2026-05-20. Phase 18 code-complete 2026-05-19. Phase 16 prod demo passed. Phase 17 in test mode; live-mode awaiting Stripe verification.
 
@@ -604,7 +604,9 @@ Single alembic migration for `connector_installations` (per-workspace per-connec
 
 Plus `backend/connectors/__init__.py` with the hardcoded `CONNECTOR_REGISTRY` mapping `connector_type → ConnectorSpec` (name, display label, declared_zones, default_scopes, OAuth provider, MANIFEST function returning MCP tool list).
 
-### 20.2 — Google OAuth helper for connectors
+### 20.2 — Google OAuth helper for connectors ✅ shipped 2026-05-20
+
+Alembic 0035 (`connector_oauth_pending_states` table) + `backend/connectors/google_oauth.py` helper + `/connectors/google/start` + `/connectors/google/callback` endpoints + 20 tests. The full Google OAuth install flow runs end-to-end against a stubbed Google token endpoint; production needs `LIGHTSEI_GOOGLE_CLIENT_ID` + `LIGHTSEI_GOOGLE_CLIENT_SECRET` + (optionally) `LIGHTSEI_CONNECTORS_GOOGLE_REDIRECT_URI` env vars + the connector redirect URI registered on the Google OAuth client.
 
 `backend/connectors/google_oauth.py` (separate from the existing `google_oauth.py` which is for sign-in only). Mirrors that file's shape but:
 
@@ -1157,6 +1159,24 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-20 — Phase 20.2 shipped: Google OAuth connector install flow
+
+Alembic 0035 (`connector_oauth_pending_states`) + `backend/connectors/google_oauth.py` + `/connectors/google/start` + `/connectors/google/callback` + 20 tests. Re-uses the same `LIGHTSEI_GOOGLE_CLIENT_ID` / `LIGHTSEI_GOOGLE_CLIENT_SECRET` env vars as sign-in (same Google app, different scopes per call); separate redirect URI via `LIGHTSEI_CONNECTORS_GOOGLE_REDIRECT_URI`.
+
+- **`backend/connectors/google_oauth.py`**: pure helper module separate from the sign-in `google_oauth.py`. Surfaces: `is_configured()`, `new_pkce_pair()`, `new_state()`, `build_authorization_url(state, challenge, scopes, redirect_uri?)`, `exchange_code_for_tokens(code, code_verifier, redirect_uri?)`, `refresh_access_token(refresh_token)`, `GoogleConnectorOAuthError`. Authorization URL forces `access_type=offline` + `prompt=consent` so we always get a refresh_token. Exchange surfaces `{access_token, refresh_token, expires_in, scope, email}`; raises if Google omits refresh_token (forces revoke-and-reinstall rather than silently breaking later when the access token expires).
+- **`GET /connectors/google/start?type=gmail&redirect_after=...`** (authed, session token only): 503 when not configured; 404 when type isn't a Google connector in the registry; 400 when called via API key (install must be operator-driven for audit). Persists state with `workspace_id` + `installed_by_user_id` + `connector_type` + PKCE verifier on `connector_oauth_pending_states`. Returns `{authorization_url, state}`.
+- **`GET /connectors/google/callback?code&state`**: HTML error pages on error paths (browser tab, not JSON). Single-use state (drops the pending row before exchange). Encrypts the token blob as `{access_token, refresh_token, expires_at}` JSON via `secrets_crypto.encrypt` + stored as ASCII bytes on `connector_installations.encrypted_tokens`. Stores granted (not requested) scopes. Reinstall path updates the existing active install row in place so the partial-unique index from 20.1 doesn't fire. 303 redirect to `/integrations?installed=<type>`.
+
+**Verification**: 20 new tests in `backend/tests/test_connector_google_oauth.py`:
+- Pure helpers: is_configured detection; PKCE pair shape; new_state randomness; authorization URL requests `access_type=offline` + `prompt=consent` + S256 + scope list (defense against accidentally sharing the sign-in URL builder); exchange happy path + missing-refresh-token raises + 4xx raises + transport error raises; refresh happy path + invalid_grant raises.
+- Endpoint: 503 when unconfigured; 404 unknown type; state persistence with `connector_type` + `code_verifier`; callback creates install row + token blob round-trips through `secrets_crypto.decrypt`; reinstall updates in place (exactly one active row; token = the second one); HTML 400 on unknown state / user cancel / exchange failure / unknown connector in state.
+
+**One latent bug discovered + fixed**: an earlier-in-session tool call had `Write` followed by `Edit` parameters in one block, which silently dropped the migration file write. Re-created the migration file after the tests surfaced "relation `connector_oauth_pending_states` does not exist." Worth remembering: nested tool calls in one block can fail silently when parameter names collide.
+
+Full backend suite: **877 passed in 163s** (was 857, +20 new). 0 regressions. Observed the known `test_app_mention_enqueues_orchestration_job` flake (cleared on re-run; already filed).
+
+**What this unblocks**: 20.3-20.5 (per-connector implementations) read the encrypted_tokens off `connector_installations` + use `refresh_access_token` when calls return 401. 20.6 (bot-callable endpoint) dispatches into the connector's INVOKE. 20.8 (dashboard /integrations page) kicks off installs via `/connectors/google/start`.
 
 ### 2026-05-20 — Phase 20.1 shipped: connector schema + registry
 

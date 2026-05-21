@@ -56,6 +56,8 @@ from models import (
     GitHubAgentPath,
     GitHubIntegration,
     NotificationChannel,
+    ConnectorInstallation,
+    ConnectorOAuthPendingState,
     NotificationDelivery,
     OAuthPendingState,
     Run,
@@ -4732,6 +4734,222 @@ async def slack_events(
         "type": event_type,
         "job_id": job_id,
     }
+
+
+# ---------- Phase 20.2: Google OAuth (connector install) ---------- #
+
+
+CONNECTOR_OAUTH_STATE_TTL = timedelta(minutes=10)
+
+
+@app.get("/connectors/google/start")
+def connector_google_oauth_start(
+    type: str,
+    redirect_after: Optional[str] = None,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 20.2: kick off the Google OAuth install for a connector.
+
+    `type` is the connector name (e.g. `gmail`, `google_calendar`,
+    `google_drive`). The scopes Lightsei requests come from the
+    connector's `default_scopes` in CONNECTOR_REGISTRY.
+
+    Returns `{authorization_url, state}` — the dashboard navigates the
+    browser to authorization_url. State is persisted with the
+    Lightsei workspace + operator + connector_type so the callback
+    can rebind on return.
+    """
+    from connectors import get_connector
+    from connectors import google_oauth as _gco
+
+    spec = get_connector(type)
+    if spec is None or spec.oauth_provider != "google":
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown google connector {type!r}",
+        )
+    if not _gco.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "Google OAuth is not configured on this backend. Set "
+                "LIGHTSEI_GOOGLE_CLIENT_ID + LIGHTSEI_GOOGLE_CLIENT_SECRET."
+            ),
+        )
+    if auth.user is None:
+        raise HTTPException(
+            status_code=400,
+            detail="connector install must be initiated by a logged-in user",
+        )
+
+    now = utcnow()
+    verifier, challenge = _gco.new_pkce_pair()
+    state = _gco.new_state()
+
+    session.add(ConnectorOAuthPendingState(
+        state=state,
+        workspace_id=auth.workspace_id,
+        installed_by_user_id=auth.user.id,
+        connector_type=type,
+        code_verifier=verifier,
+        redirect_after=redirect_after,
+        created_at=now,
+        expires_at=now + CONNECTOR_OAUTH_STATE_TTL,
+    ))
+    session.flush()
+
+    return {
+        "authorization_url": _gco.build_authorization_url(
+            state=state,
+            challenge=challenge,
+            scopes=list(spec.default_scopes),
+        ),
+        "state": state,
+    }
+
+
+@app.get("/connectors/google/callback")
+def connector_google_oauth_callback(
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    session: Session = Depends(get_session),
+) -> Any:
+    """Phase 20.2: complete the connector install.
+
+    Validates state, single-use'd (drops the pending row before
+    exchange), trades the code for tokens, encrypts the {access_token,
+    refresh_token, expires_at} blob, persists a ConnectorInstallation
+    row (or updates an existing one in place for re-install), redirects
+    the browser back to the dashboard.
+
+    Renders HTML 400s on error paths so a browser tab gets a useful
+    page rather than JSON (same pattern as 19.2's Slack callback).
+    """
+    import json as _json
+    import secrets_crypto
+    from connectors import get_connector
+    from connectors import google_oauth as _gco
+
+    dashboard_base = os.environ.get(
+        "LIGHTSEI_DASHBOARD_BASE_URL", "https://app.lightsei.com"
+    ).rstrip("/")
+
+    def _html_error(title: str, message: str) -> Response:
+        body = (
+            "<!doctype html><html><head><meta charset=utf-8>"
+            "<title>Connector install — Lightsei</title>"
+            "<style>body{font:14px/1.5 -apple-system,sans-serif;"
+            "max-width:480px;margin:64px auto;padding:0 16px;color:#111}"
+            "h1{font-size:18px;font-weight:600;margin-bottom:8px}"
+            "p{color:#555;margin:8px 0}a{color:#4f46e5}</style></head>"
+            f"<body><h1>{title}</h1><p>{message}</p>"
+            f"<p><a href=\"{dashboard_base}/integrations\">"
+            "← back to integrations</a></p></body></html>"
+        )
+        return Response(content=body, media_type="text/html", status_code=400)
+
+    if error:
+        return _html_error(
+            "Connector install cancelled",
+            f"Google returned an error: {error}. You can try again from "
+            "the integrations page.",
+        )
+
+    if not code or not state:
+        return _html_error(
+            "Invalid install link",
+            "The Google install callback was missing required parameters. "
+            "Start the install again from the integrations page.",
+        )
+
+    pending = session.get(ConnectorOAuthPendingState, state)
+    now = utcnow()
+    if pending is None or pending.expires_at <= now:
+        return _html_error(
+            "Install link expired",
+            "The install link is no longer valid (expired or already used). "
+            "Start a fresh install from the integrations page.",
+        )
+
+    workspace_id = pending.workspace_id
+    installed_by_user_id = pending.installed_by_user_id
+    connector_type = pending.connector_type
+    verifier = pending.code_verifier
+    redirect_after = pending.redirect_after
+    # Single-use: drop the pending row before exchange so a parallel
+    # callback with the same state can't double-consume.
+    session.delete(pending)
+    session.flush()
+
+    spec = get_connector(connector_type)
+    if spec is None or spec.oauth_provider != "google":
+        return _html_error(
+            "Unknown connector",
+            f"The connector {connector_type!r} is no longer recognized.",
+        )
+
+    try:
+        tokens = _gco.exchange_code_for_tokens(
+            code=code, code_verifier=verifier,
+        )
+    except _gco.GoogleConnectorOAuthError as exc:
+        return _html_error(
+            "Install didn't complete",
+            f"The token exchange with Google failed: {exc}. Try again "
+            "from the integrations page.",
+        )
+
+    # Encrypt the token blob. We serialize a JSON dict so the refresh
+    # path (20.6) can read+write the same shape, and `expires_at` is
+    # carried as an ISO timestamp rather than seconds-from-now so we
+    # don't have to plumb the install timestamp through every refresh.
+    expires_at = None
+    if tokens.get("expires_in") is not None:
+        expires_at = (now + timedelta(seconds=int(tokens["expires_in"]))).isoformat()
+    token_blob = {
+        "access_token": tokens["access_token"],
+        "refresh_token": tokens["refresh_token"],
+        "expires_at": expires_at,
+    }
+    encrypted = secrets_crypto.encrypt(_json.dumps(token_blob)).encode("ascii")
+
+    # Granted scopes are a subset of what we asked for (user can
+    # decline). Store what they actually granted.
+    granted_scopes = (tokens.get("scope") or "").split() if tokens.get("scope") else []
+    email = tokens.get("email")
+
+    # Reinstall path: existing active install for (workspace, type)
+    # gets updated in place so the partial-unique index doesn't fire.
+    existing = session.execute(
+        select(ConnectorInstallation).where(
+            ConnectorInstallation.workspace_id == workspace_id,
+            ConnectorInstallation.connector_type == connector_type,
+            ConnectorInstallation.revoked_at.is_(None),
+        ).limit(1)
+    ).scalar_one_or_none()
+    if existing is not None:
+        existing.encrypted_tokens = encrypted
+        existing.scopes = granted_scopes
+        existing.installed_by_user_id = installed_by_user_id
+        existing.external_account_email = email or existing.external_account_email
+        existing.installed_at = now
+    else:
+        session.add(ConnectorInstallation(
+            id=str(uuid.uuid4()),
+            workspace_id=workspace_id,
+            connector_type=connector_type,
+            encrypted_tokens=encrypted,
+            scopes=granted_scopes,
+            installed_by_user_id=installed_by_user_id,
+            external_account_email=email,
+            installed_at=now,
+        ))
+    session.flush()
+
+    target = redirect_after or f"{dashboard_base}/integrations?installed={connector_type}"
+    return RedirectResponse(target, status_code=303)
 
 
 # ---------- Phase 19.6: operator-facing Slack config endpoints ---------- #
