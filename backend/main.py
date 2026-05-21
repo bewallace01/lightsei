@@ -5246,6 +5246,365 @@ def slack_respond(
     }
 
 
+# ---------- Phase 20.6: bot-callable connector endpoint ---------- #
+
+
+class ConnectorInvokeIn(BaseModel):
+    """Input to `POST /connectors/{type}/{tool}` (Phase 20.6).
+
+    Called from bot code via `lightsei.gmail.send_email(...)` and
+    friends (Phase 20.7 SDK helpers wrap this endpoint). `payload` is
+    the tool's input dict; its shape is validated by the connector's
+    own MANIFEST input_schema at the per-tool function level."""
+    source_agent: str = Field(min_length=1, max_length=128)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.post("/connectors/{connector_type}/{tool_name}")
+def invoke_connector(
+    connector_type: str,
+    tool_name: str,
+    body: ConnectorInvokeIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 20.6: bot-callable surface for installed connectors.
+
+    Pipeline (and the rejection shape at each step):
+
+    1. 404 `unknown_connector` if `connector_type` isn't in the
+       registry.
+    2. 404 if `source_agent` isn't an agent in this workspace.
+    3. 403 `capability_missing` if the agent's `capabilities` list
+       doesn't include `connector:{type}`. Same shape as
+       `/slack/respond`'s 403 so SDK code can map both to
+       `LightseiCapabilityError` without parsing strings.
+    4. 403 `connector_zone_mismatch` if the agent's
+       `sensitivity_level` isn't in the connector spec's
+       `declared_zones`. The wedge invariant — e.g. a public-zoned
+       bot can never touch Gmail because Gmail's declared_zones
+       excludes public.
+    5. 400 `connector_not_installed` if the workspace has no active
+       install for `connector_type`. Operator hasn't run the
+       `/connectors/google/start` flow yet.
+    6. Decrypt the stored token blob, dispatch INVOKE.
+    7. On `ConnectorAuthExpired` (401 from upstream): refresh the
+       access_token via the connector's OAuth helper, persist the new
+       encrypted blob, retry the INVOKE once. A second 401 surfaces
+       as 502 `connector_auth_failed` — the install needs operator
+       attention (refresh_token revoked, scopes changed upstream).
+    8. On `ConnectorCallError`: 502 `connector_call_failed` with the
+       upstream status in `_debug`.
+    9. Record the call on `runs` (+ a single
+       `connector_call_completed` event row) so the dashboard can
+       answer "what is this bot actually doing in prod?" without an
+       Anthropic-cost rollup needing to exist.
+    """
+    import json as _json
+
+    import secrets_crypto
+    from connectors import (
+        CONNECTOR_REGISTRY,
+        ConnectorAuthExpired,
+        ConnectorCallError,
+    )
+    from connectors import google_oauth as _gco
+
+    # 1. Registry lookup.
+    spec = CONNECTOR_REGISTRY.get(connector_type)
+    if spec is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "unknown_connector",
+                "connector_type": connector_type,
+                "message": (
+                    f"no connector registered with type "
+                    f"{connector_type!r}. Known: "
+                    f"{sorted(CONNECTOR_REGISTRY.keys())}."
+                ),
+            },
+        )
+
+    # 2. Agent lookup.
+    agent = session.get(Agent, (workspace_id, body.source_agent))
+    if agent is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"agent {body.source_agent!r} not found in this workspace",
+        )
+
+    # 3. Capability gate — same shape as /slack/respond's 403.
+    required_capability = f"connector:{connector_type}"
+    if required_capability not in (agent.capabilities or []):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "capability_missing",
+                "capability": required_capability,
+                "agent_name": body.source_agent,
+                "granted": list(agent.capabilities or []),
+                "message": (
+                    f"agent {body.source_agent!r} does not have the "
+                    f"{required_capability!r} capability. Add it via "
+                    "PATCH /agents/{name}/capabilities."
+                ),
+            },
+        )
+
+    # 4. Zone gate. declared_zones is a frozenset of sensitivity-level
+    # strings. A mismatch means the connector flat-out refuses bots
+    # at this trust zone (the wedge invariant).
+    if agent.sensitivity_level not in spec.declared_zones:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "connector_zone_mismatch",
+                "connector_type": connector_type,
+                "agent_name": body.source_agent,
+                "agent_sensitivity_level": agent.sensitivity_level,
+                "declared_zones": sorted(spec.declared_zones),
+                "message": (
+                    f"connector {connector_type!r} refuses calls from "
+                    f"{agent.sensitivity_level!r}-zoned bots. Declared "
+                    f"zones: {sorted(spec.declared_zones)}."
+                ),
+            },
+        )
+
+    # 5. Install lookup. Partial-unique index guarantees at most one
+    # non-revoked install per (workspace, type).
+    install = session.execute(
+        select(ConnectorInstallation).where(
+            ConnectorInstallation.workspace_id == workspace_id,
+            ConnectorInstallation.connector_type == connector_type,
+            ConnectorInstallation.revoked_at.is_(None),
+        ).limit(1)
+    ).scalar_one_or_none()
+    if install is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "connector_not_installed",
+                "connector_type": connector_type,
+                "message": (
+                    f"no active {connector_type!r} install for this "
+                    "workspace. Connect it from /integrations first."
+                ),
+            },
+        )
+
+    # Decrypt the {access_token, refresh_token, expires_at} blob.
+    try:
+        token_blob = _json.loads(
+            secrets_crypto.decrypt(bytes(install.encrypted_tokens))
+        )
+    except Exception:
+        # Crypto failure — install is unrecoverable from here.
+        # Surface as 500 since it indicates corruption / misconfig,
+        # not a bot-correctable error.
+        logger.exception("connector %s install %s token decrypt failed",
+                         connector_type, install.id)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "connector_token_decrypt_failed",
+                "connector_type": connector_type,
+                "message": (
+                    "stored connector tokens could not be decrypted. "
+                    "Reinstall the connector from /integrations."
+                ),
+            },
+        )
+
+    access_token = token_blob.get("access_token")
+    refresh_token = token_blob.get("refresh_token")
+
+    # 6 + 7. Dispatch, with a single refresh-then-retry on auth-expired.
+    now = utcnow()
+    invoke_error: Optional[str] = None
+    upstream_status: Optional[int] = None
+    try:
+        try:
+            result = spec.invoke(
+                tool_name=tool_name,
+                payload=body.payload,
+                access_token=access_token,
+            )
+        except ConnectorAuthExpired:
+            # Try one refresh + retry. If we have no refresh_token
+            # (shouldn't happen — the install path requires it) or the
+            # refresh itself fails, the install is dead.
+            if not refresh_token:
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "error": "connector_auth_failed",
+                        "connector_type": connector_type,
+                        "message": (
+                            "access token expired and no refresh "
+                            "token on file. Reinstall the connector."
+                        ),
+                    },
+                )
+            try:
+                refreshed = _gco.refresh_access_token(
+                    refresh_token=refresh_token,
+                )
+            except _gco.GoogleConnectorOAuthError as exc:
+                # invalid_grant etc. — install dead.
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "error": "connector_auth_failed",
+                        "connector_type": connector_type,
+                        "message": (
+                            "token refresh failed; reinstall the "
+                            "connector from /integrations."
+                        ),
+                        "_debug": str(exc),
+                    },
+                )
+
+            new_access = refreshed["access_token"]
+            new_refresh = refreshed.get("refresh_token") or refresh_token
+            new_expires_at = None
+            if refreshed.get("expires_in") is not None:
+                new_expires_at = (
+                    now + timedelta(seconds=int(refreshed["expires_in"]))
+                ).isoformat()
+            new_blob = {
+                "access_token": new_access,
+                "refresh_token": new_refresh,
+                "expires_at": new_expires_at,
+            }
+            install.encrypted_tokens = secrets_crypto.encrypt(
+                _json.dumps(new_blob)
+            ).encode("ascii")
+            session.flush()
+
+            # Retry once with the fresh access_token. A second 401
+            # here means the upstream API is rejecting a fresh token
+            # — install is dead from the user's side.
+            try:
+                result = spec.invoke(
+                    tool_name=tool_name,
+                    payload=body.payload,
+                    access_token=new_access,
+                )
+            except ConnectorAuthExpired:
+                raise HTTPException(
+                    status_code=502,
+                    detail={
+                        "error": "connector_auth_failed",
+                        "connector_type": connector_type,
+                        "message": (
+                            "upstream rejected a freshly-refreshed "
+                            "token. Reinstall the connector."
+                        ),
+                    },
+                )
+    except ConnectorCallError as exc:
+        upstream_status = exc.upstream_status
+        invoke_error = str(exc)
+        _record_connector_call(
+            session,
+            workspace_id=workspace_id,
+            agent=agent,
+            connector_type=connector_type,
+            tool_name=tool_name,
+            now=now,
+            ok=False,
+            error=invoke_error,
+            upstream_status=upstream_status,
+        )
+        # Commit the recording before raising — get_session rolls
+        # back on exception, which would lose the failure row. Any
+        # other pending work (the refreshed encrypted_tokens blob, if
+        # we got that far) is also worth persisting.
+        session.commit()
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "error": "connector_call_failed",
+                "connector_type": connector_type,
+                "tool_name": tool_name,
+                "message": (
+                    f"upstream {connector_type} API call failed — see "
+                    "_debug for details."
+                ),
+                "_debug": {
+                    "upstream_status": upstream_status,
+                    "error": invoke_error,
+                },
+            },
+        )
+
+    # 9. Record the successful call.
+    _record_connector_call(
+        session,
+        workspace_id=workspace_id,
+        agent=agent,
+        connector_type=connector_type,
+        tool_name=tool_name,
+        now=now,
+        ok=True,
+        error=None,
+        upstream_status=None,
+    )
+
+    return {"ok": True, "result": result}
+
+
+def _record_connector_call(
+    session: Session,
+    *,
+    workspace_id: str,
+    agent: "Agent",
+    connector_type: str,
+    tool_name: str,
+    now: datetime,
+    ok: bool,
+    error: Optional[str],
+    upstream_status: Optional[int],
+) -> None:
+    """Drop a Run + a single `connector_call_completed` event row so
+    the dashboard's per-agent activity views (Phase 11.4 + later) can
+    count connector calls alongside Anthropic Runs. cost_usd is zero
+    — connector calls don't burn LLM tokens — but `sensitivity_level`
+    is snapshotted from the agent so zone-rollup queries stay
+    historically correct even if the agent's level changes later.
+    """
+    run_id = str(uuid.uuid4())
+    session.add(Run(
+        id=run_id,
+        workspace_id=workspace_id,
+        agent_name=agent.name,
+        started_at=now,
+        ended_at=now,
+        sensitivity_level=agent.sensitivity_level,
+    ))
+    session.flush()
+    event_payload: dict[str, Any] = {
+        "connector_type": connector_type,
+        "tool_name": tool_name,
+        "ok": ok,
+    }
+    if error is not None:
+        event_payload["error"] = error
+    if upstream_status is not None:
+        event_payload["upstream_status"] = upstream_status
+    session.add(Event(
+        workspace_id=workspace_id,
+        run_id=run_id,
+        agent_name=agent.name,
+        kind="connector_call_completed" if ok else "connector_call_failed",
+        payload=event_payload,
+        timestamp=now,
+    ))
+    session.flush()
+
+
 def _serialize_command(c: Command) -> dict[str, Any]:
     return {
         "id": c.id,

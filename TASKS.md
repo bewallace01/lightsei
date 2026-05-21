@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 20.6 — Bot-callable endpoint + capability + zone gates. 20.1 + 20.2 + 20.3 + 20.4 + 20.5 shipped 2026-05-20.**
+> **Phase 20.7 — SDK namespaced helpers. 20.1-20.5 shipped 2026-05-20; 20.6 shipped 2026-05-21.**
 
-Phase 20 (integration breadth) running. 20.1-20.5 shipped — schema + Google OAuth + Gmail + Calendar + Drive. All three v1 connectors real; registry has no stubs. Backend at **935 passing** (+99 across Phase 20; started at 836).
+Phase 20 (integration breadth) running. 20.1-20.6 shipped — schema + Google OAuth + Gmail + Calendar + Drive + bot-callable endpoint. Backend at **951 passing** (+115 across Phase 20; started at 836).
 
-NOW is 20.6: `POST /connectors/{type}/{tool}` API-key-authed endpoint. Capability gate (`connector:{type}`), zone gate (bot's `sensitivity_level` must be in connector's `declared_zones`), install lookup, token-refresh-on-401-then-retry, record on `runs`. This is the surface bots actually call to use the connectors shipped in 20.3-20.5.
+NOW is 20.7: SDK namespaced helpers in `sdk/lightsei/connectors/{gmail,google_calendar,google_drive}.py`. Each function calls `check_capability(client, f"connector:{type}")`, resolves `source_agent` from kwarg or `lightsei.init` context, and POSTs to `/connectors/{type}/{tool}`. Bot code reads `lightsei.gmail.send_email(...)`, `lightsei.calendar.list_events(...)`, `lightsei.drive.list_files(...)`.
 
 Phase 19 code-complete 2026-05-20. Phase 18 code-complete 2026-05-19. Phase 16 prod demo passed. Phase 17 in test mode; live-mode awaiting Stripe verification.
 
@@ -645,16 +645,19 @@ Two endpoints:
 - `download_file_content` does a metadata pre-fetch to decide between `?alt=media` (regular files) and `/export?mimeType=...` (Google-native Docs/Sheets/Slides/Drawings). Bot code gets a `content_b64` blob plus the resolved `mime_type` — it doesn't need to know whether the file was native or binary. Defaults: Docs → text/plain, Sheets → text/csv, Slides → application/pdf, Drawings → image/png. Pass `export_mime_type` to override.
 - `upload_file` manually constructs the `multipart/related` request body (metadata JSON part + content part with their own content-types, separated by a boundary). httpx's `files=` kwarg uses `multipart/form-data`, which Drive rejects. A second HTTP helper (`_request_bytes`) returns raw bytes for downloads rather than parsing as JSON.
 
-### 20.6 — Bot-callable endpoint + capability + zone gates
+### 20.6 — Bot-callable endpoint + capability + zone gates ✅ shipped 2026-05-21
 
-`POST /connectors/{connector_type}/{tool_name}` (API-key authed):
+`POST /connectors/{connector_type}/{tool_name}` (API-key authed). Sole bot-facing surface for installed connectors. Body: `{source_agent, payload}`. Rejection-shape ladder:
 
-- Body: `{source_agent, payload}`.
-- Capability gate: bot's `capabilities` list must include `connector:{type}` (existing Phase 16.3 mechanism — already validated as a known prefix in `capabilities.py`).
-- Zone gate: bot's `sensitivity_level` must be in the connector's `declared_zones`. Refused with 403 `connector_zone_mismatch` if not.
-- Looks up the workspace's active install for the connector; 400 `connector_not_installed` if absent.
-- Decrypts the access_token (refresh if expired), calls `CONNECTOR_REGISTRY[type].invoke(tool_name, payload, access_token)`, returns the result.
-- Records the call on `runs` for cost/quality observability (no Anthropic tokens but useful for "what is this bot actually doing in production?").
+1. 404 `unknown_connector` if `connector_type` isn't in the registry.
+2. 404 if `source_agent` isn't in the workspace.
+3. 403 `capability_missing` (capability=`connector:{type}`) if the agent's allow-list doesn't include it — same shape as `/slack/respond`'s 403 so SDK code can map both to `LightseiCapabilityError`.
+4. 403 `connector_zone_mismatch` if `agent.sensitivity_level not in spec.declared_zones`. The wedge invariant — public-zoned bots can never touch Gmail/Drive because their declared_zones exclude `public`.
+5. 400 `connector_not_installed` if no active install.
+6. Decrypt the stored `{access_token, refresh_token, expires_at}` blob, dispatch `spec.invoke(tool_name, payload, access_token)`.
+7. On `ConnectorAuthExpired`: refresh via `google_oauth.refresh_access_token`, persist the new encrypted blob (in place — partial-unique index stays happy), retry the INVOKE once with the fresh access_token. Second 401 → 502 `connector_auth_failed`.
+8. On `ConnectorCallError`: 502 `connector_call_failed` with `_debug={upstream_status, error}`.
+9. Drop a `Run` row + a `connector_call_completed` (or `_failed`) `Event` row for observability. `sensitivity_level` snapshotted from the agent so zone-rollup queries stay historically correct; `cost_usd=0` (no Anthropic tokens burned by a connector call). Failure path commits before raising so the audit row survives the get_session rollback.
 
 ### 20.7 — SDK namespaced helpers
 
@@ -1168,6 +1171,40 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-21 — Phase 20.6 shipped: bot-callable connector endpoint
+
+`POST /connectors/{connector_type}/{tool_name}` lands in `backend/main.py` as the sole bot-facing surface for installed connectors. API-key authed, same auth shape as `/slack/respond`. Body `{source_agent, payload}` → returns `{ok: True, result: ...}` on success. Five-step rejection ladder before dispatching:
+
+1. **404 `unknown_connector`** if `connector_type` not in `CONNECTOR_REGISTRY`. Detail carries the known list so SDK code can render a useful message.
+2. **404** if `source_agent` not in the workspace. Distinct from capability-missing — SDK can prompt different fixes.
+3. **403 `capability_missing`** (capability=`connector:{type}`) if the agent's allow-list doesn't include it. Same JSON shape as `/slack/respond`'s 403 so the SDK's `LightseiCapabilityError` mapping covers both with one matcher.
+4. **403 `connector_zone_mismatch`** if `agent.sensitivity_level not in spec.declared_zones`. The wedge enforcement — a public-zoned bot can never touch Gmail/Drive even with the capability granted, because the registry refuses at the request boundary.
+5. **400 `connector_not_installed`** if no non-revoked install for `(workspace, type)`. Operator hasn't run `/connectors/google/start` yet.
+
+Then: decrypt the stored `{access_token, refresh_token, expires_at}` blob via `secrets_crypto.decrypt`, dispatch `spec.invoke(tool_name=..., payload=..., access_token=...)`. On `ConnectorAuthExpired`, the endpoint refreshes via `connectors.google_oauth.refresh_access_token`, persists the new blob in place on the install row (partial-unique index stays satisfied), and retries the INVOKE once with the fresh access_token. A second `ConnectorAuthExpired` after refresh, or a refresh-itself failure (`invalid_grant` etc.), surfaces as 502 `connector_auth_failed` with `_debug` carrying the upstream error. The install is NOT auto-revoked — operator decides whether to reinstall. Defensive branch: if the stored blob has no `refresh_token` (shouldn't happen — install path requires it, but stale rows might), skip the refresh attempt and return 502 directly.
+
+`ConnectorCallError` (any non-auth upstream failure: 4xx/5xx other than 401, transport, malformed JSON) → 502 `connector_call_failed` with `_debug={upstream_status, error}`. The user-facing `message` is generic so a chatty upstream error doesn't leak through; raw error lives in `_debug` for ops.
+
+Every call drops a `Run` row + a single `connector_call_completed` (success) or `connector_call_failed` (failure) `Event` row. Run carries the agent's `sensitivity_level` snapshot so historical zone-rollup queries stay correct even if the agent's level changes later. `cost_usd=0` since connector calls don't burn Anthropic tokens. Event payload carries `{connector_type, tool_name, ok}` + `upstream_status`/`error` on failures. **Critical detail from test failure**: `get_session` rolls back on raised exceptions, which would lose the failure-path Run+Event. The endpoint explicitly `session.commit()` before raising on the `ConnectorCallError` branch so the audit row survives — same pattern as `/slack/respond` would need if it grew similar observability.
+
+**Verification**: 15 new tests in `backend/tests/test_connector_invoke.py` (all upstream INVOKE + Google OAuth refresh calls monkeypatched; no Google network traffic):
+
+- Registry: 404 unknown connector_type; 404 unknown source_agent.
+- Capability gate: 403 capability_missing with the exact detail shape `/slack/respond` returns (so SDK matcher works across both).
+- Zone gate: 403 connector_zone_mismatch on a public-zoned bot calling Gmail; happy path for a public-zoned bot calling Calendar (whose declared_zones includes `public`) to confirm the enforcement isn't connector-blanket.
+- Install: 400 connector_not_installed (no row); 400 same shape when only revoked rows exist.
+- Happy path: INVOKE called with the URL-derived `tool_name`, body's `payload`, and the install's decrypted `access_token`. Returns `{ok: True, result: ...}`.
+- Refresh-on-401: first INVOKE raises `ConnectorAuthExpired`, refresh helper returns new tokens, INVOKE retried with the new access_token, succeeds. New encrypted blob persists in the install row; `refresh_token=None` from Google means we keep the existing one.
+- Refresh failures: `GoogleConnectorOAuthError` from refresh → 502; second `ConnectorAuthExpired` after refresh → 502 (no infinite loop); no `refresh_token` on file → 502 without calling the refresh helper.
+- `ConnectorCallError` → 502 with `_debug.upstream_status` echoed back.
+- Run+Event recording: success path drops `connector_call_completed` event with `sensitivity_level` snapshotted; failure path drops `connector_call_failed` with `upstream_status` and `ok=False`.
+
+Stub mechanism worth noting: `ConnectorSpec` is `dataclass(frozen=True)`, so mutating `spec.invoke` directly fails. Tests use `dataclasses.replace(spec, invoke=fn)` then `monkeypatch.setitem(CONNECTOR_REGISTRY, type, patched)` — clean rollback after the test, no module-level state mutation.
+
+Full backend suite: **951 passed in 165s** (was 935, +15 net new from 20.6 + 1 unrelated coverage tick observed in the run-up). 0 regressions. Known `test_app_mention_enqueues_orchestration_job` flake didn't fire this run.
+
+**What this unblocks**: 20.7 (SDK helpers) is now a thin HTTP wrapper around this endpoint. Bot code reads `lightsei.gmail.send_email(...)`; the SDK function checks capability locally + POSTs to `/connectors/gmail/send_email`. 20.8 (dashboard /integrations) shows the connect/disconnect surface that drives `/connectors/google/start` (already shipped in 20.2).
 
 ### 2026-05-20 — Phase 20.5 shipped: Google Drive connector implementation
 
