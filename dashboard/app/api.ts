@@ -1807,3 +1807,81 @@ export async function deleteAutoApprovalRule(rule: {
     method: "DELETE",
   });
 }
+
+
+// ---------- Phase 19.7: Slack chat-surface helpers ---------- //
+
+export type SlackWorkspaceSummary = {
+  slack_team_id: string;
+  team_name: string;
+  bot_user_id: string;
+  installed_at: string;
+  installed_by_user_id: string | null;
+  revoked_at: string | null;
+};
+
+export type SlackChannelSummary = {
+  slack_team_id: string;
+  channel_id: string;
+  channel_name: string;
+  sensitivity_level: SensitivityLevel;
+  opted_in: boolean;
+  created_at: string;
+  updated_at: string;
+};
+
+export async function startSlackOAuth(): Promise<{
+  authorization_url: string;
+  state: string;
+}> {
+  return (await authedJson("/slack/oauth/start")) as {
+    authorization_url: string;
+    state: string;
+  };
+}
+
+export async function fetchSlackWorkspaces(
+  options?: { includeRevoked?: boolean },
+): Promise<SlackWorkspaceSummary[]> {
+  const qs = options?.includeRevoked ? "?include_revoked=true" : "";
+  const body = (await authedJson(`/workspaces/me/slack/workspaces${qs}`)) as {
+    workspaces: SlackWorkspaceSummary[];
+  };
+  return body.workspaces;
+}
+
+export async function fetchSlackChannels(
+  options?: { slackTeamId?: string },
+): Promise<SlackChannelSummary[]> {
+  const qs = options?.slackTeamId
+    ? `?slack_team_id=${encodeURIComponent(options.slackTeamId)}`
+    : "";
+  const body = (await authedJson(`/workspaces/me/slack/channels${qs}`)) as {
+    channels: SlackChannelSummary[];
+  };
+  return body.channels;
+}
+
+export async function patchSlackChannel(
+  slackTeamId: string,
+  channelId: string,
+  patch: { sensitivity_level?: SensitivityLevel; opted_in?: boolean },
+): Promise<SlackChannelSummary> {
+  return (await authedJson(
+    `/workspaces/me/slack/channels/${encodeURIComponent(slackTeamId)}/${encodeURIComponent(channelId)}`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  )) as SlackChannelSummary;
+}
+
+export async function revokeSlackWorkspace(
+  slackTeamId: string,
+): Promise<SlackWorkspaceSummary> {
+  return (await authedJson(
+    `/workspaces/me/slack/workspaces/${encodeURIComponent(slackTeamId)}`,
+    { method: "DELETE" },
+  )) as SlackWorkspaceSummary;
+}

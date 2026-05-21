@@ -90,6 +90,11 @@ const NAV: NavItem[] = [
     label: "Integrations",
     children: [
       {
+        href: "/integrations/slack",
+        label: "slack",
+        hint: "@-mention Lightsei from any channel; per-channel trust zones",
+      },
+      {
         href: "/notifications",
         label: "notifications",
         hint: "Slack, Discord, Teams, Mattermost, webhook",

@@ -7,11 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 19.7 — dashboard `/integrations/slack` page. 19.1-19.6 shipped.**
+> **Phase 19 code-complete 2026-05-20 pending Slack app console setup + demo.**
 
-Phase 19 (chat surface) running. 19.1-19.6 shipped — schema + Slack OAuth + signed webhook + chat orchestrator + SDK post_slack + 4 channel-config endpoints (list workspaces, list channels, PATCH channel, DELETE workspace). Backend at **836 passing** (+78 across Phase 19; started at 758).
+Phase 19 (chat surface) is code-complete: 19.1-19.7 all shipped on 2026-05-19/05-20. Schema + Slack OAuth + signed events webhook + chat orchestrator + SDK `post_slack` + 4 channel-config endpoints + dashboard `/integrations/slack` page. Backend at **836 passing** (+78 across Phase 19; started at 758). Dashboard `tsc --noEmit` clean; `next build` builds 27 routes (was 26).
 
-NOW is 19.7: dashboard `/integrations/slack` page. "Connect Slack" → POST /slack/oauth/start. Connected-workspace list + channels grouped by sensitivity_level + per-channel sensitivity select + opt-in toggle that call into the 19.6 endpoints. Disconnect button on each workspace.
+19.8 (tests) folded into each sub-task. 19.9 (demo) needs Slack app console setup — create the Lightsei Slack app, configure scopes + redirect URI + event subscriptions, set the four env vars on Railway, then run through `@Lightsei pull our MRR` in a Slack channel.
 
 Phase 18 code-complete 2026-05-19. Phase 16 prod demo passed. Phase 17 in test mode; live-mode awaiting Stripe verification.
 
@@ -548,7 +548,9 @@ Four endpoints + 15 tests. The dashboard page (19.7) consumes these to render th
 - `PATCH /workspaces/me/slack/channels/{slack_team_id}/{channel_id}` — operator changes `sensitivity_level` and/or `opted_in`.
 - Channels appear in the list automatically the first time the Lightsei bot sees an event from them; default `sensitivity_level=internal`, `opted_in=false`.
 
-### 19.7 — Dashboard /integrations/slack page
+### 19.7 — Dashboard /integrations/slack page ✅ shipped 2026-05-20
+
+`dashboard/app/integrations/slack/page.tsx` (new) + Slack helpers in `dashboard/app/api.ts` + a new entry in the Integrations dropdown of `Header.tsx`.
 
 Dashboard surface for the operator:
 
@@ -1036,6 +1038,22 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-20 — Phase 19.7 shipped: dashboard /integrations/slack + Phase 19 code-complete
+
+`dashboard/app/integrations/slack/page.tsx` lands as the operator-facing surface for the Slack chat integration. Header's Integrations dropdown gains a "slack" entry. api.ts gains 5 helpers (`startSlackOAuth`, `fetchSlackWorkspaces`, `fetchSlackChannels`, `patchSlackChannel`, `revokeSlackWorkspace`) + the matching `SlackWorkspaceSummary` + `SlackChannelSummary` types.
+
+The page:
+
+- **Empty state**: when no workspace is connected, a centered card with a Connect Slack button that calls `startSlackOAuth` → navigates the browser same-tab to Slack's consent screen.
+- **Connected state**: each Slack workspace renders as a card with team name + bot user id + install timestamp + a disconnect link. Below each card, a channel list with per-row sensitivity-level select + opted-in checkbox. Each control wired to `patchSlackChannel`.
+- **Helpers**: `SensitivityChip` reused from `/zones`, `HelpTip` on `sensitivity_zone` in the intro paragraph. Channel rows render the channel id beneath the name + a "silent" tag when `opted_in=false`.
+- **Callback flash**: after OAuth completes, the backend redirects to `/integrations/slack?installed=true`; the page shows a green banner + cleans the query param with `history.replaceState` so a hard reload doesn't re-flash.
+- **Disconnect confirmation** before calling `revokeSlackWorkspace` (it's a destructive op visible across the Slack workspace, so the confirm is warranted).
+
+**Verification**: `npx tsc --noEmit` clean. `npx next build` green; 27 routes (was 26). `/integrations/slack` at 5.32 kB First Load JS.
+
+**Phase 19 code-complete**: 19.1-19.7 all shipped. Backend at 836 passing tests (+78 across the phase). Dashboard builds 27 routes. 19.8 (tests) was folded into each sub-task as they landed — full backend suite passes (with the one known flake on `test_app_mention_enqueues_orchestration_job` that's filed as a separate task). 19.9 (demo) is operator-driven and needs Slack-app console setup: create the Slack app, configure scopes (`app_mentions:read`, `chat:write`, `channels:read`, `users:read`) + redirect URI + event subscription URL + signing secret + OAuth client id/secret on Railway env. Same shape as STRIPE_SETUP.md from Phase 17.4.
 
 ### 2026-05-20 — Phase 19.6 shipped: per-channel config endpoints
 
