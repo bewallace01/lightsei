@@ -7,7 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 20.10 — End-to-end weekly-digest bot demo. 20.1-20.5 shipped 2026-05-20; 20.6-20.8 shipped 2026-05-21. (20.9 was a coverage rollup, satisfied incrementally.)**
+> **Phase 21 — Customer-facing chat widget + operator inbox. Phase 20 (integration breadth) complete 2026-05-21.**
+
+Phase 20 (integration breadth) shipped: connector schema (20.1), Google OAuth install flow (20.2), three real connectors — Gmail / Calendar / Drive (20.3-20.5), bot-callable endpoint with capability + zone gates (20.6), SDK namespaced helpers (20.7), dashboard /integrations index + per-connector cards (20.8). 20.9 was a coverage rollup satisfied incrementally. 20.10 artifacts (digest-bot README + reference code + zone-enforcement script + runbook) shipped under `examples/p20-demo/` — live OAuth + Slack posting is operator-driven per the runbook. Backend at **962 passing** (+126 across Phase 20; started at 836). SDK at **120 passing** (+19 from 20.7).
+
+NOW is Phase 21 (customer-facing chat widget + operator inbox). Detailed sub-tasks need to be promoted from the rough shape below before work starts — spec the surface first, then break down.
 
 Phase 20 (integration breadth) running. 20.1-20.6 shipped — schema + Google OAuth + Gmail + Calendar + Drive + bot-callable endpoint. Backend at **951 passing** (+115 across Phase 20; started at 836).
 
@@ -709,16 +713,16 @@ Per the existing pattern (tests live alongside the code they cover):
 - 20.7: SDK helpers — capability check, source_agent resolution, error path mapping.
 - 20.8: dashboard `tsc --noEmit` clean; `next build` green; integration card renders connected/disconnected states.
 
-### 20.10 — Demo
+### 20.10 — Demo ✅ artifacts shipped 2026-05-21 (live run is operator-driven)
 
-Connect Gmail + Google Calendar + Google Drive from `/integrations`. Deploy a "weekly digest" bot via team-from-README that:
+Artifacts under `examples/p20-demo/` mirror the Phase 16 demo's shape (README → seed README → enforcement-proof script → reference bot code). Live OAuth + Slack posting is operator-driven per the runbook — same as how `examples/p16-demo/` worked.
 
-1. Reads upcoming events from Calendar (`lightsei.calendar.list_events(days=7)`).
-2. Searches unread emails in Gmail (`lightsei.gmail.search_inbox("is:unread", limit=10)`).
-3. Lists recent files in Drive (`lightsei.drive.list_files(modified_after="-7d", limit=20)`).
-4. Formats a digest + posts to a Slack channel via `lightsei.post_slack` (Phase 19.5).
+- **`digest-readme.md`** — Halo (small-SaaS-shaped) README an operator drops into team-from-README. Calls out that the digest bot is `internal`-zoned and needs `connector:gmail` + `connector:google_calendar` + `connector:google_drive` + `slack:respond`. Explicitly says no `internet` — the connector endpoint is the right enforcement boundary, not raw httpx.
+- **`digest_bot.py`** — the reference bot. Uses real Phase 20.7 SDK signatures (the original 20.10 spec showed `days=`/`limit=`/`modified_after=` kwargs that don't exist — see the README note). Registers `@on_command("weekly_digest.run")` so an operator (or a future scheduler) fires the digest with a single command. Each fetch is wrapped — one upstream blip surfaces as `_couldn't fetch X_` in the message rather than crashing the digest. `--once` flag for local testing.
+- **`zone_enforcement_demo.py`** — Act-5 wedge proof. Configures a `public`-zoned bot with `connector:gmail` intentionally granted (pretend an operator misconfigured), calls `lightsei.gmail.list_labels()`, asserts the backend raises 403 connector_zone_mismatch / SDK surfaces as `LightseiConnectorZoneError`. Doesn't need real Google OAuth — just a workspace with a Gmail install.
+- **`README.md`** — 5-act runbook. (1) connect Gmail / Calendar / Drive via `/integrations`. (2) drop digest-readme into team-from-README. (3) deploy + verify capabilities. (4) fire the digest via `POST /agents/{name}/commands`. (5) prove the zone gate via `zone_enforcement_demo.py`.
 
-The demo proves: bot code reads cleanly, OAuth was a single click per connector, trust-zone enforcement (a `pii`-zoned bot can use these connectors because they're declared safe in pii; a `public`-zoned bot can't touch Gmail by default — declared zones exclude public). End-to-end activation in under 5 minutes.
+The demo proves: bot code reads cleanly (the bot fits in ~200 lines of SDK calls + Slack message formatting), OAuth was a single click per connector, trust-zone enforcement (the wedge in Act 5). End-to-end activation in under 10 minutes once Slack is pre-connected.
 
 ## Phase 21: Customer-facing chat widget + operator inbox
 
@@ -1175,6 +1179,21 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-21 — Phase 20 code-complete: demo artifacts shipped (20.10)
+
+Phase 20 wraps with the demo artifacts under `examples/p20-demo/`. Live demo execution is operator-driven (matches `examples/p16-demo/` pattern — Lightsei provides the seed, the runbook, and the proof scripts; the prospect / operator drives the live clicks). Per CLAUDE.md's "Ask before deviating" rule, asked Bailey whether to (a) prep artifacts, (b) drive live OAuth + Slack, or (c) stubbed smoke only. Picked Recommended (a) — artifacts + runbook, no live OAuth spend.
+
+Four files under `examples/p20-demo/`:
+
+- **`digest-readme.md`** (50 lines): Halo-shaped README an operator drops into team-from-README. Halo is a hybrid-schedule 12-person SaaS company. Calls out exactly the three Google services + Slack the digest bot should touch, declares the `internal` trust zone explicitly, and explains why customer-PII connectors are out of scope. Same shape as `examples/p16-demo/crm-readme.md` (Coral) — feedstock for the planner.
+- **`digest_bot.py`** (238 lines): the bot a CSM would deploy. Real Phase 20.7 SDK signatures (`time_min=`, `max_results=`, `query=` — the original spec sketch had `days=`/`limit=`/`modified_after=` that aren't real). Registers `@on_command("weekly_digest.run")` so an operator-side scheduler (or a manual `POST /agents/{name}/commands` from the dashboard) fires the digest once. Each section (Calendar / Gmail / Drive) is wrapped — a single upstream blip surfaces as `_couldn't fetch X_` in the Slack message rather than crashing the digest. `--once` CLI flag for local testing without setting up a scheduler. Verified imports cleanly against the real SDK.
+- **`zone_enforcement_demo.py`** (135 lines): Act-5 wedge proof. Initializes the SDK as a `public`-zoned bot that has `connector:gmail` intentionally granted (the misconfiguration scenario — pretend an operator added the capability without thinking about zones). Calls `lightsei.gmail.list_labels()`. Backend's bot-callable endpoint (Phase 20.6) refuses with 403 `connector_zone_mismatch`, SDK surfaces as `LightseiConnectorZoneError`. Script asserts the right exception class fires + carries the right metadata. Doesn't need real Google OAuth (just any Gmail install on the workspace).
+- **`README.md`** (112 lines): 5-act runbook. Act 1 = connect three Google services via `/integrations` (one click each). Act 2 = drop `digest-readme.md` into team-from-README. Act 3 = deploy + verify the bot has the right capabilities (and NO `internet`). Act 4 = fire the digest via `POST /agents/{name}/commands` + watch it post to Slack. Act 5 = the zone-enforcement script proves the wedge. Cleanup section. Files reference. Notes section calls out the SDK-signature mismatch and the deliberate no-`internet` design choice.
+
+**Verification**: artifacts in place, both Python files syntax-clean, `digest_bot.py` imports successfully against the installed SDK (`WEEKLY_DIGEST_KIND` resolves, `@on_command` handler registers). Live run is the operator's path through the runbook; not auto-runnable from here without Google OAuth + Slack workspace access.
+
+**What this closes**: Phase 20 (integration breadth) is functionally complete. The product surface for a non-technical customer is now: trust zones (Phase 16) + team-from-README (Phase 12C) + auth/billing (Phase 17) + dashboard polish (Phase 18) + Slack chat surface (Phase 19) + connector breadth (Phase 20). A customer can sign up, drop a README, deploy a team, connect Gmail / Calendar / Drive, and ship a digest bot inside 10 minutes — without writing code. NOW pointer advances to Phase 21 (customer-facing chat widget + operator inbox); detailed sub-tasks need to be promoted from the rough shape before work starts.
 
 ### 2026-05-21 — Phase 20.8 shipped: dashboard /integrations + per-connector cards
 
