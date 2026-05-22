@@ -7,11 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 21 — Customer-facing chat widget + operator inbox. Phase 20 (integration breadth) complete 2026-05-21.**
+> **Phase 21.1 — Schema for conversations + messages + escalations. Phase 21 spec locked 2026-05-21.**
 
-Phase 20 (integration breadth) shipped: connector schema (20.1), Google OAuth install flow (20.2), three real connectors — Gmail / Calendar / Drive (20.3-20.5), bot-callable endpoint with capability + zone gates (20.6), SDK namespaced helpers (20.7), dashboard /integrations index + per-connector cards (20.8). 20.9 was a coverage rollup satisfied incrementally. 20.10 artifacts (digest-bot README + reference code + zone-enforcement script + runbook) shipped under `examples/p20-demo/` — live OAuth + Slack posting is operator-driven per the runbook. Backend at **962 passing** (+126 across Phase 20; started at 836). SDK at **120 passing** (+19 from 20.7).
+Phase 21 spec locked 2026-05-21. Design choices: iframe-isolated widget; anonymous-only conversations in v1 (signed-token identity parked to 21B); one designated customer-facing bot per workspace via `@lightsei.on_chat("widget")`; top-level `/inbox` route for the operator surface. 10 sub-tasks (21.1-21.10). See spec block below.
 
-NOW is Phase 21 (customer-facing chat widget + operator inbox). Detailed sub-tasks need to be promoted from the rough shape below before work starts — spec the surface first, then break down.
+NOW is 21.1 — schema work. New tables `widget_conversations` / `widget_messages` / `widget_escalations` + a `customer_facing_agent_id` + `widget_public_id` + `allowed_widget_origins` columns on `workspaces`. Alembic migration 0036 + SQLAlchemy models + schema tests.
+
+Phase 20 (integration breadth) shipped 2026-05-20/21: connector schema (20.1), Google OAuth install flow (20.2), three real connectors — Gmail / Calendar / Drive (20.3-20.5), bot-callable endpoint with capability + zone gates (20.6), SDK namespaced helpers (20.7), dashboard /integrations index + per-connector cards (20.8). 20.9 was a coverage rollup satisfied incrementally. 20.10 demo artifacts under `examples/p20-demo/`. Backend at **962 passing** (+126 across Phase 20; started at 836). SDK at **120 passing** (+19 from 20.7).
 
 Phase 20 (integration breadth) running. 20.1-20.6 shipped — schema + Google OAuth + Gmail + Calendar + Drive + bot-callable endpoint. Backend at **951 passing** (+115 across Phase 20; started at 836).
 
@@ -728,17 +730,165 @@ The demo proves: bot code reads cleanly (the bot fits in ~200 lines of SDK calls
 
 Operationalizes the embeddable-widget-plus-master-bot-view piece of the CRM bot scenario captured in MEMORY.md "Target customer shape" (added 2026-05-17 after a design pass on the canonical CRM-bot scenario). Meaningful expansion of Lightsei's product surface: today the dashboard is for the customer's internal team, and Phase 19 adds Slack/Teams for the same audience. Phase 21 adds a surface where the customer's own end users (the customer of the customer) interact with the customer's Lightsei constellation.
 
-Rough shape:
+Rough shape (the five bullets that became the Phase 21 spec below):
 
-1. **Embeddable JS widget.** Snippet the customer pastes onto their own product. Renders a corner chat widget (Intercom-shaped). Conversations route to a designated support-shaped bot in the customer's constellation.
-2. **Trust-zone-aware conversation handling.** The customer-facing bot can only access connectors that are explicitly safe to expose externally. Phase 16 capability model and zone tags apply: a bot answering end users can be configured to look up PII for the user it's talking to, but the response is redacted before it leaves.
-3. **Escalation to operator inbox.** When the bot can't resolve a conversation (heuristics: explicit escalate-tool call, low confidence on output, repeated user follow-ups, or explicit user request for a human), the conversation lands in an operator inbox on the Lightsei dashboard.
-4. **Operator-side master-bot view.** Per-workspace inbox showing live customer conversations, escalations, and bot-suggested fixes. Operator can intervene (jump in as a human, "I'll take it from here"), apply a suggested fix, or mark resolved.
-5. **Polaris extended to incident response.** When an issue pattern repeats (same kind of escalation N times in a window), Polaris emits a `polaris.issue_pattern` event with a proposed fix: update the bot's system prompt, add a missing connector, expand a knowledge entry. Auto-apply gated on consent, same shape as 12D.3.
+1. **Embeddable JS widget.** Snippet the customer pastes onto their own product. Renders a corner chat widget (Intercom-shaped). Conversations route to a designated customer-facing bot in the customer's constellation.
+2. **Trust-zone-aware conversation handling.** The customer-facing bot lives in the `public` zone by default. Phase 16's capability + zone enforcement already handles the constraint: a `public` bot can't dispatch to PII bots without explicit `dispatches_cross_zone=True`, can't touch Gmail/Drive (their declared_zones exclude public), can call connectors that include public (Calendar, future weather/maps/search). Operator promotes the bot to `pii` only if they want it to look up customer data — and at that point, Phase 21B's redaction layer protects the wire.
+3. **Escalation to operator inbox.** When the bot can't resolve a conversation (explicit `lightsei.escalate(...)` SDK call, optional later heuristics: low confidence, repeated user follow-ups, explicit user "talk to a human"), the conversation lands in an operator inbox.
+4. **Operator-side master-bot view.** Top-level `/inbox` route showing every conversation across the workspace with filters (open / escalated / resolved). Per-conversation thread view. Operator can intervene ("I'll take this") which pauses the bot and lets the operator type replies directly; or mark resolved; or in 21.9, apply a Polaris-suggested fix.
+5. **Polaris extended to incident response.** When the same escalation reason fires N times in a window, Polaris emits a `polaris.issue_pattern` event with a proposed fix (update the bot's system prompt, add a missing FAQ, expand a knowledge entry). Auto-apply gated on consent, same shape as 12D.3.
 
-Demo: paste the Lightsei widget snippet onto a fake customer site. End user opens the widget and asks a question the bot answers cleanly (deflected, no operator touch). Open another conversation, ask something the bot escalates. Watch it land in the operator inbox. Operator clicks "apply suggested fix" and watches the bot self-improve, with the next similar question deflecting without escalation.
+Demo: paste the widget snippet onto a fake customer site. End user opens the widget, asks a question the bot answers cleanly (deflected, no operator touch). Second conversation, the bot escalates. Operator sees it in `/inbox`, clicks "Apply suggested fix" (Polaris's proposed change to the bot's system prompt), watches the next similar question deflect without escalation.
 
-Detailed sub-tasks deferred until promoted to NOW.
+### Design choices locked 2026-05-21 (the answers that drove the sub-task breakdown below)
+
+- **Widget tech: iframe-isolated app.** Lightsei serves the iframe; customer's snippet mounts it in a corner. Style/runtime isolation; no risk of breaking the customer's React or CSS. Slightly heavier than inline; standard Intercom/Drift shape.
+- **End-user identity: anonymous only in v1.** Conversation is anonymous from the bot's perspective. Defers the trust-and-identity problem; the bot answers product/FAQ questions without account access. Signed-token passthrough + per-conversation redaction is parked as **Phase 21B**.
+- **Routing: designate one customer-facing bot per workspace.** Operator picks via a setting on `/integrations` or a dedicated widget settings page. The bot uses `@lightsei.on_chat("widget")` (extends Phase 19's `on_chat` shape with a channel filter). Simpler than an orchestrator routing layer; debugging is no different from any other bot.
+- **Inbox surface: top-level `/inbox` route.** New nav entry. Full-page Front-shape. Filters across open / escalated / resolved. Demo's payoff slide.
+
+### 21.1 — Schema for conversations + messages + escalations
+
+Three new tables drive the widget surface:
+
+- `widget_conversations` (one per widget session): id (uuid pk), workspace_id (fk → workspaces, cascade), customer_facing_agent_id (fk → agents at conversation-start time, snapshotted so renaming the bot doesn't break old conversations), status (`open`/`escalated`/`operator_owned`/`resolved`), started_at, last_message_at, resolved_at (nullable). Operator-owned means the bot is paused and an operator is typing replies directly.
+- `widget_messages`: id (bigint pk), conversation_id (fk, cascade), role (`user`/`bot`/`operator`/`system`), text, sent_at. `system` messages are e.g. "Operator joined the conversation", "Bot escalated this conversation."
+- `widget_escalations`: id (uuid pk), conversation_id (fk, cascade), reason (short string, e.g. `bot_escalate_call`, `operator_requested`, future: `low_confidence`), payload (jsonb, room for the bot to attach context the operator needs), escalated_at, resolved_at (nullable), resolved_by_user_id (nullable). Same row can host the Polaris-suggested fix later (21.9 adds a `suggested_fix` jsonb column).
+
+Indexes: `(workspace_id, status, last_message_at desc)` for the inbox list query; `(conversation_id, sent_at)` for thread render.
+
+Add `customer_facing_agent_id` column to `workspaces` (fk → agents.id, nullable). Operator picks via the widget settings page in 21.7.
+
+Alembic migration `0036_widget_tables.py`. SQLAlchemy models in `backend/models.py`.
+
+### 21.2 — Public chat ingestion endpoint
+
+`POST /widget/{workspace_public_id}/messages` is the only unauthenticated endpoint added by this phase. Security model:
+
+- `workspace_public_id` is a new column on `workspaces`, a short URL-safe random string distinct from `workspaces.id`. Stable per workspace; not secret (it's literally in the widget snippet on the customer's site). Switching `customer_facing_agent_id` doesn't rotate the public id.
+- Same-origin enforcement: the workspace has an `allowed_widget_origins` jsonb array column (e.g. `["https://app.halo.dev", "https://www.halo.dev"]`). Endpoint reads `Origin` header + refuses requests from non-allowlisted origins. Operator manages the allowlist on the widget settings page.
+- Per-conversation rate limit (e.g. 1 message/sec/conversation, 30/min/conversation) to keep a malicious user from DoSing the bot. Per-workspace ceiling layered on top.
+
+Body: `{conversation_id?, text}`. If `conversation_id` is null/unknown, opens a new conversation; otherwise appends to the existing one. Returns the new message id + (for new conversations) the new conversation id.
+
+Endpoint persists the user message + enqueues a `widget_chat` job (existing `generation_jobs` table, kind `widget_chat`). Returns immediately with `202 Accepted` — the bot response lands as a separate message that the widget picks up via the poll endpoint.
+
+`GET /widget/{workspace_public_id}/conversations/{conversation_id}` for the widget to poll. Returns the conversation's messages newer than a `?since=<message_id>` cursor. Polling cadence: ~1s while widget is visible, 5s when minimized.
+
+### 21.3 — Widget iframe app
+
+New Next.js route `dashboard/app/widget/[workspaceId]/page.tsx` (served at `app.lightsei.com/widget/{public_id}`). Renders the chat UI inside the iframe:
+
+- Header: bot's display name (fetched from a small `/widget/{public_id}/config` GET that returns just the bot name + an avatar pixel-art seed). No workspace name shown — the end user is the customer's customer, not Lightsei's customer.
+- Conversation pane.
+- Input at the bottom.
+- A small "Anonymous conversation. Powered by Lightsei." footer (the latter is a "Powered by" link that links to lightsei.com in v1 — turns off on paid plans in a future phase).
+
+Reads `conversation_id` from `localStorage` keyed on the workspace's public id, so a returning visitor on the same site sees their previous conversation. POST to /messages on send, poll the conversation endpoint for updates.
+
+Trust-zone disclosure: a small "About this bot" link in the header opens a modal listing the bot's declared_zones-equivalent (which Lightsei knows from the agent row) + what data the bot can access (e.g. "this bot can read product FAQs but cannot see your account information"). The wedge made legible to the end user.
+
+### 21.4 — Customer-side snippet
+
+A tiny ES module hosted at `app.lightsei.com/widget.js` (Next.js public static asset). What the customer pastes:
+
+```html
+<script src="https://app.lightsei.com/widget.js"
+        data-workspace="{public_id}"
+        async></script>
+```
+
+The script:
+
+1. Reads `data-workspace` from its own `<script>` tag.
+2. Creates a fixed-position iframe in the bottom-right corner pointing at `app.lightsei.com/widget/{public_id}`.
+3. Exposes a tiny JS API on `window.Lightsei`: `.open()`, `.close()`, `.toggle()`. (Customer can wire these to their own buttons if they don't want the default chat-bubble launcher.)
+4. Handles iframe sizing via `postMessage` from the iframe (so the iframe can grow/shrink without scrollbars).
+
+`postMessage` channel is the only cross-frame communication; everything else stays in the iframe. Origin-locked to `app.lightsei.com` on both sides.
+
+### 21.5 — SDK escalate helper + bot-side on_chat extension
+
+Extend Phase 19's `@lightsei.on_chat(...)` decorator (in `sdk/lightsei/_chat.py`) to accept a `channel` kwarg: `@lightsei.on_chat("widget")` registers the handler for widget conversations specifically (vs. Slack-side `on_chat` shapes future-protocols can add). The handler receives `{conversation_id, user_message, conversation_history}` as a single dict; returns a reply string OR raises a typed `LightseiEscalate` to escalate.
+
+Two new SDK helpers:
+
+- `lightsei.respond(conversation_id, text)` — append a bot message to the conversation. Capability: `widget:respond` (new). Used implicitly by the on_chat return value, but exposed so a bot can post async follow-ups (e.g. "Looking that up... [10s later] ... here's the answer").
+- `lightsei.escalate(conversation_id, reason, payload=None)` — flips the conversation to `escalated`, creates a `widget_escalations` row, fires a Slack/email notification to the operator (via existing Phase 9 notification triggers). Capability: `widget:escalate`. Auto-granted to bots designated as customer-facing.
+
+Plus the typed exception `LightseiEscalate(reason, payload)` — the `@on_chat` handler can raise it to escalate without a separate explicit call. Cleaner code path for the "I don't know" branch.
+
+### 21.6 — Widget chat job handler
+
+New handler in `backend/jobs.py` for `kind='widget_chat'`. Pure module `backend/widget_orchestrator.py` owns the logic, parallel to `slack_orchestrator.py` from Phase 19.4:
+
+1. Load the conversation + last 20 messages (cap for prompt size).
+2. Look up the workspace's `customer_facing_agent_id`. If none configured, persist a system message ("No customer-facing bot is configured yet — please contact the operator.") and stop.
+3. Capability check: the bot must have `widget:respond` + `chat` capabilities (the chat capability is the Phase 19.4 routing prerequisite). If missing, persist a bot message ("This bot isn't set up to answer chat — please contact the operator.") and stop.
+4. Zone check is intrinsic: the bot lives in some zone, the connectors it calls enforce zone constraints. No additional gate at the orchestrator level; the SDK-level gates are sufficient.
+5. Dispatch the message to the bot via the existing chat-dispatch path (Phase 6 / 19.4 pattern). Bot's `@on_chat("widget")` handler runs, returns a string or raises `LightseiEscalate`. Orchestrator persists the response and updates `last_message_at`.
+
+Error path: if the bot's handler throws an uncaught exception, persist a generic "Something went wrong on our end — escalating to a human" + create an escalation row with reason `bot_crash`.
+
+### 21.7 — Workspace settings UI (widget config)
+
+New dashboard page `dashboard/app/widget-settings/page.tsx` (linked from `/integrations` and Header nav under "Integrations" group). Fields:
+
+- Customer-facing bot picker (dropdown of deployed agents in the workspace).
+- Allowed origins (comma-separated list, edited inline; the editor validates each as a URL with no path).
+- The widget snippet HTML, copyable, pre-filled with the workspace's public id.
+- "Test it now" link that opens the workspace's own widget in a new tab so the operator can play with it before pasting on a customer site.
+
+Backend: `PATCH /workspaces/me/widget-settings` updates `customer_facing_agent_id` + `allowed_widget_origins`. `GET /workspaces/me/widget-settings` returns the current values + the public id.
+
+### 21.8 — /inbox dashboard route
+
+New top-level route `dashboard/app/inbox/page.tsx` + nav entry. Two-column layout:
+
+- Left column: conversation list. Filters (open / escalated / operator-owned / resolved / all). Each row shows last user message preview + a sensitivity chip (bot's zone) + the conversation's status + how long since the last activity. Default sort: most-recently-active at top, escalated bumped above the rest.
+- Right column: thread view of the selected conversation. Renders every message (`user`/`bot`/`operator`/`system`) inline with role icons. Operator-action bar at the bottom: "Take over" (pauses bot, lets operator type), "Mark resolved", "Apply suggested fix" (visible only when 21.9 produces one).
+
+Real-time updates: poll `GET /workspaces/me/inbox?since=<last_activity>` every 5s while the page is open. Server-sent events parked as a future optimization — the polling story is good enough for the v1 demo.
+
+Backend endpoints: `GET /workspaces/me/inbox` (list + filter), `GET /workspaces/me/inbox/{conversation_id}` (thread), `POST /workspaces/me/inbox/{conversation_id}/take-over` (operator-owned), `POST /workspaces/me/inbox/{conversation_id}/messages` (operator types a reply), `POST /workspaces/me/inbox/{conversation_id}/resolve`.
+
+### 21.9 — Polaris incident-response extension
+
+New Polaris tick task (alongside 12D.2's cost analysis): scan `widget_escalations` rows from the last N hours, group by reason + by topic embedding (or simpler: by user-message TF-IDF clustering — full embeddings parked for later). When a cluster crosses a threshold (e.g. 3 escalations on similar topics in 24h), emit a `polaris.issue_pattern` event with:
+
+- The pattern signature (cluster keywords).
+- Sample conversation ids for evidence.
+- A `suggested_fix` object: `{kind: 'system_prompt_addendum' | 'add_faq_entry', detail: <markdown>}`.
+
+Operator surfaces:
+
+- Inbox: when the user opens an escalation, the "Apply suggested fix" button appears if Polaris has produced one. Applying mutates the bot's `system_prompt` (with a one-line "Polaris-suggested fix applied <date>" comment block at the end). The operator can also dismiss or edit the suggestion before applying.
+- `/agents/{name}/insights` (existing surface from 12D.2) grows a "Conversation patterns" section showing all active suggestions, even unviewed ones.
+
+Auto-apply path matches 12D.3's consent model: per-workspace setting `polaris_auto_apply_widget_fixes` (default off). When on, applying happens automatically with a notification to the operator inbox of what changed.
+
+### 21.10 — Demo
+
+Paste `examples/p21-demo/widget.html` onto a local file:// or any static-host page (the snippet just needs a workspace public id; CDN-served widget.js does the rest).
+
+- **Act 1**: end user opens the widget on the customer's site. Asks a clear product question. Bot answers — message lands in the iframe, the operator sees the conversation appear in `/inbox` (open status, not escalated).
+- **Act 2**: second conversation. Ask something the bot doesn't know how to answer (the bot calls `lightsei.escalate(...)` from its `@on_chat` handler). Operator sees the escalation in `/inbox` with a red chip, plus the bot's "I don't know how to help with that — let me get a human" message in the conversation.
+- **Act 3**: operator clicks "Take over" in the inbox. Types a reply. End user sees it land in the widget with an "(human reply)" indicator.
+- **Act 4**: repeat Act 2 a few more times with similar-topic questions. Polaris's next tick produces a `polaris.issue_pattern` event. The escalations in the inbox grow a "Polaris suggested: add FAQ entry about X" panel.
+- **Act 5**: operator clicks "Apply suggested fix" on the most recent escalation. The bot's system prompt is updated. The end user asks the same kind of question in a new conversation — bot answers cleanly, no escalation.
+
+Demo proves: (a) the wedge applies to customer-facing conversations the same way it does to internal bots (a public bot can't leak data because Gmail/Drive declared_zones exclude public); (b) the framework + operator-in-the-loop story makes self-improvement legible; (c) Lightsei's product surface now covers both the customer's internal team (dashboard + Slack) AND the customer's end users (widget).
+
+### Phase 21B (parked)
+
+Items deferred from 21 v1 that the design contemplated but didn't ship:
+
+- Signed-token end-user identity (JWTs from the customer's app to the widget) + per-conversation PII redaction.
+- Server-sent events instead of polling on `/inbox`.
+- `inline` embed mode (script-injected component instead of iframe).
+- Heuristic escalation (low confidence, repeated follow-ups) in addition to explicit `lightsei.escalate(...)`.
+- Embedding-based pattern detection in Polaris (vs the TF-IDF heuristic that ships in 21.9).
+- Custom widget theming (color, logo, position).
 
 Phases 1-4 shipped 2026-04-25 (spine, cost-cap guardrail, Anthropic + streaming, hosted-readiness). Phase 5 shipped 2026-04-26 (PaaS-for-agents). Phase 6 shipped 2026-04-27 (Polaris orchestrator). Phase 7 shipped 2026-04-28 (output validation, advisory). Phase 8 shipped 2026-04-28 (blocking validators). Phase 9 shipped 2026-04-30 (notifications). Phase 10 shipped 2026-05-01 (GitHub integration: push-to-deploy + Polaris reads docs from the repo). Phase 11 starts the dispatch story: Polaris commands a team of executor agents instead of just emitting plans you read. Phase 11B turns the home page into a real command center while we're at it. Phase 12 is multi-provider so the team can pick the right model per task.
 
