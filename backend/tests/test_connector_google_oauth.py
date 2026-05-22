@@ -442,6 +442,10 @@ def test_callback_reinstall_updates_existing_row(client, alice, monkeypatch):
 
 
 def test_callback_html_400_on_unknown_state(client):
+    client.cookies.set(
+        "lightsei_connector_oauth_state",
+        "does-not-exist",
+    )
     r = client.get(
         "/connectors/google/callback?code=x&state=does-not-exist",
         follow_redirects=False,
@@ -496,6 +500,7 @@ def test_callback_html_400_on_unknown_connector_in_state(client, alice, monkeypa
             expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
         ))
 
+    client.cookies.set("lightsei_connector_oauth_state", "bogus-state")
     monkeypatch.setattr(
         "connectors.google_oauth.httpx.post",
         lambda *a, **kw: _fake_exchange_response(),
