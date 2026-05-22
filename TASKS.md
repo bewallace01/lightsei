@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 20.8 — Dashboard /integrations index + per-connector cards. 20.1-20.5 shipped 2026-05-20; 20.6 + 20.7 shipped 2026-05-21.**
+> **Phase 20.10 — End-to-end weekly-digest bot demo. 20.1-20.5 shipped 2026-05-20; 20.6-20.8 shipped 2026-05-21. (20.9 was a coverage rollup, satisfied incrementally.)**
 
 Phase 20 (integration breadth) running. 20.1-20.6 shipped — schema + Google OAuth + Gmail + Calendar + Drive + bot-callable endpoint. Backend at **951 passing** (+115 across Phase 20; started at 836).
 
@@ -677,16 +677,26 @@ def handle(payload):
     lightsei.post_slack(payload["channel_id"], summary)
 ```
 
-### 20.8 — Dashboard /integrations page index + per-connector cards
+### 20.8 — Dashboard /integrations page index + per-connector cards ✅ shipped 2026-05-21
 
-New `/integrations` page (separate from `/integrations/slack` which keeps the chat-specific UI). Card grid: one card per connector in the registry (Gmail / Calendar / Drive + Slack from Phase 19). Each card shows:
+Three new dashboard surfaces + two new backend endpoints. The dashboard becomes operator-driveable: an operator can see the four connectors (Slack + Gmail + Calendar + Drive), click Connect to kick off the OAuth flow, see Connected-as-X with the install timestamp, and Disconnect to revoke.
 
-- Connector name + logo (text-only icon for now; can ship real logos in a polish pass).
-- Declared zones (chips).
-- Connect button (if not installed) → routes to the OAuth start endpoint.
-- Connected indicator + the external account email + a Disconnect button (if installed).
+**Backend additions** (`backend/main.py`):
+- `GET /workspaces/me/connectors` returns one entry per registry connector with the install-state for the workspace (or `install: null`). Surfaces `type`, `display_label`, `oauth_provider`, `default_scopes`, `declared_zones`, `summary`, plus the install's `external_account_email` / `scopes` / `installed_at` / `installed_by_user_id`. The encrypted token blob NEVER appears in the response — only the bot-callable endpoint (20.6) ever decrypts it.
+- `DELETE /workspaces/me/connectors/{connector_type}` sets `revoked_at` on the active install + best-effort calls `https://oauth2.googleapis.com/revoke` with the stored refresh_token. Upstream failure doesn't roll back the local revoke; the user-facing intent is "stop using this", local revocation is what protects future bot calls.
 
-The existing `/integrations/slack` page becomes a per-connector detail page; `/integrations/gmail`, `/integrations/google-calendar`, `/integrations/google-drive` follow the same pattern but are minimal (just connect / disconnect + bot capability hint — no per-channel config since these don't have a Slack-channel-equivalent).
+**Dashboard additions** (`dashboard/app/integrations/`):
+- `page.tsx` — card grid index. One card per connector (Slack + Gmail + Calendar + Drive). Each card shows display label, OAuth provider, declared zones (chips), one-paragraph summary, Connected-as-X / install-since when installed, Connect or Disconnect button. Card click routes to the per-connector detail page (`/integrations/{type}`). Reads `?installed=<type>` from the OAuth-callback redirect to render a flash. Wraps the page body in `<Suspense>` because Next.js requires it for any tree using `useSearchParams()` under static prerendering.
+- `_connector_detail.tsx` — shared per-Google-connector detail component. Same surface across Gmail / Calendar / Drive (only `connectorType`, `capabilityHint`, and `exampleCode` differ). Shows declared-zone chips, install metadata when connected, a small code snippet showing how a bot would call the connector, Connect / Disconnect actions.
+- `gmail/page.tsx`, `google-calendar/page.tsx`, `google-drive/page.tsx` — thin wrappers around `_connector_detail` with the per-connector specifics. Each carries a representative SDK code snippet (e.g. `lightsei.gmail.send_email(...)`).
+
+**Header nav**: existing "Integrations" group expanded to include "all integrations" (top entry, `/integrations`), `gmail`, `google calendar`, `google drive` alongside the existing `slack` / `notifications` / `github` entries.
+
+**api.ts**: `fetchConnectors()`, `startConnectorOAuth(type, { redirectAfter })`, `disconnectConnector(type)` helpers + the `ConnectorSummary` / `ConnectorInstallSummary` types.
+
+**One bug found + fixed**: `main.py` has no module-level `logger` (uses inline `_logging.getLogger("lightsei.<area>")` everywhere). My 20.6 implementation referenced a bare `logger.exception(...)` that never ran in tests because no test exercised the token-decrypt-failure path. Both spots (the 20.6 decrypt branch + the new 20.8 revoke branches) updated to use the inline pattern. Worth noting that the 20.6 latent bug was caught here by the 20.8 revoke tests — same pattern shape.
+
+**Verification**: 12 new backend tests in `backend/tests/test_connector_workspace_endpoints.py` covering the list endpoint (every-registry-entry, metadata shape, install surfaced, revoked ignored, workspace isolation) and the disconnect endpoint (happy path with httpx.post stubbed, 404 unknown-type / no-install / only-revoked, workspace isolation, upstream-revoke-failure survives, re-install after revoke). `npx tsc --noEmit` clean. `npx next build` green — all five integration pages (`/integrations`, `/integrations/slack`, `/integrations/gmail`, `/integrations/google-calendar`, `/integrations/google-drive`) prerendered as static (~3.3-5.3kB each).
 
 ### 20.9 — Tests
 
@@ -1165,6 +1175,39 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-21 — Phase 20.8 shipped: dashboard /integrations + per-connector cards
+
+Three new dashboard surfaces + two new backend endpoints turn the connector machinery from 20.1-20.7 into something an operator can actually drive from the UI.
+
+**Backend** (`backend/main.py` adds two endpoints):
+
+- `GET /workspaces/me/connectors` returns one entry per registry connector with the per-workspace install state attached. Surface: `type`, `display_label`, `oauth_provider`, `default_scopes`, `declared_zones`, `summary`, and `install: {id, external_account_email, scopes, installed_at, installed_by_user_id, revoked_at} | null`. The encrypted token blob NEVER appears — only the bot-callable endpoint (20.6) ever decrypts it. Even revoked installs serialize through `_serialize_connector_install` for shape consistency, but the GET only attaches non-revoked rows to `install`.
+- `DELETE /workspaces/me/connectors/{connector_type}` sets `revoked_at = utcnow()` on the active install + best-effort calls `https://oauth2.googleapis.com/revoke` with the stored refresh_token. The Google call uses the same try/log/swallow pattern as the Slack `auth.revoke` path from 19.6: upstream failure doesn't roll back the local revoke. The user-facing intent is "stop using this"; local revocation is what protects future bot calls. 404 for unknown type, unknown install, only-revoked installs, and workspace mismatch (FK lookup scoped to `auth.workspace_id`).
+
+**Dashboard** (`dashboard/app/integrations/`):
+
+- `page.tsx` — card grid index. One card per connector (Slack + Gmail + Calendar + Drive in registry order). Each card shows display label, OAuth provider, declared-zone chips, summary, Connected-as-X / install-since when installed, plus Connect / Configure / Disconnect actions. Reads `?installed=<type>` from the OAuth-callback redirect to render a flash. Wraps the body in `<Suspense>` — Next.js requires it for any tree calling `useSearchParams()` under static prerendering (caught at `next build` time; one-line wrap fix).
+- `_connector_detail.tsx` — shared per-Google-connector detail component. Gmail / Calendar / Drive all share the same install/disconnect surface; the wrapper pages just pass `connectorType`, `capabilityHint`, and an `exampleCode` snippet. Surface: breadcrumb back to `/integrations`, header with display label + Connected/Not-connected chip, trust-zone-access section with chips + a line explaining the gate ("a bot outside the allow-list is refused at the API gate even if it holds the `connector:gmail` capability"), install metadata when connected, a small code snippet showing how a bot would call the connector, Connect / Disconnect button.
+- `gmail/page.tsx`, `google-calendar/page.tsx`, `google-drive/page.tsx` — thin wrappers. Each carries a representative SDK code snippet (e.g. `lightsei.gmail.send_email(to=..., subject=..., body=...)`).
+
+**Header.tsx**: "Integrations" nav group expanded to include "all integrations" (top entry, `/integrations`), `gmail`, `google calendar`, `google drive` alongside existing `slack`, `notifications`, `github` entries.
+
+**api.ts**: `fetchConnectors()` → `ConnectorSummary[]`, `startConnectorOAuth(type, { redirectAfter })` → `{authorization_url, state}`, `disconnectConnector(type)` → `{status, connector_type, revoked_at}`. New `ConnectorSummary` and `ConnectorInstallSummary` types match the backend serializers exactly.
+
+**Recurring bug caught (third time in Phase 20)**: `main.py` has no module-level `logger` — the codebase uses inline `_logging.getLogger("lightsei.<area>")` everywhere. My 20.6 token-decrypt branch had `logger.exception(...)` that never ran in tests (no 20.6 test exercises the decrypt-failure path). 20.8's revoke endpoint hit it for real because the test simulating a Google /revoke failure had to go through the warning path. Both spots fixed to use the inline pattern. Worth flagging: this is the second time a code path inside an `except` block has been latent because tests didn't cover the error branch.
+
+**Verification**:
+
+- 12 new backend tests in `backend/tests/test_connector_workspace_endpoints.py`:
+  - GET: every registry entry returned even with zero installs; metadata fields populated (display_label, oauth_provider, declared_zones with the wedge invariant `'public' not in gmail.declared_zones`, default_scopes, summary); active install surfaces with the right fields and NO `encrypted_tokens` / `access_token` leakage; revoked installs ignored; workspace isolation (other workspace's install doesn't leak into ours).
+  - DELETE: happy path with `httpx.post` stubbed (returns 200, calls Google `/revoke` with the refresh_token, sets `revoked_at` on the row); 404 for no-active-install, only-revoked-installs, unknown-connector-type, workspace mismatch; upstream revoke failure (httpx.HTTPError) doesn't fail the local revoke; re-install after revoke works (partial-unique index from 20.1 allows it).
+- `npx tsc --noEmit` clean.
+- `npx next build` green — five integration pages prerendered as static: `/integrations` (3.35 kB), `/integrations/gmail` (3.29 kB), `/integrations/google-calendar` (3.37 kB), `/integrations/google-drive` (3.4 kB), `/integrations/slack` (5.32 kB).
+
+Full backend suite: **962 passed in 173s** (was 950, +12 net new). 0 regressions. Known #102 flake fired once (cleared on solo re-run as usual).
+
+**What this unblocks**: Phase 20 is essentially functionally complete after 20.8. 20.9 was a coverage rollup of per-sub-task tests (already satisfied incrementally — every sub-task shipped its own test file). 20.10 is the end-to-end weekly-digest-bot demo that ties Gmail + Calendar + Drive + Slack (Phase 19) together: drop a digest-bot README, deploy via team-from-README (Phase 12C), watch it pull events from Calendar + unread from Gmail + recent files from Drive, then post to Slack via `lightsei.post_slack`. The demo proves trust-zone enforcement end-to-end (the digest bot lives in `internal`; a public-zoned bot can't even start because Gmail's declared_zones excludes public).
 
 ### 2026-05-21 — Phase 20.7 shipped: SDK namespaced connector helpers
 

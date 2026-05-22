@@ -90,9 +90,29 @@ const NAV: NavItem[] = [
     label: "Integrations",
     children: [
       {
+        href: "/integrations",
+        label: "all integrations",
+        hint: "Card grid: every connector + install state",
+      },
+      {
         href: "/integrations/slack",
         label: "slack",
         hint: "@-mention Lightsei from any channel; per-channel trust zones",
+      },
+      {
+        href: "/integrations/gmail",
+        label: "gmail",
+        hint: "Send + search email from the connected account",
+      },
+      {
+        href: "/integrations/google-calendar",
+        label: "google calendar",
+        hint: "Read + write events on the connected calendar",
+      },
+      {
+        href: "/integrations/google-drive",
+        label: "google drive",
+        hint: "Read, write, search files in the connected drive",
       },
       {
         href: "/notifications",

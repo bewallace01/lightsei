@@ -4952,6 +4952,154 @@ def connector_google_oauth_callback(
     return RedirectResponse(target, status_code=303)
 
 
+# ---------- Phase 20.8: operator-facing connector list + revoke ---------- #
+
+
+def _serialize_connector_install(row: ConnectorInstallation) -> dict[str, Any]:
+    """Surface only the non-secret bits of an install — tokens stay
+    encrypted in storage, never returned over the wire."""
+    return {
+        "id": row.id,
+        "external_account_email": row.external_account_email,
+        "scopes": list(row.scopes or []),
+        "installed_at": row.installed_at.isoformat(),
+        "installed_by_user_id": row.installed_by_user_id,
+        "revoked_at": row.revoked_at.isoformat() if row.revoked_at else None,
+    }
+
+
+@app.get("/workspaces/me/connectors")
+def list_workspace_connectors(
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 20.8: list every connector in the registry + its install
+    state for this workspace.
+
+    Returns one entry per registry connector (Gmail / Calendar / Drive
+    at v1) so the dashboard's card grid can render the not-installed
+    state alongside installed ones. `install` is null when no active
+    row exists for the workspace; otherwise it carries the
+    `external_account_email`, granted `scopes`, `installed_at`, and
+    `installed_by_user_id` so the card can show 'Connected as X' and
+    'Granted Y scopes'.
+
+    Tokens never appear in the response — they stay encrypted in
+    `connector_installations.encrypted_tokens` and only the
+    bot-callable endpoint (20.6) decrypts them.
+    """
+    from connectors import list_connectors
+
+    # Pull all active installs for this workspace in one query so we
+    # don't N+1 across the registry.
+    active_installs = session.execute(
+        select(ConnectorInstallation).where(
+            ConnectorInstallation.workspace_id == auth.workspace_id,
+            ConnectorInstallation.revoked_at.is_(None),
+        )
+    ).scalars().all()
+    by_type: dict[str, ConnectorInstallation] = {
+        i.connector_type: i for i in active_installs
+    }
+
+    connectors_out = []
+    for spec in list_connectors():
+        install = by_type.get(spec.name)
+        connectors_out.append({
+            "type": spec.name,
+            "display_label": spec.display_label,
+            "oauth_provider": spec.oauth_provider,
+            "default_scopes": list(spec.default_scopes),
+            "declared_zones": sorted(spec.declared_zones),
+            "summary": spec.summary,
+            "install": _serialize_connector_install(install) if install else None,
+        })
+
+    return {"connectors": connectors_out}
+
+
+@app.delete("/workspaces/me/connectors/{connector_type}")
+def revoke_workspace_connector(
+    connector_type: str,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 20.8: revoke an active connector install.
+
+    Sets `revoked_at` on the install row + best-effort calls Google's
+    `/revoke` endpoint to invalidate the refresh token upstream. The
+    row stays in the DB for audit; the partial-unique index from 20.1
+    lets the same connector re-install after this without manual
+    cleanup. Same revoke pattern as the Slack disconnect path in 19.6.
+
+    404 if no active install exists for this workspace.
+    """
+    import json as _json
+
+    import secrets_crypto
+    from connectors import get_connector
+
+    spec = get_connector(connector_type)
+    if spec is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"unknown connector {connector_type!r}",
+        )
+
+    install = session.execute(
+        select(ConnectorInstallation).where(
+            ConnectorInstallation.workspace_id == auth.workspace_id,
+            ConnectorInstallation.connector_type == connector_type,
+            ConnectorInstallation.revoked_at.is_(None),
+        ).limit(1)
+    ).scalar_one_or_none()
+    if install is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no active {connector_type!r} install in this workspace",
+        )
+
+    now = utcnow()
+    install.revoked_at = now
+    session.flush()
+
+    # Best-effort upstream revoke. Google's /revoke is the canonical
+    # path for both Gmail + Calendar + Drive (all share the OAuth
+    # tokens). Failure here doesn't roll back the local revoke —
+    # the user-facing intent is "stop using this", local revocation
+    # is what protects subsequent bot calls.
+    if spec.oauth_provider == "google":
+        import logging as _logging
+        _log = _logging.getLogger("lightsei.connectors")
+        try:
+            blob = _json.loads(secrets_crypto.decrypt(bytes(install.encrypted_tokens)))
+            refresh_token = blob.get("refresh_token")
+            if refresh_token:
+                import httpx as _httpx
+                r = _httpx.post(
+                    "https://oauth2.googleapis.com/revoke",
+                    data={"token": refresh_token},
+                    timeout=5.0,
+                )
+                if r.status_code >= 400:
+                    _log.warning(
+                        "google /revoke not ok for %s install %s: %s %s",
+                        connector_type, install.id,
+                        r.status_code, r.text[:200],
+                    )
+        except Exception as e:
+            _log.warning(
+                "google /revoke upstream call failed for %s install %s: %s",
+                connector_type, install.id, e,
+            )
+
+    return {
+        "status": "revoked",
+        "connector_type": connector_type,
+        "revoked_at": now.isoformat(),
+    }
+
+
 # ---------- Phase 19.6: operator-facing Slack config endpoints ---------- #
 
 
@@ -5403,8 +5551,11 @@ def invoke_connector(
         # Crypto failure — install is unrecoverable from here.
         # Surface as 500 since it indicates corruption / misconfig,
         # not a bot-correctable error.
-        logger.exception("connector %s install %s token decrypt failed",
-                         connector_type, install.id)
+        import logging as _logging
+        _logging.getLogger("lightsei.connectors").exception(
+            "connector %s install %s token decrypt failed",
+            connector_type, install.id,
+        )
         raise HTTPException(
             status_code=500,
             detail={

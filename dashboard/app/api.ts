@@ -1885,3 +1885,52 @@ export async function revokeSlackWorkspace(
     { method: "DELETE" },
   )) as SlackWorkspaceSummary;
 }
+
+
+// ---------- Phase 20.8: connector helpers ---------- //
+
+export type ConnectorInstallSummary = {
+  id: string;
+  external_account_email: string | null;
+  scopes: string[];
+  installed_at: string;
+  installed_by_user_id: string | null;
+  revoked_at: string | null;
+};
+
+export type ConnectorSummary = {
+  type: string;
+  display_label: string;
+  oauth_provider: string;
+  default_scopes: string[];
+  declared_zones: SensitivityLevel[];
+  summary: string;
+  install: ConnectorInstallSummary | null;
+};
+
+export async function fetchConnectors(): Promise<ConnectorSummary[]> {
+  const body = (await authedJson("/workspaces/me/connectors")) as {
+    connectors: ConnectorSummary[];
+  };
+  return body.connectors;
+}
+
+export async function startConnectorOAuth(
+  connectorType: string,
+  options?: { redirectAfter?: string },
+): Promise<{ authorization_url: string; state: string }> {
+  const params = new URLSearchParams({ type: connectorType });
+  if (options?.redirectAfter) params.set("redirect_after", options.redirectAfter);
+  return (await authedJson(
+    `/connectors/google/start?${params.toString()}`,
+  )) as { authorization_url: string; state: string };
+}
+
+export async function disconnectConnector(
+  connectorType: string,
+): Promise<{ status: string; connector_type: string; revoked_at: string }> {
+  return (await authedJson(
+    `/workspaces/me/connectors/${encodeURIComponent(connectorType)}`,
+    { method: "DELETE" },
+  )) as { status: string; connector_type: string; revoked_at: string };
+}
