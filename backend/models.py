@@ -63,6 +63,30 @@ def is_valid_auth_provider(provider: object) -> bool:
     return isinstance(provider, str) and provider in _VALID_AUTH_PROVIDERS
 
 
+# Phase 21.1: widget conversation state machine + message roles.
+# Validation is app-side; the DB column is plain String (same pattern
+# as plan_tier + sensitivity_level).
+_VALID_WIDGET_CONVERSATION_STATUSES: frozenset[str] = frozenset(
+    {"open", "escalated", "operator_owned", "resolved"}
+)
+DEFAULT_WIDGET_CONVERSATION_STATUS = "open"
+
+_VALID_WIDGET_MESSAGE_ROLES: frozenset[str] = frozenset(
+    {"user", "bot", "operator", "system"}
+)
+
+
+def is_valid_widget_conversation_status(status: object) -> bool:
+    return (
+        isinstance(status, str)
+        and status in _VALID_WIDGET_CONVERSATION_STATUSES
+    )
+
+
+def is_valid_widget_message_role(role: object) -> bool:
+    return isinstance(role, str) and role in _VALID_WIDGET_MESSAGE_ROLES
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -104,6 +128,32 @@ class Workspace(Base):
     free_credits_remaining_usd: Mapped[Decimal] = mapped_column(
         Numeric(12, 6), nullable=False, server_default="5.00",
         default=Decimal("5.00"),
+    )
+    # Phase 21.1: which bot answers widget chat messages for this
+    # workspace. Operator picks via /widget-settings (21.7); the
+    # 21.6 orchestrator reads it on every inbound message. Stored as
+    # a plain string because agents use a composite PK
+    # `(workspace_id, name)` so a real FK doesn't fit. App-side code
+    # validates the name resolves to an Agent in this workspace at
+    # both setting time and dispatch time.
+    customer_facing_agent_name: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True,
+    )
+    # Phase 21.1: short URL-safe random string used in the widget
+    # snippet's data-workspace attribute. Distinct from
+    # `workspaces.id` so we can rotate it without breaking the
+    # internal-id-stability promise. Unique across workspaces;
+    # nullable because pre-21 rows don't have one yet.
+    widget_public_id: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, unique=True,
+    )
+    # Phase 21.1: HTTPS origins the widget POST endpoint will accept
+    # requests from. Enforced against the `Origin` header in 21.2.
+    # JSONB list of strings (e.g. ["https://app.halo.dev"]). Empty by
+    # default; the widget settings page (21.7) lets the operator add
+    # entries.
+    allowed_widget_origins: Mapped[list[str]] = mapped_column(
+        JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"),
     )
 
 
@@ -1425,5 +1475,167 @@ class SlackEvent(Base):
         Index(
             "ix_slack_events_received_at",
             "received_at",
+        ),
+    )
+
+
+# ---------- Phase 21.1: widget chat surface schema ---------- #
+
+
+class WidgetConversation(Base):
+    """Phase 21.1: one row per widget chat session.
+
+    Anonymous-only in v1 — the `anon_user_id` is an opaque string the
+    widget iframe stamps on localStorage so a returning visitor on
+    the same site sees their previous conversation. Phase 21B adds
+    signed-token identity which would land in a separate column on
+    this same row.
+
+    `customer_facing_agent_name` is snapshotted at conversation-start
+    so renaming the bot later doesn't break the thread. The live
+    pointer for "who answers NEW conversations right now" lives on
+    `workspaces.customer_facing_agent_name`.
+
+    Status machine: open → escalated (bot called escalate) → resolved
+    (operator marked it done). operator_owned is a parallel state:
+    the operator clicked Take Over in /inbox so the bot is paused
+    and operators type replies directly.
+    """
+
+    __tablename__ = "widget_conversations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    customer_facing_agent_name: Mapped[str] = mapped_column(
+        String(128), nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(24),
+        nullable=False,
+        server_default=text("'open'"),
+        default=DEFAULT_WIDGET_CONVERSATION_STATUS,
+    )
+    anon_user_id: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True,
+    )
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+    last_message_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+
+    __table_args__ = (
+        # Inbox list query: filter by workspace + status, newest
+        # activity first. Covers the /inbox + filter combo without
+        # a separate scan per filter button.
+        Index(
+            "ix_widget_conversations_workspace_status_active",
+            "workspace_id", "status", text("last_message_at DESC"),
+        ),
+        # Anon-user lookup for "did this end user have a previous
+        # conversation on this workspace?" Partial-where keeps the
+        # index small (only conversations with an anon id).
+        Index(
+            "ix_widget_conversations_workspace_anon_user",
+            "workspace_id", "anon_user_id",
+            postgresql_where=text("anon_user_id IS NOT NULL"),
+        ),
+    )
+
+
+class WidgetMessage(Base):
+    """Phase 21.1: one row per chat message in a widget conversation.
+
+    Role enum (user / bot / operator / system) — system rows are
+    framework-emitted events like "Operator joined" or "Bot
+    escalated this conversation."
+
+    Text body is unbounded at the DB layer; the request handler
+    enforces a sensible cap before insert.
+    """
+
+    __tablename__ = "widget_messages"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    conversation_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("widget_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    sent_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+
+    __table_args__ = (
+        # Thread-render query: messages in this conversation,
+        # oldest first. Also drives the widget poll-since-cursor
+        # endpoint via `id > since`.
+        Index(
+            "ix_widget_messages_conversation_sent_at",
+            "conversation_id", "sent_at",
+        ),
+    )
+
+
+class WidgetEscalation(Base):
+    """Phase 21.1: one row per escalation event on a conversation.
+
+    Bot raising `LightseiEscalate` (Phase 21.5), an operator
+    flipping the conversation to escalated, or a bot handler
+    crashing — each lands as a row here with a `reason` keyword
+    + a free-form `payload` for context.
+
+    `suggested_fix` stays null until Phase 21.9's Polaris
+    incident-response extension clusters similar escalations and
+    proposes a fix. Shape when populated:
+    `{kind: 'system_prompt_addendum' | 'add_faq_entry',
+       detail: <markdown or json>}`.
+
+    Resolving an escalation (operator marks the conversation done)
+    stamps `resolved_at` + optionally `resolved_by_user_id`. The
+    row lives on for audit even after resolve.
+    """
+
+    __tablename__ = "widget_escalations"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("widget_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    reason: Mapped[str] = mapped_column(String(64), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"),
+    )
+    suggested_fix: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=True,
+    )
+    escalated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+    resolved_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    resolved_by_user_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+
+    __table_args__ = (
+        # Polaris's pattern-detection query (21.9): the last N
+        # hours of unresolved escalations, newest first. Partial
+        # index keeps it tight.
+        Index(
+            "ix_widget_escalations_open_recent",
+            text("escalated_at DESC"),
+            postgresql_where=text("resolved_at IS NULL"),
         ),
     )

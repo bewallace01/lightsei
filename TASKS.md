@@ -7,11 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 21.1 — Schema for conversations + messages + escalations. Phase 21 spec locked 2026-05-21.**
+> **Phase 21.2 — Public chat ingestion endpoint. 21.1 shipped 2026-05-22.**
 
 Phase 21 spec locked 2026-05-21. Design choices: iframe-isolated widget; anonymous-only conversations in v1 (signed-token identity parked to 21B); one designated customer-facing bot per workspace via `@lightsei.on_chat("widget")`; top-level `/inbox` route for the operator surface. 10 sub-tasks (21.1-21.10). See spec block below.
 
-NOW is 21.1 — schema work. New tables `widget_conversations` / `widget_messages` / `widget_escalations` + a `customer_facing_agent_id` + `widget_public_id` + `allowed_widget_origins` columns on `workspaces`. Alembic migration 0036 + SQLAlchemy models + schema tests.
+21.1 shipped 2026-05-22: schema tables + columns + tests landed; backend at **984 passing** (+22 from 21.1).
+
+NOW is 21.2 — public `POST /widget/{workspace_public_id}/messages` ingestion endpoint. Origin-locked (against `workspaces.allowed_widget_origins`), per-conversation rate limited, persists user message + enqueues `widget_chat` job. Plus the `GET /widget/{public_id}/conversations/{id}` poll endpoint and the `/widget/{public_id}/config` endpoint the iframe reads for the bot's display name.
 
 Phase 20 (integration breadth) shipped 2026-05-20/21: connector schema (20.1), Google OAuth install flow (20.2), three real connectors — Gmail / Calendar / Drive (20.3-20.5), bot-callable endpoint with capability + zone gates (20.6), SDK namespaced helpers (20.7), dashboard /integrations index + per-connector cards (20.8). 20.9 was a coverage rollup satisfied incrementally. 20.10 demo artifacts under `examples/p20-demo/`. Backend at **962 passing** (+126 across Phase 20; started at 836). SDK at **120 passing** (+19 from 20.7).
 
@@ -747,7 +749,7 @@ Demo: paste the widget snippet onto a fake customer site. End user opens the wid
 - **Routing: designate one customer-facing bot per workspace.** Operator picks via a setting on `/integrations` or a dedicated widget settings page. The bot uses `@lightsei.on_chat("widget")` (extends Phase 19's `on_chat` shape with a channel filter). Simpler than an orchestrator routing layer; debugging is no different from any other bot.
 - **Inbox surface: top-level `/inbox` route.** New nav entry. Full-page Front-shape. Filters across open / escalated / resolved. Demo's payoff slide.
 
-### 21.1 — Schema for conversations + messages + escalations
+### 21.1 — Schema for conversations + messages + escalations ✅ shipped 2026-05-22
 
 Three new tables drive the widget surface:
 
@@ -1329,6 +1331,39 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-22 — Phase 21.1 shipped: widget chat schema
+
+First sub-task of Phase 21 (customer-facing chat widget + operator inbox). Three new tables + three new columns on `workspaces`. The Phase 21 spec's schema bullet point as a load-bearing implementation.
+
+**Alembic 0036** (`backend/alembic/versions/20260522_0036_widget_tables.py`): adds `customer_facing_agent_name` (nullable string), `widget_public_id` (nullable unique short string), and `allowed_widget_origins` (jsonb default `[]`) to `workspaces`. Creates three new tables:
+
+- `widget_conversations`: one per widget session. `id` (uuid pk), `workspace_id` (fk → workspaces, cascade), `customer_facing_agent_name` (string, snapshotted from `workspaces.customer_facing_agent_name` at conversation-start so renaming the bot doesn't break history), `status` (open / escalated / operator_owned / resolved — server_default 'open'), `anon_user_id` (nullable opaque string for the v1 anonymous-identity story — Phase 21B will add signed-token identity in a parallel column), `started_at`, `last_message_at`, `resolved_at`.
+- `widget_messages`: chat history. `id` (bigint pk autoincrement), `conversation_id` (fk → conversations, cascade), `role` (user / bot / operator / system), `text` (unbounded), `sent_at`.
+- `widget_escalations`: state row per escalation event. `id` (uuid pk), `conversation_id` (fk, cascade), `reason` (free-form keyword: `bot_escalate_call`, `bot_crash`, `operator_requested`, future: `low_confidence`), `payload` (jsonb), `suggested_fix` (jsonb, null until Phase 21.9's Polaris extension produces one), `escalated_at`, `resolved_at`, `resolved_by_user_id` (nullable fk → users.id ON DELETE SET NULL so the audit trail survives a user tear-down).
+
+Indexes that drive the load-bearing queries: `(workspace_id, status, last_message_at DESC)` on conversations for the /inbox list + filter combo; partial `(workspace_id, anon_user_id) WHERE anon_user_id IS NOT NULL` for the "did this end user have a previous conversation?" UX nicety; `(conversation_id, sent_at)` on messages for the thread render + the poll-since-cursor endpoint; partial `(escalated_at DESC) WHERE resolved_at IS NULL` on escalations for the Polaris 21.9 pattern-detection scan.
+
+**Models** (`backend/models.py`): `WidgetConversation`, `WidgetMessage`, `WidgetEscalation` + the three new columns on `Workspace`. Plus the validation constants `_VALID_WIDGET_CONVERSATION_STATUSES` (open / escalated / operator_owned / resolved) and `_VALID_WIDGET_MESSAGE_ROLES` (user / bot / operator / system) with their `is_valid_*` helpers — same pattern as `_VALID_SENSITIVITY_LEVELS` and `_VALID_PLAN_TIERS`.
+
+**One design call worth flagging**: `customer_facing_agent_name` on both `workspaces` (live pointer, "who answers new conversations now") AND on `widget_conversations` (snapshot, "who was answering this thread when it started"). Operators can swap the customer-facing bot without rewriting history; old conversations retain their original routing for the thread view. Same general pattern as `Run.sensitivity_level` snapshotting from the agent at run-creation time.
+
+**Why no FK on `customer_facing_agent_name`**: the `agents` table uses a composite PK `(workspace_id, name)`, so a real FK doesn't fit cleanly on a single string column. The codebase already takes this shape for `runs.agent_name` and similar — app-side code resolves the name to an Agent row at dispatch time. Validation that the bot exists in the workspace lands in 21.7 when the operator-facing settings endpoint ships.
+
+**Verification**: 22 new tests in `backend/tests/test_widget_schema.py` (`pytest tests/test_widget_schema.py` → 22 passed in 4s):
+
+- Workspace columns: default state empty; `widget_public_id` unique across workspaces; null public ids coexist; `allowed_widget_origins` jsonb roundtrip.
+- Conversations: roundtrip with default status; FK cascade on workspace delete; tenant isolation.
+- Messages: thread-order roundtrip with mixed roles; FK cascade on conversation delete.
+- Escalations: roundtrip including a `suggested_fix` blob (21.9 forward-compat); FK cascade.
+- Index existence: all five new indexes show up in `pg_indexes` (inbox-list, anon-user partial, thread-render, open-escalations partial, workspace public id unique).
+- Validator helpers: accept-known + reject-unknown for both status and role; constant-set membership check as a typo guard.
+
+**One small bug caught + fixed during test development**: the first `widget_public_id_is_unique_across_workspaces` test used `session_scope()` for the second insert, which auto-commits at context exit — `pytest.raises(IntegrityError)` around `s.commit()` would never fire because the commit was implicit. Fixed by using `SessionLocal()` directly for the second insert, same shape as the partial-unique test in `test_connector_schema.py`.
+
+Full backend suite: **984 passed in 468s** (was 962, +22 net new). 0 regressions. Known #102 flake fired once (cleared on solo re-run as usual).
+
+**What this unblocks**: 21.2 (public chat ingestion endpoint) reads `workspaces.allowed_widget_origins` for the Origin-header check + writes a `widget_messages` row + enqueues a `widget_chat` job. 21.3 (iframe app) reads the same rows via a thin GET endpoint. The wedge story stays coherent because the conversation rows snapshot `customer_facing_agent_name`, which 21.6 resolves to an Agent row whose `sensitivity_level` is enforced at the SDK + connector boundary.
 
 ### 2026-05-21 — Phase 20 code-complete: demo artifacts shipped (20.10)
 
