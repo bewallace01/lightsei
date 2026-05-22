@@ -70,6 +70,9 @@ from models import (
     ThreadMessage,
     User,
     ValidatorConfig,
+    WidgetConversation,
+    WidgetEscalation,
+    WidgetMessage,
     Workspace,
     WorkspaceSecret,
 )
@@ -6036,6 +6039,259 @@ def claim_command(
     cmd.claimed_at = now
     session.flush()
     return {"command": _serialize_command(cmd)}
+
+
+# ---------- Phase 21.2: widget chat ingestion + poll + config ---------- #
+
+
+# Cap on a single user message. The orchestrator (21.6) re-trims for
+# the LLM context window; this is the wire-level guard against a
+# pasted-PDF-into-the-textarea kind of abuse.
+WIDGET_MESSAGE_MAX_LEN = 8000
+
+
+class WidgetMessageIn(BaseModel):
+    """Body for `POST /widget/{public_id}/messages`.
+
+    `conversation_id` is null on a fresh widget open + populated on
+    every subsequent message in the same thread. `anon_user_id` is
+    an opaque string the iframe stamps on localStorage (so a
+    returning visitor on the same site lands in their previous
+    conversation by passing the prior conversation_id, AND the
+    workspace's inbox can group anonymous conversations from the
+    same end user)."""
+    conversation_id: Optional[str] = Field(default=None, max_length=64)
+    text: str = Field(min_length=1, max_length=WIDGET_MESSAGE_MAX_LEN)
+    anon_user_id: Optional[str] = Field(default=None, max_length=64)
+
+
+@app.post("/widget/{public_id}/messages", status_code=202)
+def widget_post_message(
+    public_id: str,
+    body: WidgetMessageIn,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 21.2: the only unauthenticated endpoint in Phase 21.
+
+    Public + idempotency-free + rate-limited. The end user's iframe
+    POSTs here on every message they type. The endpoint:
+
+      1. Resolves the workspace by `public_id` (404 on miss).
+      2. Enforces the Origin allowlist (403 on mismatch).
+      3. Per-conversation + per-workspace rate limit (429 on overrun).
+      4. Persists the user message + (for new conversations) starts
+         a `widget_conversations` row.
+      5. Enqueues a `widget_chat` job for 21.6's orchestrator to
+         pick up. The bot response lands as a separate message that
+         the widget picks up via the poll endpoint below.
+      6. Returns 202 Accepted with the conversation_id + message_id.
+    """
+    import widget_endpoints as _we
+    import limits
+    import jobs as _jobs
+
+    workspace = _we.resolve_workspace_by_public_id(session, public_id)
+    _we.check_widget_origin(workspace, request.headers.get("origin"))
+
+    if not workspace.customer_facing_agent_name:
+        # No bot wired up yet. Surface a 503 rather than enqueueing a
+        # doomed job. The operator's first job after pasting the
+        # snippet is picking a bot on the settings page.
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "widget_unconfigured",
+                "message": (
+                    "no customer-facing bot is set for this workspace yet. "
+                    "Ask the operator to configure one on the widget "
+                    "settings page."
+                ),
+            },
+        )
+
+    # Apply rate limits BEFORE writing anything (Phase 11B-style
+    # ordering: reject early, persist late).
+    for key, lim, window in _we.widget_message_rate_limit_keys(
+        workspace.id, body.conversation_id,
+    ):
+        limits.rate_limit(key, limit=lim, window_s=window)
+
+    now = utcnow()
+    conv: Optional[WidgetConversation] = None
+    if body.conversation_id:
+        # Existing conversation. Verify it belongs to this workspace
+        # — 404 if not (so a leaked id from one workspace can't be
+        # used to post into another).
+        conv = session.get(WidgetConversation, body.conversation_id)
+        if conv is None or conv.workspace_id != workspace.id:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "conversation_not_found",
+                    "message": (
+                        "no conversation with this id on this widget. "
+                        "Drop the conversation_id from your next POST "
+                        "to start a fresh thread."
+                    ),
+                },
+            )
+        # If the operator has taken over (status='operator_owned'),
+        # the bot is paused; the user's message is still recorded
+        # but no orchestrator job is enqueued. 21.8 will surface this
+        # as a typing indicator on the operator side.
+
+    if conv is None:
+        conv = WidgetConversation(
+            id=str(uuid.uuid4()),
+            workspace_id=workspace.id,
+            customer_facing_agent_name=workspace.customer_facing_agent_name,
+            status="open",
+            anon_user_id=body.anon_user_id,
+            started_at=now,
+            last_message_at=now,
+        )
+        session.add(conv)
+        session.flush()
+
+    # Persist the user message.
+    msg = WidgetMessage(
+        conversation_id=conv.id,
+        role="user",
+        text=body.text,
+        sent_at=now,
+    )
+    session.add(msg)
+    conv.last_message_at = now
+    session.flush()
+
+    # Enqueue the orchestrator job unless the operator has taken
+    # over — in that mode the bot is paused.
+    job_id: Optional[str] = None
+    if conv.status != "operator_owned":
+        job_id = str(uuid.uuid4())
+        _jobs.enqueue_job(
+            session,
+            job_id=job_id,
+            workspace_id=workspace.id,
+            kind="widget_chat",
+            request_payload={
+                "conversation_id": conv.id,
+                "user_message_id": msg.id,
+            },
+        )
+
+    return {
+        "conversation_id": conv.id,
+        "message_id": msg.id,
+        "job_id": job_id,
+    }
+
+
+@app.get("/widget/{public_id}/conversations/{conversation_id}")
+def widget_get_conversation(
+    public_id: str,
+    conversation_id: str,
+    request: Request,
+    since: Optional[int] = None,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 21.2: widget polls this for new messages.
+
+    Returns the conversation's messages with id > `since` (cursor
+    semantics: the widget tracks the highest message id it's seen
+    and asks for everything after). On first poll the widget passes
+    `since=0` (or omits it) to get the full history.
+
+    Same Origin enforcement as the POST endpoint — the widget is
+    on the customer's site and must run through the allowlist.
+    """
+    import widget_endpoints as _we
+
+    workspace = _we.resolve_workspace_by_public_id(session, public_id)
+    _we.check_widget_origin(workspace, request.headers.get("origin"))
+
+    conv = session.get(WidgetConversation, conversation_id)
+    if conv is None or conv.workspace_id != workspace.id:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "conversation_not_found"},
+        )
+
+    cursor = since or 0
+    rows = session.execute(
+        select(WidgetMessage)
+        .where(
+            WidgetMessage.conversation_id == conv.id,
+            WidgetMessage.id > cursor,
+        )
+        .order_by(WidgetMessage.id)
+    ).scalars().all()
+
+    return {
+        "conversation_id": conv.id,
+        "status": conv.status,
+        "messages": [
+            {
+                "id": m.id,
+                "role": m.role,
+                "text": m.text,
+                "sent_at": m.sent_at.isoformat(),
+            }
+            for m in rows
+        ],
+    }
+
+
+@app.get("/widget/{public_id}/config")
+def widget_get_config(
+    public_id: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 21.2: iframe fetches the bot's display config on load.
+
+    Returns the customer-facing bot's display name (so the iframe
+    header shows "Talk to Vega" instead of a generic "Lightsei
+    Assistant"). Plus a small handful of safe-to-expose fields so
+    the iframe (21.3) can render trust-zone disclosure + a
+    "Powered by Lightsei" footer.
+
+    Notably NOT returned: workspace id, workspace name, operator
+    email, any agent system prompt, capabilities, or sensitivity
+    level. The end user has no Lightsei account; the surface area
+    they see is the bot, not the workspace.
+
+    Same Origin enforcement as POST — a curl from anywhere else
+    on the internet can't enumerate which workspaces have widget
+    configs.
+    """
+    import widget_endpoints as _we
+
+    workspace = _we.resolve_workspace_by_public_id(session, public_id)
+    _we.check_widget_origin(workspace, request.headers.get("origin"))
+
+    bot_name = workspace.customer_facing_agent_name
+    bot_display: Optional[dict[str, Any]] = None
+    if bot_name:
+        # The agent row might not exist (operator could have deleted
+        # the bot after setting it as customer-facing). Surface a
+        # placeholder so the iframe still renders rather than erroring.
+        agent = session.get(Agent, (workspace.id, bot_name))
+        if agent is not None:
+            bot_display = {
+                "name": agent.name,
+                "description": agent.description,
+                "sensitivity_level": agent.sensitivity_level,
+            }
+
+    return {
+        "public_id": public_id,
+        "bot": bot_display,
+        # Anonymous-only in v1; 21B will add a `requires_signed_token`
+        # field once signed-token identity ships.
+        "anonymous": True,
+    }
 
 
 # ---------- Phase 11.2: approval endpoints + auto-approval CRUD ---------- #

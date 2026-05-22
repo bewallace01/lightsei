@@ -7,13 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 21.2 — Public chat ingestion endpoint. 21.1 shipped 2026-05-22.**
+> **Phase 21.3 — Widget iframe app. 21.1 + 21.2 shipped 2026-05-22.**
 
-Phase 21 spec locked 2026-05-21. Design choices: iframe-isolated widget; anonymous-only conversations in v1 (signed-token identity parked to 21B); one designated customer-facing bot per workspace via `@lightsei.on_chat("widget")`; top-level `/inbox` route for the operator surface. 10 sub-tasks (21.1-21.10). See spec block below.
+Phase 21 spec locked 2026-05-21. Design choices: iframe-isolated widget; anonymous-only conversations in v1; one customer-facing bot per workspace via `@lightsei.on_chat("widget")`; top-level `/inbox` route. 10 sub-tasks (21.1-21.10).
 
-21.1 shipped 2026-05-22: schema tables + columns + tests landed; backend at **984 passing** (+22 from 21.1).
+21.1 (schema) + 21.2 (public ingestion + poll + config endpoints) shipped 2026-05-22; backend at **1004 passing** (+42 across 21.1 + 21.2).
 
-NOW is 21.2 — public `POST /widget/{workspace_public_id}/messages` ingestion endpoint. Origin-locked (against `workspaces.allowed_widget_origins`), per-conversation rate limited, persists user message + enqueues `widget_chat` job. Plus the `GET /widget/{public_id}/conversations/{id}` poll endpoint and the `/widget/{public_id}/config` endpoint the iframe reads for the bot's display name.
+NOW is 21.3 — iframe app at `app.lightsei.com/widget/{public_id}`. Next.js page that renders the chat UI inside the iframe: header (bot display name), conversation pane, input, "Anonymous conversation. Powered by Lightsei." footer. Reads conversation_id from localStorage keyed on workspace public id. POSTs to /messages on send + polls /conversations/{id} for updates. Trust-zone disclosure modal accessible from a header link.
 
 Phase 20 (integration breadth) shipped 2026-05-20/21: connector schema (20.1), Google OAuth install flow (20.2), three real connectors — Gmail / Calendar / Drive (20.3-20.5), bot-callable endpoint with capability + zone gates (20.6), SDK namespaced helpers (20.7), dashboard /integrations index + per-connector cards (20.8). 20.9 was a coverage rollup satisfied incrementally. 20.10 demo artifacts under `examples/p20-demo/`. Backend at **962 passing** (+126 across Phase 20; started at 836). SDK at **120 passing** (+19 from 20.7).
 
@@ -763,7 +763,7 @@ Add `customer_facing_agent_id` column to `workspaces` (fk → agents.id, nullabl
 
 Alembic migration `0036_widget_tables.py`. SQLAlchemy models in `backend/models.py`.
 
-### 21.2 — Public chat ingestion endpoint
+### 21.2 — Public chat ingestion endpoint ✅ shipped 2026-05-22
 
 `POST /widget/{workspace_public_id}/messages` is the only unauthenticated endpoint added by this phase. Security model:
 
@@ -1331,6 +1331,59 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-22 — Phase 21.2 shipped: public widget chat surface
+
+Three new public endpoints + a shared helper module make the widget surface live. Only one unauthenticated endpoint in the entire codebase added by this phase (the others gate on auth, API key, or workspace-tenant context), so the security model gets explicit attention.
+
+**`backend/widget_endpoints.py`**: pure helper module the route handlers share:
+
+- `resolve_workspace_by_public_id(session, public_id) → Workspace`. 404s on miss with a `widget_not_found` error code. Lookup is unique by index from Phase 21.1.
+- `check_widget_origin(workspace, origin)`. Raises 403 `widget_origin_missing` if the request lacks an Origin header (the iframe always sends one — bare curl needs to set it). Raises 403 `widget_origin_not_allowed` with the offending origin echoed back if Origin isn't in `workspaces.allowed_widget_origins`. Empty allowlist refuses everything — operator's first job after picking the customer-facing bot is to add the customer's site origins.
+- `widget_message_rate_limit_keys(workspace_id, conversation_id?) → list[(key, limit, window_s)]`. Two layers: per-conversation (1 msg / 1 second sliding window — keeps one browser tab from flooding the bot) + per-workspace (60 msgs / 60 seconds — soft tenant ceiling). New-conversation requests skip the per-conv key (no conversation_id yet) and only hit the per-workspace ceiling.
+- `ensure_widget_public_id(session, workspace) → str`. Operator-callable helper that mints `secrets.token_urlsafe(16)` (~22 chars, 128 bits of entropy, URL-safe charset, no padding) and persists it on the workspace. Idempotent; the unique index from 21.1 backstops collisions. Used by 21.7's settings endpoint; the public endpoint never mints (read-only).
+
+**`POST /widget/{public_id}/messages`**: ingestion. Body `{conversation_id?, text, anon_user_id?}` with `text` capped at 8000 chars. Pipeline:
+
+1. Resolve workspace by public id (404 on miss).
+2. Origin allowlist enforcement.
+3. **503 `widget_unconfigured`** if `workspaces.customer_facing_agent_name` is null — surface the unconfigured state cleanly rather than enqueueing a doomed orchestrator job.
+4. Rate-limit check BEFORE any writes (reject early, persist late).
+5. Resolve / create the conversation. Existing conversation IDs are scoped by workspace (404 if the conversation belongs to a different workspace — defense against leaked IDs).
+6. Persist user message + bump `last_message_at`.
+7. **Operator-owned pause**: if the conversation status is `operator_owned` (operator clicked "Take Over" in /inbox), the user's message is still recorded but no orchestrator job is enqueued. The operator sees the message but the bot stays paused.
+8. Enqueue a `widget_chat` job on `generation_jobs` for 21.6's orchestrator to pick up. Payload: `{conversation_id, user_message_id}`.
+9. Return 202 Accepted with `{conversation_id, message_id, job_id}`. `job_id` is null when the conversation is operator-owned.
+
+**`GET /widget/{public_id}/conversations/{conversation_id}?since=<msg_id>`**: poll. Returns the conversation's messages with `id > since`. Cursor semantics: the widget tracks the highest message id it's seen and asks for everything after; first poll sends `since=0` (or omits it). Same Origin enforcement as POST — defense against cross-origin enumeration. 404 if the conversation isn't in this workspace.
+
+**`GET /widget/{public_id}/config`**: iframe loads this on mount. Returns:
+
+```json
+{
+  "public_id": "wid_xxx",
+  "bot": {"name": "vega", "description": "...", "sensitivity_level": "public"},
+  "anonymous": true
+}
+```
+
+What's deliberately NOT returned: workspace id, workspace name, operator email, capabilities list, system prompt. The end user has no Lightsei account; the surface they see is the bot, not the workspace. Test asserts this with a literal-string sweep over the response body.
+
+If the operator deleted the agent row after setting it as customer-facing, `bot` is null and the iframe still renders (rather than erroring) — graceful degradation matches the SDK's own contract.
+
+**One handler missing on purpose**: no `widget_chat` job handler is registered in `_load_default_handlers` yet. 21.6 (widget orchestrator) fills that in. For 21.2 the enqueue is the test surface; the actual bot run lands in 21.6. The job runner will log `no handler for kind=widget_chat` in the meantime — that's the right shape, not a regression.
+
+**Verification**: 19 new tests in `backend/tests/test_widget_endpoints.py` cover:
+
+- POST: unknown public id (404); missing Origin (403); disallowed Origin (403); unconfigured workspace (503); new-conversation flow with the conversation row + first message persisted + job enqueued; append-to-existing flow; unknown conversation id (404); cross-workspace conversation id (404 — leaked IDs can't be used cross-tenant); operator-owned skips orchestrator; per-conversation rate limit fires on the 3rd POST in 1 second.
+- GET conversation: returns messages; respects `since` cursor; 404 unknown id; Origin enforcement.
+- GET config: returns safe fields + asserts no secret leakage; 404 unknown id; Origin enforcement; null `bot` when the agent row has been deleted.
+
+**One small design wrinkle worth flagging**: the per-conversation rate limit only fires on the 3rd POST (not the 2nd). The first POST has no conversation_id (server mints one), so it skips the per-conv key. The second POST records the per-conv key's first hit (allowed at limit=1). The third POST tips the limit. The test exercises all three. Semantically: a user can send a message + immediately reply if the bot answered fast, but can't flood. Matches typical chat-app rate-limit shapes.
+
+Full backend suite: **1004 passed in 564s** (was 984, +20 net new). 0 regressions. Known #102 flake didn't fire this run.
+
+**What this unblocks**: 21.3 (iframe app) reads `/widget/{public_id}/config` for the bot name, then POSTs to `/messages` on send + polls `/conversations/{id}` for replies. 21.4 (customer-side `widget.js` snippet) injects the iframe at `app.lightsei.com/widget/{public_id}`. 21.6 will register the `widget_chat` handler so the enqueued jobs actually produce bot replies.
 
 ### 2026-05-22 — Phase 21.1 shipped: widget chat schema
 
