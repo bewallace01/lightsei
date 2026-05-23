@@ -7,13 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 21.4 — Customer-side widget.js snippet. 21.1-21.3 shipped 2026-05-22.**
+> **Phase 21.5 — SDK escalate helper + @on_chat("widget") extension. 21.1-21.4 shipped 2026-05-22.**
 
 Phase 21 spec locked 2026-05-21. Design choices: iframe-isolated widget; anonymous-only conversations in v1; one customer-facing bot per workspace via `@lightsei.on_chat("widget")`; top-level `/inbox` route. 10 sub-tasks (21.1-21.10).
 
-21.1 (schema) + 21.2 (public ingestion + poll + config endpoints) + 21.3 (iframe app) shipped 2026-05-22; backend at **1004 passing**; dashboard `next build` adds `/widget/[publicId]` as a 4.17 kB dynamic route.
+21.1 (schema) + 21.2 (public ingestion + poll + config endpoints) + 21.3 (iframe app) + 21.4 (customer-side widget.js snippet) shipped 2026-05-22; backend at **1004 passing**; dashboard `next build` carries `/widget/[publicId]` (4.17 kB dynamic) + `widget.js` (static asset).
 
-NOW is 21.4 — customer-side widget.js. Tiny ES module hosted at `app.lightsei.com/widget.js`. Reads `data-workspace` from its own script tag, mounts a fixed-position iframe pointing at `app.lightsei.com/widget/{public_id}`, exposes `window.Lightsei.{open, close, toggle}`, handles iframe sizing via the `postMessage` channel the iframe already emits.
+NOW is 21.5 — SDK escalate helper + on_chat widget extension. Extend `@lightsei.on_chat(...)` to accept a `channel` kwarg (`@on_chat("widget")` registers the handler for widget conversations). New `lightsei.respond(conversation_id, text)` helper. New `lightsei.escalate(conversation_id, reason, payload=None)` helper. New `LightseiEscalate` typed exception the on_chat handler can raise instead of explicit escalate. New `widget:respond` + `widget:escalate` capabilities in the backend allow-list.
 
 Phase 20 (integration breadth) shipped 2026-05-20/21: connector schema (20.1), Google OAuth install flow (20.2), three real connectors — Gmail / Calendar / Drive (20.3-20.5), bot-callable endpoint with capability + zone gates (20.6), SDK namespaced helpers (20.7), dashboard /integrations index + per-connector cards (20.8). 20.9 was a coverage rollup satisfied incrementally. 20.10 demo artifacts under `examples/p20-demo/`. Backend at **962 passing** (+126 across Phase 20; started at 836). SDK at **120 passing** (+19 from 20.7).
 
@@ -790,7 +790,7 @@ Reads `conversation_id` from `localStorage` keyed on the workspace's public id, 
 
 Trust-zone disclosure: a small "About this bot" link in the header opens a modal listing the bot's declared_zones-equivalent (which Lightsei knows from the agent row) + what data the bot can access (e.g. "this bot can read product FAQs but cannot see your account information"). The wedge made legible to the end user.
 
-### 21.4 — Customer-side snippet
+### 21.4 — Customer-side snippet ✅ shipped 2026-05-22
 
 A tiny ES module hosted at `app.lightsei.com/widget.js` (Next.js public static asset). What the customer pastes:
 
@@ -1331,6 +1331,42 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-22 — Phase 21.4 shipped: customer-side widget.js snippet
+
+A tiny IIFE (no module system, no build, ~200 lines) at `dashboard/public/widget.js`, served as a Next.js static asset at `app.lightsei.com/widget.js` (or `localhost:3000/widget.js` in dev). What the customer pastes onto their own site:
+
+```html
+<script src="https://app.lightsei.com/widget.js"
+        data-workspace="wid_xxxx"
+        async></script>
+```
+
+**Boot path**:
+
+1. `document.currentScript` (with a fallback that scans `<script>` tags for `/widget.js`) finds the own tag. Bails silently on miss — graceful degradation per CLAUDE.md.
+2. Reads `data-workspace` (the workspace's `widget_public_id` from Phase 21.1). Logs a console warning + bails if missing.
+3. Computes the Lightsei origin from its own `src` attribute (so a script served from `localhost:3000` talks to `localhost:3000`, one served from `app.lightsei.com` talks to `app.lightsei.com` — no separate config needed for dev/prod).
+4. Mounts a fixed-position container at `position:fixed; right:20px; bottom:20px; z-index:2147483646` (one below int32 max — sits above almost any customer page chrome but reserves the top for modals).
+5. Inside the container: an iframe (initially `display:none`, 380×560 max-clamped to viewport) + a circular launcher button (56×56 indigo bubble with an inline-SVG chat icon).
+6. Auto-mounts on script load; mount waits for `DOMContentLoaded` if the body doesn't exist yet (covers `<head>` pasting).
+
+**Iframe sizing via postMessage**: the 21.3 iframe app emits `{type: "lightsei:widget-resize", height}` on every body reflow (via `ResizeObserver`). The snippet listens for these messages — origin-verified against the computed Lightsei origin — and sizes the iframe to match, clamped to `[200, 800]` px so a broken iframe can't make the launcher unreachable.
+
+**Public API on `window.Lightsei`**:
+
+- `mount()` — idempotent. Re-mounts the container if it was removed.
+- `open()` / `close()` / `toggle()` — show/hide the iframe + swap the launcher icon (chat ↔ ×). Lets the customer wire their own launcher button if they don't want the default bubble.
+
+**Idempotency**: `window.__lightsei_widget_loaded__` flag prevents double-mount if the script is loaded twice (some single-page apps inject scripts on route change).
+
+**Cross-frame trust model**: `postMessage` is the only cross-frame communication. The script only validates `event.origin === lightseiOrigin` before touching the iframe; everything else stays inside the iframe (which has its own CSP / same-origin sandbox). The script never reads or writes the customer's page data — it only manages the container/iframe/launcher.
+
+**Reference embed** (`examples/p21-demo/embed-example.html`): a minimal "Halo" product page with the snippet at the bottom. Used as a smoke-test artifact + reference for the eventual Phase 21.10 runbook. Snippet's `src` points at `http://localhost:3000/widget.js` for local testing; the doc notes the production version uses `app.lightsei.com/widget.js`.
+
+**Verification**: `curl http://localhost:3000/widget.js` returns 200 with the IIFE source. Opening `examples/p21-demo/embed-example.html` in a browser renders the customer page + injects the launcher bubble in the bottom-right; clicking the bubble shows the 21.3 iframe (which loads the 21.2 config endpoint and either renders the bot UI or the `no widget is configured` error if the public id isn't seeded). `npx tsc --noEmit` clean — the JS asset doesn't go through the TS pipeline but the rest of the dashboard remains type-clean.
+
+**What this unblocks**: 21.5 (SDK escalate helper + `@on_chat("widget")` extension) is the bot side; 21.6 (widget orchestrator) is the dispatcher that ties the user message → bot reply round trip together. Once 21.6 ships, an operator who's seeded a workspace + paste the snippet onto a real customer site can have an actual chat conversation. The widget UI surface is done; what's left is the bot wiring.
 
 ### 2026-05-22 — Phase 21.3 shipped: widget iframe app
 

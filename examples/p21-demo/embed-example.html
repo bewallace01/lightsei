@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Halo product page (Lightsei widget demo)</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          sans-serif;
+        max-width: 720px;
+        margin: 60px auto;
+        padding: 0 16px;
+        color: #111;
+        line-height: 1.5;
+      }
+      header { margin-bottom: 28px; }
+      h1 { font-size: 28px; margin-bottom: 4px; }
+      .lede { color: #555; font-size: 16px; }
+      h2 { font-size: 18px; margin-top: 28px; margin-bottom: 6px; }
+      p { color: #333; }
+      code {
+        background: #f3f4f6; padding: 2px 6px; border-radius: 4px;
+        font-size: 13px;
+      }
+      .note {
+        background: #fef9c3; border: 1px solid #facc15; padding: 10px 14px;
+        border-radius: 6px; margin-top: 24px; font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Halo</h1>
+      <p class="lede">Build-monitoring for engineering teams.</p>
+    </header>
+
+    <h2>What this page is</h2>
+    <p>
+      A minimal stand-in for the customer's own product page. The bottom-right
+      chat bubble is the Lightsei widget, injected by a single
+      <code>&lt;script&gt;</code> tag at the bottom of this file.
+    </p>
+
+    <h2>How to try it locally</h2>
+    <ol>
+      <li>Make sure the Lightsei dashboard dev server is running on
+        <code>localhost:3000</code> (or update the script src below).</li>
+      <li>Open this file in a browser: <code>open examples/p21-demo/embed-example.html</code>.</li>
+      <li>The chat bubble appears in the bottom-right.</li>
+      <li>Click it to open the iframe.</li>
+    </ol>
+    <p>
+      In a production embed the snippet src would be
+      <code>https://app.lightsei.com/widget.js</code> and the
+      <code>data-workspace</code> attribute would be the public id from
+      the workspace's widget settings page (Phase 21.7).
+    </p>
+
+    <div class="note">
+      <strong>Local note:</strong> with no real workspace configured for the
+      public id below, the iframe shows a "no widget is configured" error.
+      Use the public id from a real seeded workspace to see the bot reply
+      flow once Phase 21.6 ships.
+    </div>
+
+    <h2>The snippet</h2>
+    <p>This is the entire integration:</p>
+    <pre><code>&lt;script src="https://app.lightsei.com/widget.js"
+        data-workspace="{your public id}"
+        async&gt;&lt;/script&gt;</code></pre>
+
+    <!--
+      The widget snippet itself. data-workspace is a placeholder you'd
+      replace with the workspace's real widget_public_id from the
+      settings page. Pointing at localhost:3000 for the local demo;
+      production would use app.lightsei.com.
+    -->
+    <script
+      src="http://localhost:3000/widget.js"
+      data-workspace="preview-id"
+      async
+    ></script>
+  </body>
+</html>
