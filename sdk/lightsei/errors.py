@@ -56,6 +56,41 @@ class LightseiCrossZoneError(LightseiError):
         )
 
 
+class LightseiEscalate(Exception):
+    """Phase 21.5: raise from inside an @on_chat("widget") handler to
+    escalate the conversation to a human.
+
+    Not a subclass of LightseiError on purpose — this is a control-
+    flow signal, not an error. The 21.6 widget orchestrator catches
+    it explicitly and POSTs to /widget-bot/escalate on the bot's
+    behalf. User code that catches LightseiError must not also
+    swallow this exception.
+
+    Use this instead of `lightsei.escalate(conversation_id, reason)`
+    when you want the handler to short-circuit cleanly:
+
+        @lightsei.on_chat("widget")
+        def handle(turn):
+            if "refund" in turn["user_message"].lower():
+                raise lightsei.LightseiEscalate(
+                    "refund_request",
+                    payload={"last_user_message": turn["user_message"]},
+                )
+            return generate_reply(turn)
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        payload: Optional[dict[str, Any]] = None,
+    ):
+        self.reason = reason
+        self.payload = payload or {}
+        super().__init__(
+            f"escalating widget conversation (reason={reason!r})"
+        )
+
+
 class LightseiConnectorZoneError(LightseiError):
     """Raised when a bot calls an installed connector that refuses
     its trust zone.

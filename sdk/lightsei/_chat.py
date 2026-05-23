@@ -26,19 +26,88 @@ from typing import Any, Callable, List, Optional
 
 logger = logging.getLogger("lightsei.chat")
 
-# Single registered chat handler (only one per process for now).
-_handler: Optional[Callable[[List[dict[str, Any]]], Any]] = None
+# Registered chat handlers, keyed by channel. None = the default
+# channel (the dashboard chat thread surface from earlier phases);
+# `"widget"` = the Phase 21 customer-facing widget surface.
+# Each process can have at most one handler per channel; re-decorating
+# replaces.
+_handlers: dict[Optional[str], Callable[..., Any]] = {}
 
 
-def on_chat(fn: Callable[[List[dict[str, Any]]], Any]):
-    """Register a chat handler. Replaces any previously registered one."""
-    global _handler
-    _handler = fn
-    return fn
+def on_chat(arg=None):
+    """Register a chat handler.
+
+    Two call shapes:
+
+    - `@lightsei.on_chat` (no parens) — registers as the default
+      handler. Backward-compatible with pre-21.5 callers.
+
+          @lightsei.on_chat
+          def handle(messages):
+              return reply(messages)
+
+    - `@lightsei.on_chat("widget")` — registers for a specific
+      channel. The Phase 21.6 widget orchestrator looks up the
+      "widget" handler when dispatching a widget conversation.
+      Future protocols can add their own channel names without
+      colliding with the default handler.
+
+          @lightsei.on_chat("widget")
+          def handle(turn):
+              # turn = {conversation_id, user_message, conversation_history}
+              return reply(turn)
+
+    Re-decorating replaces any previously-registered handler for
+    that channel.
+    """
+    if callable(arg):
+        # `@on_chat` (no parens) — `arg` is the function itself.
+        _handlers[None] = arg
+        return arg
+    # `@on_chat("widget")` — `arg` is the channel name (or None);
+    # return a decorator that registers when applied.
+    channel = arg
+
+    def decorator(fn: Callable[..., Any]):
+        _handlers[channel] = fn
+        return fn
+
+    return decorator
 
 
-def has_chat_handler() -> bool:
-    return _handler is not None
+def has_chat_handler(channel: Optional[str] = None) -> bool:
+    return channel in _handlers
+
+
+def get_chat_handler(channel: Optional[str] = None) -> Optional[Callable[..., Any]]:
+    """Lookup the handler registered for `channel`. Returns None if
+    no handler is registered for that channel. The Phase 21.6
+    widget orchestrator uses this to dispatch the bot side of a
+    widget conversation."""
+    return _handlers.get(channel)
+
+
+# Back-compat: existing code (and the chat poller below) reads
+# `_handler` directly. Keep the global pointing at the default
+# (None-channel) handler.
+def _default_handler() -> Optional[Callable[..., Any]]:
+    return _handlers.get(None)
+
+
+# Module-level shim so `_chat._handler` keeps working for the older
+# dashboard-chat poll path. New code should call `get_chat_handler`.
+class _DefaultHandlerProxy:
+    def __bool__(self) -> bool:
+        return _default_handler() is not None
+
+    def __call__(self, *args, **kwargs):
+        fn = _default_handler()
+        if fn is None:
+            raise RuntimeError("no default chat handler registered")
+        return fn(*args, **kwargs)
+
+
+_handler = _DefaultHandlerProxy()
 
 
 class _ChatPoller:
@@ -90,11 +159,12 @@ class _ChatPoller:
     def _dispatch(self, turn: dict[str, Any]) -> None:
         message_id = turn.get("message_id")
         history: List[dict[str, Any]] = turn.get("messages") or []
-        if _handler is None:
+        handler = _default_handler()
+        if handler is None:
             self._complete(message_id, error="no chat handler registered (use @lightsei.on_chat)")
             return
         try:
-            result = _handler(history)
+            result = handler(history)
         except BaseException as e:
             self._complete(message_id, error=repr(e))
             return

@@ -43,6 +43,18 @@ KNOWN_CAPABILITIES: frozenset[str] = frozenset({
     # — a PII bot literally cannot post to Slack until an operator
     # explicitly adds the capability.
     "slack:respond",
+    # Phase 21.5: required for lightsei.respond(conversation_id, text)
+    # and is implicit in the @on_chat("widget") return-value path.
+    # The customer-facing bot needs this to post a bot message back
+    # into a widget conversation.
+    "widget:respond",
+    # Phase 21.5: required for lightsei.escalate(conversation_id, ...)
+    # and the LightseiEscalate exception path. Flips a widget
+    # conversation to `escalated` so the operator inbox surfaces it.
+    # Granted by default alongside widget:respond on the
+    # customer-facing bot — an escalation path that bots can't take
+    # would defeat the wedge.
+    "widget:escalate",
 })
 
 # Structural prefix accepted by the validator without requiring each

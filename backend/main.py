@@ -6294,6 +6294,205 @@ def widget_get_config(
     }
 
 
+# ---------- Phase 21.5: bot-side widget response + escalate ---------- #
+
+
+class WidgetRespondIn(BaseModel):
+    """Body for `POST /widget-bot/respond` (Phase 21.5).
+
+    Called from bot code via `lightsei.respond(conversation_id, text)`.
+    `source_agent` identifies the bot making the call so the
+    capability gate can check its allow-list."""
+    source_agent: str = Field(min_length=1, max_length=128)
+    conversation_id: str = Field(min_length=1, max_length=64)
+    text: str = Field(min_length=1, max_length=WIDGET_MESSAGE_MAX_LEN)
+
+
+def _check_widget_capability(
+    session: Session,
+    workspace_id: str,
+    source_agent: str,
+    required_capability: str,
+) -> Agent:
+    """Shared gate for the two widget bot endpoints. Returns the
+    Agent row on success; raises 404 / 403 with the same shape as
+    /slack/respond so SDK code can map both via LightseiCapabilityError."""
+    agent = session.get(Agent, (workspace_id, source_agent))
+    if agent is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"agent {source_agent!r} not found in this workspace",
+        )
+    if required_capability not in (agent.capabilities or []):
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "capability_missing",
+                "capability": required_capability,
+                "agent_name": source_agent,
+                "granted": list(agent.capabilities or []),
+                "message": (
+                    f"agent {source_agent!r} does not have the "
+                    f"{required_capability!r} capability. Add it via "
+                    "PATCH /agents/{name}/capabilities or designate "
+                    "this bot as the workspace's customer-facing bot."
+                ),
+            },
+        )
+    return agent
+
+
+def _load_widget_conversation(
+    session: Session, workspace_id: str, conversation_id: str,
+) -> WidgetConversation:
+    """Load a widget conversation scoped to the calling workspace.
+    404 on miss OR cross-workspace lookup (defense against leaked
+    conversation IDs)."""
+    conv = session.get(WidgetConversation, conversation_id)
+    if conv is None or conv.workspace_id != workspace_id:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "conversation_not_found",
+                "message": (
+                    f"conversation {conversation_id!r} not in this workspace"
+                ),
+            },
+        )
+    return conv
+
+
+@app.post("/widget-bot/respond")
+def widget_bot_respond(
+    body: WidgetRespondIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 21.5: bot posts a reply into a widget conversation.
+
+    Same shape as /slack/respond from Phase 19.5. The bot's API key
+    + agent name authenticates; the conversation id scopes the
+    target. Capability-gated on `widget:respond`. Persists a
+    `bot`-role message, bumps `last_message_at`, and surfaces a
+    no-op if the conversation has been marked `resolved` (don't
+    let a slow bot reply land after a human operator closed the
+    thread).
+    """
+    agent = _check_widget_capability(
+        session, workspace_id, body.source_agent, "widget:respond",
+    )
+    conv = _load_widget_conversation(session, workspace_id, body.conversation_id)
+
+    if conv.status == "resolved":
+        # Operator closed the conversation while the bot was thinking.
+        # Refuse the post so the end user doesn't see a stale reply
+        # land after they were told the conversation was wrapped up.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "conversation_resolved",
+                "message": (
+                    "the conversation was marked resolved before this "
+                    "reply landed; the bot reply is being dropped."
+                ),
+            },
+        )
+
+    now = utcnow()
+    msg = WidgetMessage(
+        conversation_id=conv.id,
+        role="bot",
+        text=body.text,
+        sent_at=now,
+    )
+    session.add(msg)
+    conv.last_message_at = now
+    session.flush()
+    return {
+        "ok": True,
+        "message_id": msg.id,
+        "conversation_id": conv.id,
+    }
+
+
+class WidgetEscalateIn(BaseModel):
+    """Body for `POST /widget-bot/escalate` (Phase 21.5).
+
+    Called from bot code via `lightsei.escalate(conversation_id,
+    reason)` OR by raising `LightseiEscalate(reason)` from an
+    `@on_chat("widget")` handler. The 21.6 orchestrator catches
+    the exception and POSTs to this endpoint on the bot's behalf."""
+    source_agent: str = Field(min_length=1, max_length=128)
+    conversation_id: str = Field(min_length=1, max_length=64)
+    reason: str = Field(min_length=1, max_length=64)
+    payload: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.post("/widget-bot/escalate")
+def widget_bot_escalate(
+    body: WidgetEscalateIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 21.5: bot flips a widget conversation into the
+    escalated state.
+
+    Sets `conversation.status = 'escalated'`, creates a
+    `widget_escalations` row, persists a system message into the
+    thread ("This conversation has been handed off to a human."),
+    and returns the new escalation id. Idempotent on the
+    conversation: if the conversation is already escalated /
+    operator_owned / resolved, the call short-circuits without
+    creating a duplicate escalation row.
+
+    Capability-gated on `widget:escalate`. The orchestrator's
+    LightseiEscalate-exception path also routes through here so
+    the gate enforces consistently across the two SDK entry points.
+    """
+    agent = _check_widget_capability(
+        session, workspace_id, body.source_agent, "widget:escalate",
+    )
+    conv = _load_widget_conversation(session, workspace_id, body.conversation_id)
+
+    if conv.status in ("escalated", "operator_owned", "resolved"):
+        # Already in a state that doesn't need a new escalation row.
+        # Don't 4xx — the bot doesn't need to handle this case
+        # specially; surface a "noop" status so the SDK can log it.
+        return {
+            "ok": True,
+            "status": conv.status,
+            "noop": True,
+        }
+
+    now = utcnow()
+    esc_id = str(uuid.uuid4())
+    session.add(WidgetEscalation(
+        id=esc_id,
+        conversation_id=conv.id,
+        reason=body.reason,
+        payload=body.payload or {},
+        escalated_at=now,
+    ))
+    conv.status = "escalated"
+    conv.last_message_at = now
+
+    # Drop a system message into the thread so the end user sees the
+    # handoff land in their iframe (instead of just silence).
+    session.add(WidgetMessage(
+        conversation_id=conv.id,
+        role="system",
+        text="This conversation has been handed off to a human.",
+        sent_at=now,
+    ))
+    session.flush()
+
+    return {
+        "ok": True,
+        "status": "escalated",
+        "escalation_id": esc_id,
+    }
+
+
 # ---------- Phase 11.2: approval endpoints + auto-approval CRUD ---------- #
 
 

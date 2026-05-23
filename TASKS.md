@@ -7,13 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 21.5 — SDK escalate helper + @on_chat("widget") extension. 21.1-21.4 shipped 2026-05-22.**
+> **Phase 21.6 — Widget chat job handler (orchestrator). 21.1-21.5 shipped 2026-05-22.**
 
 Phase 21 spec locked 2026-05-21. Design choices: iframe-isolated widget; anonymous-only conversations in v1; one customer-facing bot per workspace via `@lightsei.on_chat("widget")`; top-level `/inbox` route. 10 sub-tasks (21.1-21.10).
 
-21.1 (schema) + 21.2 (public ingestion + poll + config endpoints) + 21.3 (iframe app) + 21.4 (customer-side widget.js snippet) shipped 2026-05-22; backend at **1004 passing**; dashboard `next build` carries `/widget/[publicId]` (4.17 kB dynamic) + `widget.js` (static asset).
+21.1-21.5 shipped 2026-05-22; backend at **1018 passing** (+14 from 21.5); SDK at **140 passing** (+20 from 21.5).
 
-NOW is 21.5 — SDK escalate helper + on_chat widget extension. Extend `@lightsei.on_chat(...)` to accept a `channel` kwarg (`@on_chat("widget")` registers the handler for widget conversations). New `lightsei.respond(conversation_id, text)` helper. New `lightsei.escalate(conversation_id, reason, payload=None)` helper. New `LightseiEscalate` typed exception the on_chat handler can raise instead of explicit escalate. New `widget:respond` + `widget:escalate` capabilities in the backend allow-list.
+NOW is 21.6 — `widget_chat` job handler in a new `backend/widget_orchestrator.py` (parallel to `slack_orchestrator.py`). Picks up `widget_chat` jobs enqueued by 21.2's POST /messages, loads the conversation + last N messages, dispatches the `@on_chat("widget")` handler on the customer-facing bot, persists the response. Handles `LightseiEscalate` raised from the handler by calling /widget-bot/escalate on the bot's behalf. The piece that lights up the user-message → bot-reply round trip.
 
 Phase 20 (integration breadth) shipped 2026-05-20/21: connector schema (20.1), Google OAuth install flow (20.2), three real connectors — Gmail / Calendar / Drive (20.3-20.5), bot-callable endpoint with capability + zone gates (20.6), SDK namespaced helpers (20.7), dashboard /integrations index + per-connector cards (20.8). 20.9 was a coverage rollup satisfied incrementally. 20.10 demo artifacts under `examples/p20-demo/`. Backend at **962 passing** (+126 across Phase 20; started at 836). SDK at **120 passing** (+19 from 20.7).
 
@@ -809,7 +809,7 @@ The script:
 
 `postMessage` channel is the only cross-frame communication; everything else stays in the iframe. Origin-locked to `app.lightsei.com` on both sides.
 
-### 21.5 — SDK escalate helper + bot-side on_chat extension
+### 21.5 — SDK escalate helper + bot-side on_chat extension ✅ shipped 2026-05-22
 
 Extend Phase 19's `@lightsei.on_chat(...)` decorator (in `sdk/lightsei/_chat.py`) to accept a `channel` kwarg: `@lightsei.on_chat("widget")` registers the handler for widget conversations specifically (vs. Slack-side `on_chat` shapes future-protocols can add). The handler receives `{conversation_id, user_message, conversation_history}` as a single dict; returns a reply string OR raises a typed `LightseiEscalate` to escalate.
 
@@ -1331,6 +1331,49 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-22 — Phase 21.5 shipped: SDK escalate helper + on_chat widget extension
+
+Two new SDK helpers + a typed exception + a multi-channel chat decorator. The bot side of the widget surface — what a bot author actually writes when they author the customer-facing handler.
+
+**Backend additions** (`backend/main.py` + `backend/capabilities.py`):
+
+- New capabilities `widget:respond` + `widget:escalate` in `KNOWN_CAPABILITIES`. Operators grant these on the customer-facing bot (Phase 21.7 settings will auto-grant both alongside picking the bot).
+- `POST /widget-bot/respond` (API-key authed). Body `{source_agent, conversation_id, text}`. Capability-gated on `widget:respond`. Persists a `bot`-role message + bumps `last_message_at`. Returns 409 `conversation_resolved` if the operator wrapped the thread up before this reply landed — keeps a slow bot from posting after a human closed the conversation.
+- `POST /widget-bot/escalate` (API-key authed). Body `{source_agent, conversation_id, reason, payload?}`. Capability-gated on `widget:escalate`. Sets `conversation.status = 'escalated'`, creates a `widget_escalations` row, drops a system message into the thread ("This conversation has been handed off to a human.") so the end user's iframe sees the handoff instead of silence. **Idempotent**: already-escalated / operator_owned / resolved conversations return `{ok: true, noop: true}` without creating a duplicate escalation row. The 21.6 orchestrator's `LightseiEscalate`-catch path routes through here too so the capability gate enforces consistently.
+- Two shared helpers `_check_widget_capability` + `_load_widget_conversation` keep the two endpoints' error shapes identical (and identical to `/slack/respond`'s 403 from 19.5 so the SDK's `LightseiCapabilityError` mapping covers everything with one matcher).
+
+**SDK additions** (`sdk/lightsei/__init__.py` + `sdk/lightsei/_chat.py` + `sdk/lightsei/errors.py`):
+
+- **`@lightsei.on_chat(...)` extended** to accept a `channel` kwarg. Two call shapes both work:
+  - `@on_chat` (no parens) — registers under the None (default) channel. Backward-compatible with pre-21.5 callers; the existing dashboard chat poller still wires through it.
+  - `@on_chat("widget")` — registers under the named channel. The 21.6 orchestrator looks up the "widget" handler when dispatching a widget conversation.
+  - Two new lookup helpers: `has_chat_handler(channel)` + `get_chat_handler(channel)`. Module-level `_handlers: dict[Optional[str], Callable]` is the registry.
+- **`LightseiEscalate(reason, payload=None)`** — typed exception in `errors.py`. Not a subclass of `LightseiError` on purpose: it's a control-flow signal, not an error. Bot handlers raise it to escalate without an explicit helper call:
+  ```python
+  @lightsei.on_chat("widget")
+  def handle(turn):
+      if "refund" in turn["user_message"].lower():
+          raise lightsei.LightseiEscalate("refund_request")
+      return generate_reply(turn)
+  ```
+  The 21.6 orchestrator catches it explicitly and routes through `/widget-bot/escalate`.
+- **`lightsei.respond(conversation_id, text, *, source_agent=None)`** — POSTs to `/widget-bot/respond`. Used implicitly when an `@on_chat("widget")` handler returns a string; exposed so a bot can post async follow-ups (e.g. "Looking that up…" then later "Here's the answer"). Local capability check + typed error mapping for 403 (`LightseiCapabilityError`); 409 surfaces as a plain `LightseiError` with the code in the message.
+- **`lightsei.escalate(conversation_id, reason, *, payload=None, source_agent=None)`** — POSTs to `/widget-bot/escalate`. Equivalent to raising `LightseiEscalate` from a handler but usable from anywhere (e.g. an async background follow-up that decides to escalate). Same gate / error mapping.
+
+**Backward-compat wrinkle**: the old code in `_chat.py` referenced module-level `_handler` directly (`if _handler is None`). Adding a multi-channel registry means there's no single handler global. Solution: a `_DefaultHandlerProxy` class that exposes `bool(_handler)` + `_handler(...)` semantics for the legacy chat poller, plus an explicit `_default_handler()` accessor for new code. The poller's `_dispatch` switched to the explicit accessor so the proxy stays a thin shim. No public API change.
+
+**Verification**: 14 new backend tests in `backend/tests/test_widget_bot_endpoints.py` + 20 new SDK tests in `sdk/tests/test_widget_chat.py`.
+
+Backend tests cover both endpoints: capability constant in `KNOWN_CAPABILITIES`; respond happy path + capability gate + unknown agent (404) + unknown conversation (404) + cross-workspace conversation (404, tenant isolation) + 409 resolved + operator-owned still allowed (edge case — orchestrator skips the call entirely, but the endpoint itself permits it); escalate happy path with conversation status + escalation row + system message all asserted + capability gate + three idempotency paths (already-escalated, operator_owned, resolved) + cross-workspace conversation.
+
+SDK tests cover: `@on_chat` default form (no parens) registers under None; channel form (`@on_chat("widget")`) registers under "widget"; both forms coexist without collision; re-decorating replaces; `get_chat_handler` returns None for missing channels. `LightseiEscalate` attributes (reason + payload) + default-empty payload + NOT a subclass of `LightseiError`. `respond` happy path with body-shape assertion + local capability refusal (no HTTP) + stale-cache 403 mapped to typed error + 409 mapped to plain `LightseiError` + explicit-source-agent-overrides-init + empty-args raise ValueError + pre-init-raises-clean-error. `escalate` happy path + payload pass-through + local capability refusal + 403 mapped to typed error + empty-args raise ValueError.
+
+Fake HTTP backend (`widget_bot_fake` context manager) modeled on the existing `connector_fake` / `test_basic.fake_backend` patterns — captures POST bodies, serves `/agents/{name}` with configurable capabilities for SDK init, returns configurable status+body on each of the two endpoints. Tests never hit a real server.
+
+Full SDK suite: **140 passed in 36s** (was 120, +20 net new). Full backend suite: **1018 passed in 441s** (was 1004, +14 net new). 0 regressions either side. Known #102 flake didn't fire this run.
+
+**What this unblocks**: 21.6 (widget orchestrator) handler picks up `widget_chat` jobs from the queue, finds the customer-facing bot's `@on_chat("widget")` handler, dispatches it, persists the response via `/widget-bot/respond` (or catches `LightseiEscalate` + routes to `/widget-bot/escalate`). After 21.6 lands, the user-message → bot-reply round trip works end-to-end with a real bot.
 
 ### 2026-05-22 — Phase 21.4 shipped: customer-side widget.js snippet
 

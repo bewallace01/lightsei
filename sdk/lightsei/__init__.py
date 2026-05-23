@@ -32,6 +32,7 @@ from .errors import (
     LightseiCapabilityError,
     LightseiConnectorZoneError,
     LightseiError,
+    LightseiEscalate,
     LightseiPolicyError,
 )
 
@@ -79,10 +80,13 @@ __all__ = [
     "LightseiPolicyError",
     "LightseiCapabilityError",
     "LightseiConnectorZoneError",
+    "LightseiEscalate",
     "TooManyInstancesError",
     "gmail",
     "calendar",
     "drive",
+    "respond",
+    "escalate",
 ]
 
 
@@ -465,6 +469,172 @@ def post_slack(
         return r.json()
     except Exception as e:
         raise LightseiError(f"post_slack returned non-JSON body: {e}") from e
+
+
+def respond(
+    conversation_id: str,
+    text: str,
+    *,
+    source_agent: Optional[str] = None,
+) -> dict[str, Any]:
+    """Phase 21.5: post a bot reply into a widget conversation.
+
+    Used implicitly when an `@on_chat("widget")` handler returns a
+    string — the 21.6 orchestrator calls this on the bot's behalf.
+    Exposed so a bot can post async follow-ups (e.g. "Looking that
+    up…" then later "Here's the answer").
+
+    Raises LightseiCapabilityError if the bot doesn't have the
+    `widget:respond` capability. The customer-facing bot gets this
+    by default; other bots have to be granted it explicitly via
+    `PATCH /agents/{name}/capabilities`.
+
+    Returns `{ok, message_id, conversation_id}` on success. Raises
+    LightseiError on transport failure or non-2xx response.
+    """
+    from ._capabilities import check_capability
+
+    if not conversation_id:
+        raise ValueError("respond requires a conversation_id")
+    if not text:
+        raise ValueError("respond requires a text body")
+    if _client is None or _client._http is None:
+        raise LightseiError(
+            "respond called before lightsei.init() — no HTTP client available"
+        )
+
+    check_capability(_client, "widget:respond")
+
+    src = source_agent or _client.agent_name
+    if not src:
+        raise LightseiError(
+            "respond requires source_agent (set via lightsei.init("
+            "agent_name=...) or pass explicitly)"
+        )
+
+    body: dict[str, Any] = {
+        "source_agent": src,
+        "conversation_id": conversation_id,
+        "text": text,
+    }
+
+    try:
+        r = _client._http.post(
+            "/widget-bot/respond", json=body, timeout=_client.timeout,
+        )
+    except Exception as e:
+        raise LightseiError(f"respond transport error: {e}") from e
+
+    if r.status_code >= 400:
+        # 403 capability_missing → typed LightseiCapabilityError.
+        # 409 conversation_resolved → plain LightseiError with the
+        # error code in the message so caller code can string-match.
+        if r.status_code == 403:
+            try:
+                body_json = r.json()
+            except Exception:
+                body_json = {}
+            detail = body_json.get("detail") if isinstance(body_json, dict) else None
+            if isinstance(detail, dict) and detail.get("error") == "capability_missing":
+                from .errors import LightseiCapabilityError
+                raise LightseiCapabilityError(
+                    capability=str(detail.get("capability") or "widget:respond"),
+                    granted=detail.get("granted") or [],
+                    agent_name=detail.get("agent_name") or src,
+                )
+        raise LightseiError(f"respond returned {r.status_code}: {r.text[:300]}")
+
+    try:
+        return r.json()
+    except Exception as e:
+        raise LightseiError(f"respond returned non-JSON body: {e}") from e
+
+
+def escalate(
+    conversation_id: str,
+    reason: str,
+    *,
+    payload: Optional[dict[str, Any]] = None,
+    source_agent: Optional[str] = None,
+) -> dict[str, Any]:
+    """Phase 21.5: flip a widget conversation to escalated.
+
+    Creates a `widget_escalations` row, marks the conversation
+    status `escalated`, drops a system message into the thread
+    ("This conversation has been handed off to a human."), and
+    surfaces the escalation in the operator inbox (Phase 21.8).
+
+    Two equivalent ways for the bot to escalate from inside an
+    `@on_chat("widget")` handler:
+
+        # Imperative — useful when you want the handler to
+        # continue running after escalating.
+        lightsei.escalate(turn["conversation_id"], "refund_request")
+
+        # Exception-driven — cleaner when escalating short-circuits
+        # the handler.
+        raise lightsei.LightseiEscalate("refund_request",
+                                        payload={"hint": "..."})
+
+    Raises LightseiCapabilityError if the bot doesn't have
+    `widget:escalate`. Idempotent on already-escalated /
+    operator_owned / resolved conversations (the backend
+    short-circuits and returns `noop: true`).
+    """
+    from ._capabilities import check_capability
+
+    if not conversation_id:
+        raise ValueError("escalate requires a conversation_id")
+    if not reason:
+        raise ValueError("escalate requires a reason")
+    if _client is None or _client._http is None:
+        raise LightseiError(
+            "escalate called before lightsei.init() — no HTTP client available"
+        )
+
+    check_capability(_client, "widget:escalate")
+
+    src = source_agent or _client.agent_name
+    if not src:
+        raise LightseiError(
+            "escalate requires source_agent (set via lightsei.init("
+            "agent_name=...) or pass explicitly)"
+        )
+
+    body: dict[str, Any] = {
+        "source_agent": src,
+        "conversation_id": conversation_id,
+        "reason": reason,
+        "payload": payload or {},
+    }
+
+    try:
+        r = _client._http.post(
+            "/widget-bot/escalate", json=body, timeout=_client.timeout,
+        )
+    except Exception as e:
+        raise LightseiError(f"escalate transport error: {e}") from e
+
+    if r.status_code >= 400:
+        if r.status_code == 403:
+            try:
+                body_json = r.json()
+            except Exception:
+                body_json = {}
+            detail = body_json.get("detail") if isinstance(body_json, dict) else None
+            if isinstance(detail, dict) and detail.get("error") == "capability_missing":
+                from .errors import LightseiCapabilityError
+                raise LightseiCapabilityError(
+                    capability=str(detail.get("capability") or "widget:escalate"),
+                    granted=detail.get("granted") or [],
+                    agent_name=detail.get("agent_name") or src,
+                )
+        raise LightseiError(f"escalate returned {r.status_code}: {r.text[:300]}")
+
+    try:
+        return r.json()
+    except Exception as e:
+        raise LightseiError(f"escalate returned non-JSON body: {e}") from e
 
 
 def send_command(
