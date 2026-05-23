@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 22 — TBD. Phase 21 complete 2026-05-23. Parking-lot #64 (deployment cleanup) + #65 (Coral psycopg2 generator fix) + #102 (test flake) + vela-investigation all closed 2026-05-23. New park: #168 — worker heartbeat-loop should stop on terminal status.**
+> **Phase 22 — TBD. Phase 21 complete 2026-05-23. Parking-lot #64 (deployment cleanup) + #65 (Coral psycopg2 generator fix) + #102 (test flake) + #167 (vela investigation) + #168 (worker heartbeat terminal-status defense) all closed 2026-05-23.**
 
 Phase 21 (customer-facing widget) complete: 10 sub-tasks shipped + 21.10 demo artifacts under `examples/p21-demo/`. Customer's end users can now interact with bots through an embeddable widget; operators triage in `/inbox`; Polaris notices escalation patterns + drafts fixes; operator applies + bot self-improves. Same trust-zone + capability model from Phases 16-20 enforces on the customer-facing surface too — a public-zoned bot can't leak data even if an operator misconfigures it.
 
@@ -1335,6 +1335,27 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-23 — Parking-lot #168 closed: worker heartbeat refuses terminal-status updates
+
+Defense-in-depth fix for the bug surfaced by the vela investigation: the worker keeps heartbeating deployment rows even after `status` goes terminal (`failed`/`stopped`). Two-line fix on the backend in `worker_heartbeat`:
+
+```python
+if dep.status in ("failed", "stopped"):
+    raise HTTPException(409, detail={"error": "deployment_terminal", ...})
+```
+
+When the worker's heartbeat loop sees the 409, it should break + stop refreshing. Even if a future worker version forgets to handle the 409 cleanly, the row stops drifting + the audit query in #64 won't be misled again. The 409 detail carries `status` + `desired_state` so worker code can decide whether to clean up (`stopped` is operator-initiated; `failed` may want a backoff retry rather than a hard exit).
+
+**Verification**: 3 new tests in `tests/test_worker_api.py`:
+
+- `test_heartbeat_409_on_failed_status` — claims a deployment, flips status to `failed`, then asserts the follow-up heartbeat returns 409 with `error == "deployment_terminal"` + `status == "failed"`.
+- `test_heartbeat_409_on_stopped_status` — same flow for the `stopped` terminal state.
+- `test_heartbeat_still_advances_on_non_terminal_status` — `running` / `building` rows must still accept heartbeats (the check is scoped to terminal only).
+
+Full backend suite: **1098 passed in 193s** (was 1095, +3 net new). 0 regressions. Known #102 flake didn't fire this run.
+
+**Worker-side follow-up**: the actual worker binary still needs to handle the 409 gracefully (catch it + stop the per-deployment heartbeat task). The backend now refuses the update either way, so prod is protected; the worker change is a polish that makes the worker logs quieter. Park as #169 when picked up.
 
 ### 2026-05-23 — vela investigation closed (follow-up to #64); worker-heartbeat-loop bug parked as #168
 

@@ -3447,10 +3447,35 @@ def worker_heartbeat(
 ) -> dict[str, Any]:
     """Refresh the worker's claim. Returns the current deployment row so the
     worker can see whether `desired_state` flipped (e.g. user clicked stop)
-    without a separate fetch."""
+    without a separate fetch.
+
+    Defense in depth (parking-lot #168): if `dep.status` is terminal
+    (`failed` or `stopped`), refuse the update and return 409 instead
+    of silently refreshing `heartbeat_at`. Surfaced 2026-05-23 during
+    the vela investigation: a worker process had been heartbeating
+    a `failed` deployment row for 4 days because nothing in this
+    endpoint enforced the terminal-status invariant. The worker's
+    heartbeat loop should see the 409 and break itself; if not, at
+    least the row stops drifting + the audit query in #64 won't be
+    misled again."""
     dep = session.get(Deployment, deployment_id)
     if dep is None:
         raise HTTPException(status_code=404, detail="deployment not found")
+    if dep.status in ("failed", "stopped"):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "deployment_terminal",
+                "deployment_id": deployment_id,
+                "status": dep.status,
+                "desired_state": dep.desired_state,
+                "message": (
+                    f"deployment is in terminal status "
+                    f"{dep.status!r}; the worker should stop "
+                    "heartbeating this deployment."
+                ),
+            },
+        )
     dep.heartbeat_at = utcnow()
     session.flush()
     return _serialize_deployment(dep)

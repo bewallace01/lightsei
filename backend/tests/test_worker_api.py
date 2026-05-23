@@ -218,6 +218,86 @@ def test_heartbeat_advances_and_returns_deployment(client, alice):
     assert body["heartbeat_at"] > r1["heartbeat_at"]
 
 
+def test_heartbeat_409_on_failed_status(client, alice):
+    """Defense in depth (parking-lot #168): worker heartbeats against
+    a `failed` deployment row are refused with 409 deployment_terminal.
+    Surfaced during the vela investigation (2026-05-23): a worker had
+    been heartbeating a failed row for 4 days because nothing here
+    enforced the terminal-status invariant."""
+    h = auth_headers(alice["session_token"])
+    dep = _upload(client, h, "term-fail")
+    client.post(
+        "/worker/deployments/claim?worker_id=w1", headers=WORKER_HEADERS,
+    )
+
+    # Worker reports the bot crashed.
+    r_status = client.post(
+        f"/worker/deployments/{dep['id']}/status",
+        headers=WORKER_HEADERS,
+        json={"status": "failed", "error": "bundle fetch 500"},
+    )
+    assert r_status.status_code == 200
+
+    # Now a follow-up heartbeat should be refused.
+    r = client.post(
+        f"/worker/deployments/{dep['id']}/heartbeat",
+        headers=WORKER_HEADERS,
+    )
+    assert r.status_code == 409
+    detail = r.json()["detail"]
+    assert detail["error"] == "deployment_terminal"
+    assert detail["status"] == "failed"
+    assert detail["deployment_id"] == dep["id"]
+
+
+def test_heartbeat_409_on_stopped_status(client, alice):
+    """Same defense-in-depth for the `stopped` terminal state."""
+    h = auth_headers(alice["session_token"])
+    dep = _upload(client, h, "term-stop")
+    client.post(
+        "/worker/deployments/claim?worker_id=w1", headers=WORKER_HEADERS,
+    )
+
+    r_status = client.post(
+        f"/worker/deployments/{dep['id']}/status",
+        headers=WORKER_HEADERS,
+        json={"status": "stopped"},
+    )
+    assert r_status.status_code == 200
+
+    r = client.post(
+        f"/worker/deployments/{dep['id']}/heartbeat",
+        headers=WORKER_HEADERS,
+    )
+    assert r.status_code == 409
+    assert r.json()["detail"]["status"] == "stopped"
+
+
+def test_heartbeat_still_advances_on_non_terminal_status(client, alice):
+    """Building / running / queued (non-terminal) rows MUST still
+    accept heartbeats — the defense-in-depth check is scoped to
+    `failed` + `stopped` only."""
+    h = auth_headers(alice["session_token"])
+    dep = _upload(client, h, "non-term")
+    client.post(
+        "/worker/deployments/claim?worker_id=w1", headers=WORKER_HEADERS,
+    )
+
+    # Promote to running.
+    client.post(
+        f"/worker/deployments/{dep['id']}/status",
+        headers=WORKER_HEADERS,
+        json={"status": "running"},
+    )
+
+    r = client.post(
+        f"/worker/deployments/{dep['id']}/heartbeat",
+        headers=WORKER_HEADERS,
+    )
+    assert r.status_code == 200
+    assert r.json()["status"] == "running"
+
+
 # ---------- logs ----------
 
 def test_log_append_writes_lines(client, alice):
