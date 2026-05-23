@@ -7,13 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 21.3 — Widget iframe app. 21.1 + 21.2 shipped 2026-05-22.**
+> **Phase 21.4 — Customer-side widget.js snippet. 21.1-21.3 shipped 2026-05-22.**
 
 Phase 21 spec locked 2026-05-21. Design choices: iframe-isolated widget; anonymous-only conversations in v1; one customer-facing bot per workspace via `@lightsei.on_chat("widget")`; top-level `/inbox` route. 10 sub-tasks (21.1-21.10).
 
-21.1 (schema) + 21.2 (public ingestion + poll + config endpoints) shipped 2026-05-22; backend at **1004 passing** (+42 across 21.1 + 21.2).
+21.1 (schema) + 21.2 (public ingestion + poll + config endpoints) + 21.3 (iframe app) shipped 2026-05-22; backend at **1004 passing**; dashboard `next build` adds `/widget/[publicId]` as a 4.17 kB dynamic route.
 
-NOW is 21.3 — iframe app at `app.lightsei.com/widget/{public_id}`. Next.js page that renders the chat UI inside the iframe: header (bot display name), conversation pane, input, "Anonymous conversation. Powered by Lightsei." footer. Reads conversation_id from localStorage keyed on workspace public id. POSTs to /messages on send + polls /conversations/{id} for updates. Trust-zone disclosure modal accessible from a header link.
+NOW is 21.4 — customer-side widget.js. Tiny ES module hosted at `app.lightsei.com/widget.js`. Reads `data-workspace` from its own script tag, mounts a fixed-position iframe pointing at `app.lightsei.com/widget/{public_id}`, exposes `window.Lightsei.{open, close, toggle}`, handles iframe sizing via the `postMessage` channel the iframe already emits.
 
 Phase 20 (integration breadth) shipped 2026-05-20/21: connector schema (20.1), Google OAuth install flow (20.2), three real connectors — Gmail / Calendar / Drive (20.3-20.5), bot-callable endpoint with capability + zone gates (20.6), SDK namespaced helpers (20.7), dashboard /integrations index + per-connector cards (20.8). 20.9 was a coverage rollup satisfied incrementally. 20.10 demo artifacts under `examples/p20-demo/`. Backend at **962 passing** (+126 across Phase 20; started at 836). SDK at **120 passing** (+19 from 20.7).
 
@@ -777,7 +777,7 @@ Endpoint persists the user message + enqueues a `widget_chat` job (existing `gen
 
 `GET /widget/{workspace_public_id}/conversations/{conversation_id}` for the widget to poll. Returns the conversation's messages newer than a `?since=<message_id>` cursor. Polling cadence: ~1s while widget is visible, 5s when minimized.
 
-### 21.3 — Widget iframe app
+### 21.3 — Widget iframe app ✅ shipped 2026-05-22
 
 New Next.js route `dashboard/app/widget/[workspaceId]/page.tsx` (served at `app.lightsei.com/widget/{public_id}`). Renders the chat UI inside the iframe:
 
@@ -1331,6 +1331,36 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-22 — Phase 21.3 shipped: widget iframe app
+
+Pure dashboard work. New route `dashboard/app/widget/[publicId]/page.tsx` renders the chat UI that the Phase 21.4 customer-side snippet will iframe into customer products. End user never sees Lightsei dashboard chrome — `Header.tsx` now bails on any `/widget/*` path so the iframe doesn't double up navigation onto someone else's site.
+
+**Surface**:
+
+- Header strip: bot display name (left), `Start over` + `About this bot` actions (right). Subtitle line cycles between `Loading…` → `Online` → `Bot not configured` → `A human has joined this conversation` (operator_owned status) → `Handing off to a human…` (escalated status).
+- Conversation pane: chronological role-tinted bubbles. User messages right-aligned + indigo background; bot left + neutral gray; operator left + emerald with a `Human · ` prefix; system left + amber, italic. Empty state surfaces `Hi! Ask me anything about <bot.description>` when there are no messages yet. Auto-scrolls to bottom on every message append.
+- Input: textarea + Send button at the bottom. Enter sends, Shift+Enter newlines. Disabled while config is loading or when no bot is configured.
+- Footer: small `Anonymous conversation.` left + `Powered by Lightsei` link right (the link is the v1 free-plan attribution that a future paid-plan toggle removes).
+- About modal: `Start over` button on the header clears the conversation and lets the user open a fresh thread. `About this bot` opens a centered modal with: bot description, trust-zone copy (a per-zone plain-English explanation from `ZONE_DESCRIPTIONS`), and a `Conversation` section reminding the end user the conversation is anonymous + that a human may join.
+
+**State**:
+
+- `localStorage["lightsei.widget.conv.{publicId}"]` carries the conversation id across page reloads on the same customer site. Cleared on `Start over`.
+- `localStorage["lightsei.widget.anon.{publicId}"]` is a per-public-id anonymous id — 128 random bits, base36-encoded, ~24 chars. Local-only; the server uses it to group the same end user's anonymous conversations in the operator inbox. Generated lazily on first widget load.
+- `seenMessageIdRef` tracks the highest message id rendered so the poll request can use the `?since=` cursor — only-deltas-rendered pattern.
+
+**Backend integration**: hits the three Phase 21.2 public endpoints exclusively. `fetch(..., {credentials: "omit"})` on every call so no Lightsei dashboard cookies travel to the customer-facing surface. Optimistic-render on send: user's message lands immediately with a synthetic negative id, then gets reassigned to the real id when the POST resolves; rolled back on failure with the input text restored so the user can retry.
+
+Polling cadence: 1.5s interval while the conversation has an id. First fetch on conversation-id-appears (so existing-conversation reloads paint immediately). 404 from poll means the conversation was deleted server-side — clear localStorage and reset to a fresh-thread state. The 1s-with-jitter-up-to-5s-when-minimized cadence from the spec is deferred to a polish pass (the constant interval works fine for the v1 demo).
+
+**postMessage to parent**: a `ResizeObserver` on `document.body` posts `{type: "lightsei:widget-resize", height: <px>}` to the parent window whenever the iframe content reflows. The 21.4 snippet will consume this and set `iframe.style.height` to match — no internal scrollbar in the iframe. Origin lock is `*` for the dev surface; the snippet that consumes the message in 21.4 will verify the `event.origin` matches `app.lightsei.com`.
+
+**Error surfaces**: config-load failure renders a rose-tinted error banner in the conversation pane + disables the textarea. Send failure rolls back the optimistic message + surfaces the rose banner above the input + restores the input text. 429 from rate limit is mapped to a friendly `Slow down — too many messages.` message instead of the raw error.
+
+**Verification**: `npx tsc --noEmit` clean. `npx next build` adds `/widget/[publicId]` as a 4.17 kB dynamic route (server-rendered on demand because the public id is a path param). No regressions on existing pages.
+
+**What this unblocks**: 21.4 (customer-side snippet) injects an iframe pointing at this URL + listens for the `lightsei:widget-resize` postMessage to size it. 21.6 (widget orchestrator) lights up the bot reply path so user-message → bot-message round trips actually complete. 21.7 (widget settings page) gives the operator a "Test it now" link that opens this page directly to verify the bot is wired up before they paste the snippet onto a customer site.
 
 ### 2026-05-22 — Phase 21.2 shipped: public widget chat surface
 

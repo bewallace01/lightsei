@@ -317,6 +317,14 @@ export default function Header() {
     return null;
   }
 
+  // Phase 21.3: the widget iframe at /widget/{public_id} is loaded
+  // into the customer's site. It's an anonymous end-user surface,
+  // not the Lightsei app — don't render the dashboard header into
+  // someone else's product.
+  if ((pathname ?? "").startsWith("/widget/")) {
+    return null;
+  }
+
   const onLogout = async () => {
     try {
       await apiLogout();
