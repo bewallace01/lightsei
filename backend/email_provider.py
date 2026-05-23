@@ -14,6 +14,12 @@ Configurable via:
     `noreply@lightsei.com`. Domain has to be verified on Resend for
     sends to land in inboxes; default keeps everything tied to one
     DNS-managed domain.
+  - `LIGHTSEI_EMAIL_REQUIRE_LIVE`: prod safety switch. When truthy,
+    a missing API key is a hard error instead of a silent fall into
+    capture mode. Set on prod so a misconfigured deploy surfaces
+    immediately rather than swallowing every magic-link send. Tests
+    can still force capture via LIGHTSEI_EMAIL_FAKE_CAPTURE, which
+    wins over REQUIRE_LIVE.
 
 No retries on send failure in v1. A flaky email send means the user
 re-triggers the magic-link request from the dashboard — preferable
@@ -52,9 +58,25 @@ def _from_address() -> str:
 def _is_live() -> bool:
     """True when the module is wired to Resend; False when in capture
     mode. Tests can flip this off explicitly via env var override."""
-    return bool(_api_key()) and os.environ.get(
-        "LIGHTSEI_EMAIL_FAKE_CAPTURE", ""
-    ) not in {"1", "true", "yes"}
+    return bool(_api_key()) and not _fake_capture_forced()
+
+
+def _fake_capture_forced() -> bool:
+    return os.environ.get("LIGHTSEI_EMAIL_FAKE_CAPTURE", "") in {
+        "1", "true", "yes",
+    }
+
+
+def _require_live() -> bool:
+    return os.environ.get("LIGHTSEI_EMAIL_REQUIRE_LIVE", "") in {
+        "1", "true", "yes",
+    }
+
+
+class EmailNotConfiguredError(RuntimeError):
+    """Raised when send is attempted with no API key while
+    LIGHTSEI_EMAIL_REQUIRE_LIVE is on. Distinct type so observability
+    can flag it separately from generic transport / Resend failures."""
 
 
 def captured_emails() -> list[dict[str, Any]]:
@@ -127,6 +149,19 @@ def send_magic_link(
     }
 
     if not _is_live():
+        # FAKE_CAPTURE wins unconditionally: tests + local dev rely on
+        # it to stay network-free even on a prod-configured deploy.
+        if not _fake_capture_forced() and _require_live():
+            logger.error(
+                "email: LIGHTSEI_EMAIL_REQUIRE_LIVE=true but "
+                "LIGHTSEI_RESEND_API_KEY is missing — refusing to "
+                "silently capture send to %s",
+                email,
+            )
+            raise EmailNotConfiguredError(
+                "LIGHTSEI_RESEND_API_KEY is required when "
+                "LIGHTSEI_EMAIL_REQUIRE_LIVE is set"
+            )
         # Capture mode: short-circuit before the network call. Used by
         # tests + local dev (no LIGHTSEI_RESEND_API_KEY set). The
         # captured entry preserves the magic_url so tests can simulate

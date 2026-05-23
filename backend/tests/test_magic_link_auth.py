@@ -76,6 +76,35 @@ def test_send_magic_link_capture_mode_when_env_var_forces_fake(monkeypatch):
     assert len(ep.captured_emails()) == 1
 
 
+def test_send_magic_link_raises_when_require_live_set_and_key_missing(monkeypatch):
+    """LIGHTSEI_EMAIL_REQUIRE_LIVE=true + no API key + no FAKE_CAPTURE
+    → raise EmailNotConfiguredError. Prevents the prod misconfiguration
+    where a missing key silently captures every send while the
+    /auth/magic-link/request endpoint keeps returning 200."""
+    monkeypatch.setenv("LIGHTSEI_EMAIL_REQUIRE_LIVE", "true")
+    monkeypatch.delenv("LIGHTSEI_RESEND_API_KEY", raising=False)
+    monkeypatch.delenv("LIGHTSEI_EMAIL_FAKE_CAPTURE", raising=False)
+    with pytest.raises(ep.EmailNotConfiguredError):
+        ep.send_magic_link(
+            email="c@example.com", token="t-3",
+            dashboard_url="http://x.test",
+        )
+    assert ep.captured_emails() == []
+
+
+def test_send_magic_link_fake_capture_wins_over_require_live(monkeypatch):
+    """When both REQUIRE_LIVE and FAKE_CAPTURE are set, FAKE_CAPTURE
+    wins — tests can force capture even against a prod-shaped env."""
+    monkeypatch.setenv("LIGHTSEI_EMAIL_REQUIRE_LIVE", "true")
+    monkeypatch.setenv("LIGHTSEI_EMAIL_FAKE_CAPTURE", "1")
+    monkeypatch.delenv("LIGHTSEI_RESEND_API_KEY", raising=False)
+    ep.send_magic_link(
+        email="d@example.com", token="t-4",
+        dashboard_url="http://x.test",
+    )
+    assert len(ep.captured_emails()) == 1
+
+
 def test_dashboard_url_trailing_slash_normalized():
     ep.send_magic_link(
         email="alice@example.com",
