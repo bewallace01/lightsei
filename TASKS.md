@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 22 — TBD. Phase 21 complete 2026-05-23. Parking-lot #64 (deployment cleanup) + #65 (Coral psycopg2 generator fix) + #102 (test flake) all closed 2026-05-23.**
+> **Phase 22 — TBD. Phase 21 complete 2026-05-23. Parking-lot #64 (deployment cleanup) + #65 (Coral psycopg2 generator fix) + #102 (test flake) + vela-investigation all closed 2026-05-23. New park: #168 — worker heartbeat-loop should stop on terminal status.**
 
 Phase 21 (customer-facing widget) complete: 10 sub-tasks shipped + 21.10 demo artifacts under `examples/p21-demo/`. Customer's end users can now interact with bots through an embeddable widget; operators triage in `/inbox`; Polaris notices escalation patterns + drafts fixes; operator applies + bot self-improves. Same trust-zone + capability model from Phases 16-20 enforces on the customer-facing surface too — a public-zoned bot can't leak data even if an operator misconfigures it.
 
@@ -1335,6 +1335,31 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-23 — vela investigation closed (follow-up to #64); worker-heartbeat-loop bug parked as #168
+
+The bot left alone during the #64 audit: vela's deployment row was `status=failed` (bundle fetch 500 against the old `beacon-backend.rail...` URL from the Beacon→Lightsei rename) but `heartbeat_at` updating today.
+
+**Diagnosis** via two cross-table queries:
+
+- `agent_instances` (the SDK-side per-process registry from `lightsei.init()`): vela has been alive on host `d99741f64d7d` pid 153 since 2026-05-19 00:41, heartbeating every few minutes. The bot is genuinely running.
+- `runs` count: 143 vela runs in the last 24h. Bot is doing real work.
+- `deployments` row: marked `failed` on 2026-05-19 22:44 with the old-URL bundle-fetch error. **The status is stale; reality is the bot's been running cleanly for 4 days.**
+- Why `heartbeat_at` still updates on a failed row: `POST /worker/deployments/{id}/heartbeat` in `backend/main.py:3442` sets `dep.heartbeat_at = utcnow()` unconditionally regardless of `dep.status`. So the worker's heartbeat loop keeps ticking the row even after status went terminal.
+
+**Resolution**: flipped vela's status to `running` + cleared the stale error via direct SQL on prod, transaction-wrapped:
+
+```sql
+BEGIN;
+UPDATE deployments
+SET status = 'running', error = NULL, updated_at = now()
+WHERE id = '09dfd656-7f3c-483f-81ca-ea6cf3dc43c8';
+COMMIT;
+```
+
+Now the dashboard surface accurately reflects reality (bot's running, no error). One row touched, transaction-verified, no cascade.
+
+**Parking-lot #168 added**: worker keeps heartbeating after status goes terminal. The simpler / safer fix is defense-in-depth on the backend side — `POST /worker/deployments/{id}/heartbeat` should refuse to update `heartbeat_at` when `dep.status in ('failed', 'stopped')`. Returns 409 or 410 so the worker's loop sees the no-update + can break itself. Time-boxable; worth ~30 min when picked up. Until then, the `desired_state` flip pattern from #64 stays the right cleanup tool — flipping `desired_state=stopped` is what actually pauses the worker; the misleading `status=failed` is cosmetic.
 
 ### 2026-05-23 — Parking-lot #64 closed: prod deployment audit + 6 stale deploys flipped to stopped
 
