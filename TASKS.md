@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 22 — TBD. Phase 21 complete 2026-05-23. Parking-lot #65 (generator quality / Coral psycopg2) closed 2026-05-23.**
+> **Phase 22 — TBD. Phase 21 complete 2026-05-23. Parking-lot #65 (generator quality / Coral psycopg2) + #102 (test flake) closed 2026-05-23.**
 
 Phase 21 (customer-facing widget) complete: 10 sub-tasks shipped + 21.10 demo artifacts under `examples/p21-demo/`. Customer's end users can now interact with bots through an embeddable widget; operators triage in `/inbox`; Polaris notices escalation patterns + drafts fixes; operator applies + bot self-improves. Same trust-zone + capability model from Phases 16-20 enforces on the customer-facing surface too — a public-zoned bot can't leak data even if an operator misconfigures it.
 
@@ -1335,6 +1335,16 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-23 — Parking-lot #102 closed: test_app_mention flake (race against jobs runner)
+
+Root cause: the FastAPI TestClient's `__enter__` triggers `on_startup`, which calls `jobs.start_runner()` to launch the background asyncio task that polls `generation_jobs` for `status='pending'` rows. The slack_orchestrator handler is registered for `kind='slack_orchestration'`. The test inserted a `slack_orchestration` job via the `/slack/events` POST + immediately queried for `status == "pending"`. If the runner picked the row up between the POST and the query (race fired ~1/2 full sweeps; almost never on the test-file-alone run because there's not enough wall-clock for the runner to claim), status was already `'running'` (or `'success'`/`'failed'` once the handler completed). Test failed on the `assert status == "pending"`.
+
+**Fix**: removed the `status` column from the SELECT and dropped the `status == "pending"` assertion in `test_app_mention_enqueues_orchestration_job`. The test's intent is "the enqueue path persisted the right row" — kind, workspace_id, and the payload's slack_team_id / channel_id / text / slack_event_id are all preserved as assertions. Runner behavior (the handler succeeding or being skipped due to missing ANTHROPIC_API_KEY) is covered by `test_slack_orchestrator`. Added a multi-line comment block on the test explaining the race so a future reader doesn't re-introduce the racy assertion.
+
+Considered fixing the parallel risk in `test_widget_endpoints.py::test_post_message_enqueues_widget_chat_job` (same shape — asserts `job.status == "pending"` on a `widget_chat` row whose handler is registered). Decided to leave it alone per CLAUDE.md "don't fix what isn't broken" — that test hasn't flaked yet (only one full-sweep run since it was added), and the widget handler is fast/deterministic enough that the race may not fire in practice. If it flakes later, same one-line fix.
+
+**Verification**: tests/test_slack_events.py runs cleanly 3× back-to-back (file-only, where the flake almost never fired anyway). Full backend sweep: **1095 passed in 193s**, 0 failures, no #102 flake. Single sweep doesn't prove the flake is statistically gone, but the reasoning is solid: the racy assertion is removed; the test now asserts only on values that don't change after the row is created.
 
 ### 2026-05-23 — Parking-lot #65 closed: generator-quality fix for Coral psycopg2
 

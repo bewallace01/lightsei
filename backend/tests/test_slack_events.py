@@ -325,15 +325,22 @@ def test_app_mention_enqueues_orchestration_job(client, alice):
     assert body["type"] == "app_mention"
     job_id = body["job_id"]
 
-    # Inspect the row.
+    # Inspect the row. Deliberately don't assert on `status` here:
+    # the FastAPI TestClient's startup hook starts the in-process
+    # jobs runner, which is registered to handle `slack_orchestration`
+    # jobs and races this assertion. Sometimes the runner picks the
+    # row up + flips status to 'running'/'success'/'failed' before the
+    # query lands — caused this test to flake intermittently for ~2
+    # weeks (parking-lot #102). The test's intent is "the enqueue
+    # path persisted the right row"; runner behavior is covered by
+    # test_slack_orchestrator.
     with session_scope() as s:
         row = s.execute(
-            text("SELECT kind, status, workspace_id, request_payload FROM generation_jobs WHERE id = :id"),
+            text("SELECT kind, workspace_id, request_payload FROM generation_jobs WHERE id = :id"),
             {"id": job_id},
         ).mappings().first()
         assert row is not None
         assert row["kind"] == "slack_orchestration"
-        assert row["status"] == "pending"
         assert row["workspace_id"] == alice["workspace"]["id"]
         payload = row["request_payload"]
         assert payload["slack_team_id"] == "T_TEST"
