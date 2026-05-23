@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 22 — TBD. Phase 21 complete 2026-05-23. Parking-lot #65 (generator quality / Coral psycopg2) + #102 (test flake) closed 2026-05-23.**
+> **Phase 22 — TBD. Phase 21 complete 2026-05-23. Parking-lot #64 (deployment cleanup) + #65 (Coral psycopg2 generator fix) + #102 (test flake) all closed 2026-05-23.**
 
 Phase 21 (customer-facing widget) complete: 10 sub-tasks shipped + 21.10 demo artifacts under `examples/p21-demo/`. Customer's end users can now interact with bots through an embeddable widget; operators triage in `/inbox`; Polaris notices escalation patterns + drafts fixes; operator applies + bot self-improves. Same trust-zone + capability model from Phases 16-20 enforces on the customer-facing surface too — a public-zoned bot can't leak data even if an operator misconfigures it.
 
@@ -1335,6 +1335,38 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-23 — Parking-lot #64 closed: prod deployment audit + 6 stale deploys flipped to stopped
+
+Audited the prod `deployments` table via direct psql (Railway CLI → `LIGHTSEI_DATABASE_URL` from the lightsei-backend service variables). 55 deployment rows across two workspaces:
+
+- **Bailey's Agent Monitor (a87696fa)**: 12 distinct bots, 51 deployment rows. 8 actively running (heartbeating today): antares, argus, cassiopeia, polaris, procyon, sirius, spica, vega. 1 cleanly stopped: demo-deploy. 2 stale-failed with desired_state=running: atlas + hermes (both `rc=-15` SIGTERM, last heartbeat 2026-05-06 — 17 days dead, likely killed during the Phase 16 worker-investigation cleanup in #63). 1 weird: vela (status=failed with bundle-fetch 500 from 2026-05-19, but `heartbeat_at` updates alongside the healthy bots — left alone pending investigation; could be a stale-status flag the worker doesn't clear on retry-success).
+- **stripe-smoke-1779072629 (f43f0f71)**: 4 bots (vega, rigel, hermes, polaris), all `failed` with `rc=1` from 2026-05-19. This is the Coral psycopg2 crash from #65 — workspace is a Stripe-billing smoke-test workspace that landed bots via team-from-readme then never ran them.
+
+Applied 6-row UPDATE inside a transaction:
+
+```sql
+BEGIN;
+UPDATE deployments
+SET desired_state = 'stopped', updated_at = now()
+WHERE id IN (
+  '...atlas (a87696fa)',
+  '...hermes (a87696fa)',
+  '...hermes (stripe-smoke)',
+  '...polaris (stripe-smoke)',
+  '...rigel (stripe-smoke)',
+  '...vega (stripe-smoke)'
+);
+COMMIT;
+```
+
+Used explicit ID lists rather than status+state predicates so the UPDATE was surgical. Verified post-state: 6 rows moved from `failed/running` (34 → 28) to `failed/stopped` (1 → 7). Math matches.
+
+**The remaining 28 `failed/running` rows are historical superseded deployments** in Bailey's workspace — older re-deploys overwritten by newer running ones (e.g. polaris has 11 historical deployment rows; only the most-recent matters for worker claiming). Worker doesn't try to claim them because it dispatches on most-recent-per-(workspace, agent_name). They're noise in the `/deployments` page but not active load. Pruning is a separate housekeeping task; leaving them for now.
+
+**Left alone explicitly**: vela (the weird one) — needs root-cause investigation before declaring it stopped. Stripe-smoke workspace itself stays (just the bots' desired-state flipped); operator can delete the workspace entirely as a follow-up if they want.
+
+No code changed — DB-only cleanup. Audit + UPDATE both done from `/Users/baileywallace/Desktop/Beacon/Beacon` via the Railway CLI auth Bailey refreshed mid-session.
 
 ### 2026-05-23 — Parking-lot #102 closed: test_app_mention flake (race against jobs runner)
 
