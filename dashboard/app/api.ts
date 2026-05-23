@@ -1934,3 +1934,37 @@ export async function disconnectConnector(
     { method: "DELETE" },
   )) as { status: string; connector_type: string; revoked_at: string };
 }
+
+
+// ---------- Phase 21.7: widget settings helpers ---------- //
+
+export type WidgetAvailableAgent = {
+  name: string;
+  description: string | null;
+  sensitivity_level: SensitivityLevel;
+  has_widget_capabilities: boolean;
+};
+
+export type WidgetSettings = {
+  widget_public_id: string;
+  customer_facing_agent_name: string | null;
+  allowed_widget_origins: string[];
+  available_agents: WidgetAvailableAgent[];
+};
+
+export async function fetchWidgetSettings(): Promise<WidgetSettings> {
+  return (await authedJson(
+    "/workspaces/me/widget-settings",
+  )) as WidgetSettings;
+}
+
+export async function patchWidgetSettings(patch: {
+  customer_facing_agent_name?: string | null;
+  allowed_widget_origins?: string[];
+}): Promise<WidgetSettings> {
+  return (await authedJson("/workspaces/me/widget-settings", {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(patch),
+  })) as WidgetSettings;
+}

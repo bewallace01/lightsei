@@ -7,13 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 21.7 — Widget settings page. 21.1-21.5 shipped 2026-05-22; 21.6 shipped 2026-05-23.**
+> **Phase 21.8 — Operator inbox (`/inbox`). 21.1-21.5 shipped 2026-05-22; 21.6 + 21.7 shipped 2026-05-23.**
 
 Phase 21 spec locked 2026-05-21. Design choices: iframe-isolated widget; anonymous-only conversations in v1; one customer-facing bot per workspace via `@lightsei.on_chat("widget")`; top-level `/inbox` route. 10 sub-tasks (21.1-21.10).
 
-21.1-21.5 shipped 2026-05-22; 21.6 shipped 2026-05-23; backend at **1028 passing** (+10 from 21.6); SDK at **150 passing** (+10 from 21.6). User-message → bot-reply round trip now works end-to-end (modulo the operator picking a bot via the 21.7 settings page).
+21.1-21.7 shipped; backend at **1042 passing** (+14 from 21.7); SDK at **150 passing**. An operator can now wire up the widget end-to-end through the dashboard: pick the customer-facing bot (auto-grants capabilities), set the allowed-origins list, copy the snippet, paste on the customer site — all without a single Python or DB poke.
 
-NOW is 21.7 — dashboard `/widget-settings` page. Operator picks the customer-facing bot (dropdown of deployed agents), edits the `allowed_widget_origins` allowlist, sees a copyable snippet pre-filled with the workspace's `widget_public_id` (minted on first visit via the 21.5 `ensure_widget_public_id` helper). PATCH `/workspaces/me/widget-settings` + GET `/workspaces/me/widget-settings` backend endpoints. "Test it now" link opens the workspace's own widget at `/widget/{public_id}` for the operator to play with before pasting on a customer site.
+NOW is 21.8 — top-level `/inbox` dashboard route. Two-column list+thread view. Filters (open / escalated / operator-owned / resolved). Operator can take over conversations (pauses bot), reply directly, mark resolved. Backend endpoints: `GET /workspaces/me/inbox` (list + filter), `GET /workspaces/me/inbox/{conversation_id}` (thread), `POST /workspaces/me/inbox/{conversation_id}/take-over`, `POST /workspaces/me/inbox/{conversation_id}/messages`, `POST /workspaces/me/inbox/{conversation_id}/resolve`.
 
 Phase 20 (integration breadth) shipped 2026-05-20/21: connector schema (20.1), Google OAuth install flow (20.2), three real connectors — Gmail / Calendar / Drive (20.3-20.5), bot-callable endpoint with capability + zone gates (20.6), SDK namespaced helpers (20.7), dashboard /integrations index + per-connector cards (20.8). 20.9 was a coverage rollup satisfied incrementally. 20.10 demo artifacts under `examples/p20-demo/`. Backend at **962 passing** (+126 across Phase 20; started at 836). SDK at **120 passing** (+19 from 20.7).
 
@@ -832,7 +832,7 @@ New handler in `backend/jobs.py` for `kind='widget_chat'`. Pure module `backend/
 
 Error path: if the bot's handler throws an uncaught exception, persist a generic "Something went wrong on our end — escalating to a human" + create an escalation row with reason `bot_crash`.
 
-### 21.7 — Workspace settings UI (widget config)
+### 21.7 — Workspace settings UI (widget config) ✅ shipped 2026-05-23
 
 New dashboard page `dashboard/app/widget-settings/page.tsx` (linked from `/integrations` and Header nav under "Integrations" group). Fields:
 
@@ -1331,6 +1331,33 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-23 — Phase 21.7 shipped: widget settings page
+
+Operator-facing surface for wiring up the widget end-to-end through the dashboard.
+
+**Backend additions** (`backend/main.py`):
+
+- `GET /workspaces/me/widget-settings`: returns `{widget_public_id, customer_facing_agent_name, allowed_widget_origins, available_agents}`. Mints + persists `widget_public_id` on first call via `ensure_widget_public_id` from 21.2 (idempotent — second GET returns the same id). `available_agents` is every non-`lightsei.*` agent in the workspace with `{name, description, sensitivity_level, has_widget_capabilities}`. The boolean is `true` when the agent already has both `widget:respond` + `widget:escalate` granted, so the dropdown can render a "ready" indicator on configured bots.
+- `PATCH /workspaces/me/widget-settings`: body `{customer_facing_agent_name?, allowed_widget_origins?}`. At least one field required (422 otherwise). **Customer-facing-bot update** validates the agent exists in this workspace (404 with `agent_not_found` if not — defense against typos + tenant isolation). When the operator picks a bot, the PATCH **auto-grants** both `widget:respond` + `widget:escalate` capabilities if missing. The reasoning: operators typically pick a bot without thinking about capabilities; silently adding them avoids the "I picked a bot but it can't answer" failure mode. Operators can still revoke via `PATCH /agents/{name}/capabilities` if they explicitly don't want this bot to use the widget. Passing `null` clears the pointer. **Origin update** dedups, strips, and per-entry validates via `_validate_widget_origin`: must start with `https://` (or `http://localhost` for dev), must NOT include a path, query, or fragment, must be ≤ 256 chars. Errors surface as 422 `invalid_widget_origins` with a per-entry `errors` array so the operator can fix all entries in one pass rather than fix-and-retry.
+
+**Dashboard additions** (`dashboard/app/widget-settings/page.tsx`): three sections.
+
+- **Bot picker**: dropdown of `available_agents`, each labeled `name · sensitivity_level · ready` (the "ready" suffix appears when `has_widget_capabilities` is true). Picking auto-saves via PATCH; bot zone surfaces as a sensitivity chip below the dropdown.
+- **Allowed origins**: textarea (one URL per line — more natural than comma-separated for URLs which don't have commas). `Save origins` button does a full-replace PATCH. Per-entry errors from a 422 response render inline as a list under the textarea (`<code>https://bad-origin/path</code>: must not include a path, query string, or fragment`).
+- **Embed snippet**: pre-filled `<script src="${dashboard_origin}/widget.js" data-workspace="{public_id}" async></script>`. `Copy snippet` button copies to clipboard. `Test it now →` link opens `/widget/{public_id}` in a new tab so the operator can play with the bot before pasting on a customer site. Helper text reminds the operator to add their current dashboard origin to the allowlist first, otherwise the preview will surface a 403.
+
+**Dashboard supporting changes**:
+- `api.ts`: `fetchWidgetSettings()` + `patchWidgetSettings({customer_facing_agent_name?, allowed_widget_origins?})` helpers + the `WidgetSettings` + `WidgetAvailableAgent` types.
+- `Header.tsx`: new `widget` entry in the Integrations nav group between `all integrations` and `slack`.
+
+**Verification**: 14 new backend tests in `backend/tests/test_widget_settings_endpoints.py` cover GET (mints public id on first call + idempotent on second; surfaces available agents with the `has_widget_capabilities` flag; hides `lightsei.*` system agents; returns persisted config when set), PATCH (sets bot + auto-grants both capabilities; clears bot to null; 404 on unknown agent; accepts valid origins including `localhost:PORT` + ports + multiple hosts; dedups + strips whitespace; rejects non-`https`/non-`localhost` origins; rejects origins with paths; reports ALL invalid entries in one 422 with per-entry errors; empty origins list clears; rejects empty PATCH body; tenant isolation — workspace A can't designate workspace B's bot).
+
+`npx tsc --noEmit` clean. `npx next build` adds `/widget-settings` as a 3.99 kB static route + keeps `/widget/[publicId]` at 4.17 kB dynamic. No regressions on the existing 27 routes.
+
+Full backend suite: **1042 passed in 191s** (was 1028, +14 net new). 0 regressions. Known #102 flake didn't fire this run.
+
+**What this unblocks**: 21.8 (operator inbox) is the next operator-facing surface. After an operator wires up the widget here in 21.7 + customers start asking questions through it, the inbox is where the operator triages escalations and takes over conversations the bot couldn't handle. After 21.8 the widget surface is fully usable end-to-end. 21.9 (Polaris incident-response) is the polish layer that turns repeated escalations into operator-applyable bot improvements.
 
 ### 2026-05-23 — Phase 21.6 shipped: widget chat orchestrator + SDK bridge
 

@@ -6493,6 +6493,216 @@ def widget_bot_escalate(
     }
 
 
+# ---------- Phase 21.7: operator-facing widget settings ---------- #
+
+
+# Capabilities the customer-facing bot needs to participate in
+# widget chat. Auto-granted on PATCH when an operator designates
+# the bot — having the bot picked but unable to reply would be
+# a confusing failure mode.
+_WIDGET_AUTO_GRANT_CAPABILITIES: tuple[str, ...] = (
+    "widget:respond",
+    "widget:escalate",
+)
+
+
+def _validate_widget_origin(origin: str) -> Optional[str]:
+    """Return an error message if `origin` isn't a valid widget
+    allowlist entry; None if it's fine. Operator-facing copy."""
+    if not isinstance(origin, str):
+        return "must be a string"
+    origin = origin.strip()
+    if not origin:
+        return "must not be empty"
+    if len(origin) > 256:
+        return "must be 256 characters or fewer"
+    if not (origin.startswith("https://") or origin.startswith("http://localhost")):
+        return (
+            "must start with 'https://' (or 'http://localhost' for "
+            "local development)"
+        )
+    # Reject paths / query / fragment — the snippet runs on the
+    # customer's site and the browser only sends origin (scheme +
+    # host[:port]) in the Origin header.
+    rest = origin.split("://", 1)[1]
+    if "/" in rest or "?" in rest or "#" in rest:
+        return "must not include a path, query string, or fragment"
+    return None
+
+
+@app.get("/workspaces/me/widget-settings")
+def get_widget_settings(
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 21.7: return the widget configuration for this
+    workspace + the list of agents that can be designated as the
+    customer-facing bot.
+
+    First call mints + persists a `widget_public_id` (via the
+    21.2 `ensure_widget_public_id` helper) so subsequent reads
+    return the same id. Operator-only — bot API keys can't see
+    this surface (they don't need to)."""
+    import widget_endpoints as _we
+
+    workspace = session.get(Workspace, auth.workspace_id)
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+
+    public_id = _we.ensure_widget_public_id(session, workspace)
+
+    # Available agents: every non-system bot in the workspace, sorted
+    # by name. Hide `lightsei.system` + similar internal agents.
+    agents = session.execute(
+        select(Agent).where(Agent.workspace_id == auth.workspace_id)
+        .order_by(Agent.name)
+    ).scalars().all()
+    available = [
+        {
+            "name": a.name,
+            "description": a.description,
+            "sensitivity_level": a.sensitivity_level,
+            "has_widget_capabilities": all(
+                c in (a.capabilities or [])
+                for c in _WIDGET_AUTO_GRANT_CAPABILITIES
+            ),
+        }
+        for a in agents
+        if not a.name.startswith("lightsei.")
+    ]
+
+    return {
+        "widget_public_id": public_id,
+        "customer_facing_agent_name": workspace.customer_facing_agent_name,
+        "allowed_widget_origins": list(workspace.allowed_widget_origins or []),
+        "available_agents": available,
+    }
+
+
+class WidgetSettingsPatchIn(BaseModel):
+    """Body for `PATCH /workspaces/me/widget-settings` (Phase 21.7).
+
+    Both fields optional — operators usually edit one at a time
+    (pick a bot, then later edit the origins as they add the
+    snippet to new sites). At least one must be present."""
+    customer_facing_agent_name: Optional[str] = Field(default=None, max_length=128)
+    allowed_widget_origins: Optional[list[str]] = Field(default=None)
+
+
+@app.patch("/workspaces/me/widget-settings")
+def patch_widget_settings(
+    body: WidgetSettingsPatchIn,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 21.7: update the workspace's widget configuration.
+
+    Two surfaces:
+
+    - `customer_facing_agent_name`: which bot answers widget
+      conversations. Validated as an existing agent in this
+      workspace (404 if not). When set, the bot is auto-granted
+      `widget:respond` + `widget:escalate` capabilities — having
+      the bot designated but unable to reply would be a confusing
+      failure mode. Pass `null` to clear (un-designate the bot;
+      widget POSTs will surface 503 widget_unconfigured).
+    - `allowed_widget_origins`: HTTPS origins the public widget
+      endpoint will accept. Per-entry validation: must be
+      https://host[:port] (or http://localhost for dev); no
+      paths, queries, or fragments. 422 with a per-entry error
+      list if any entry is invalid.
+    """
+    if (
+        body.customer_facing_agent_name is None
+        and body.allowed_widget_origins is None
+        and "customer_facing_agent_name" not in body.model_fields_set
+        and "allowed_widget_origins" not in body.model_fields_set
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="must supply customer_facing_agent_name or allowed_widget_origins",
+        )
+
+    workspace = session.get(Workspace, auth.workspace_id)
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+
+    # ---- customer_facing_agent_name ---- #
+    if "customer_facing_agent_name" in body.model_fields_set:
+        new_name = body.customer_facing_agent_name
+        if new_name is None or new_name == "":
+            # Clear the pointer.
+            workspace.customer_facing_agent_name = None
+        else:
+            agent = session.get(Agent, (auth.workspace_id, new_name))
+            if agent is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail={
+                        "error": "agent_not_found",
+                        "agent_name": new_name,
+                        "message": (
+                            f"agent {new_name!r} doesn't exist in this "
+                            "workspace. Deploy the bot first, then pick "
+                            "it here."
+                        ),
+                    },
+                )
+            workspace.customer_facing_agent_name = new_name
+            # Auto-grant the widget capabilities if missing. Operators
+            # typically pick a bot without thinking about capabilities,
+            # so silently adding them avoids the "I picked a bot but
+            # it can't answer" failure mode. Operators can still
+            # remove them later via PATCH /agents/{name}/capabilities
+            # if they explicitly don't want this bot to use the widget.
+            existing = list(agent.capabilities or [])
+            changed = False
+            for cap in _WIDGET_AUTO_GRANT_CAPABILITIES:
+                if cap not in existing:
+                    existing.append(cap)
+                    changed = True
+            if changed:
+                agent.capabilities = existing
+
+    # ---- allowed_widget_origins ---- #
+    if "allowed_widget_origins" in body.model_fields_set:
+        origins = body.allowed_widget_origins or []
+        # Dedup + validate. Surface ALL per-entry errors at once so
+        # the operator doesn't fix-and-retry one at a time.
+        seen: set[str] = set()
+        cleaned: list[str] = []
+        errors: list[dict[str, Any]] = []
+        for i, raw in enumerate(origins):
+            err = _validate_widget_origin(raw)
+            if err:
+                errors.append({"index": i, "value": raw, "error": err})
+                continue
+            stripped = raw.strip()
+            if stripped in seen:
+                continue
+            seen.add(stripped)
+            cleaned.append(stripped)
+        if errors:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "invalid_widget_origins",
+                    "errors": errors,
+                    "message": (
+                        "one or more allowed_widget_origins entries are "
+                        "invalid — see `errors` for details."
+                    ),
+                },
+            )
+        workspace.allowed_widget_origins = cleaned
+
+    session.flush()
+
+    # Return the same shape as GET so the dashboard can refresh
+    # without a second roundtrip.
+    return get_widget_settings(auth=auth, session=session)
+
+
 # ---------- Phase 11.2: approval endpoints + auto-approval CRUD ---------- #
 
 

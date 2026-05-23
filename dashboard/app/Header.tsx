@@ -95,6 +95,11 @@ const NAV: NavItem[] = [
         hint: "Card grid: every connector + install state",
       },
       {
+        href: "/widget-settings",
+        label: "widget",
+        hint: "Embeddable chat widget for customer-facing conversations",
+      },
+      {
         href: "/integrations/slack",
         label: "slack",
         hint: "@-mention Lightsei from any channel; per-channel trust zones",
