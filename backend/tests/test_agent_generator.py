@@ -378,6 +378,74 @@ def test_validate_recognizes_dist_name_overrides():
     assert problems == []
 
 
+# ---------- Phase 21 follow-up (#65): psycopg2 + multi-override ---------- #
+
+
+def test_validate_psycopg2_accepts_binary_variant():
+    """The Phase 16 Coral demo's atlas bot imported psycopg2 with
+    psycopg2-binary in requirements. The pre-21 validator wrongly
+    flagged it as missing; the fix is to accept either dist name."""
+    from agent_generator import validate_generated_bot
+    bot_py = _VALID_BOT_PY.replace(
+        "import time", "import time\nimport psycopg2"
+    )
+    # Operator picks the binary wheel — safer install on Railway.
+    problems = validate_generated_bot(
+        bot_py, "lightsei>=0.1.3\npsycopg2-binary>=2.9\n",
+    )
+    assert problems == []
+
+
+def test_validate_psycopg2_also_accepts_source_dist():
+    """Same import + source distribution `psycopg2` (not -binary) in
+    requirements also passes. The dist name matches the literal
+    module name; validator now accepts either."""
+    from agent_generator import validate_generated_bot
+    bot_py = _VALID_BOT_PY.replace(
+        "import time", "import time\nimport psycopg2"
+    )
+    problems = validate_generated_bot(
+        bot_py, "lightsei>=0.1.3\npsycopg2>=2.9\n",
+    )
+    assert problems == []
+
+
+def test_validate_psycopg2_flags_when_neither_in_requirements():
+    """If neither variant is declared, the validator still catches
+    it. The error message points at the canonical (binary)
+    variant so the LLM retry path picks the safer one."""
+    from agent_generator import validate_generated_bot
+    bot_py = _VALID_BOT_PY.replace(
+        "import time", "import time\nimport psycopg2"
+    )
+    problems = validate_generated_bot(bot_py, "lightsei>=0.1.3\n")
+    assert len(problems) == 1
+    assert "psycopg2" in problems[0]
+    assert "psycopg2-binary" in problems[0]
+
+
+def test_validate_dist_name_overrides_extended_set():
+    """Spot-check a few of the new overrides added in 21-follow-up:
+    each should accept a literal-name OR an override-name dist."""
+    from agent_generator import validate_generated_bot
+    cases = [
+        ("import sklearn", "scikit-learn>=1.3"),
+        ("import dateutil", "python-dateutil>=2.8"),
+        ("import dotenv", "python-dotenv>=1.0"),
+        ("import MySQLdb", "mysqlclient>=2.2"),
+    ]
+    for import_line, reqs_line in cases:
+        bot_py = _VALID_BOT_PY.replace(
+            "import time", f"import time\n{import_line}"
+        )
+        reqs = f"lightsei>=0.1.3\n{reqs_line}\n"
+        problems = validate_generated_bot(bot_py, reqs)
+        assert problems == [], (
+            f"expected no problems for {import_line!r} + {reqs_line!r}, "
+            f"got {problems}"
+        )
+
+
 def test_generate_retries_when_validation_fails(client, alice, monkeypatch):
     """Validation gate: if the first generation has a SyntaxError or
     missing main(), the endpoint retries once with the problems

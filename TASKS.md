@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 22 — TBD. Phase 21 (customer-facing widget + operator inbox) complete 2026-05-23.**
+> **Phase 22 — TBD. Phase 21 complete 2026-05-23. Parking-lot #65 (generator quality / Coral psycopg2) closed 2026-05-23.**
 
 Phase 21 (customer-facing widget) complete: 10 sub-tasks shipped + 21.10 demo artifacts under `examples/p21-demo/`. Customer's end users can now interact with bots through an embeddable widget; operators triage in `/inbox`; Polaris notices escalation patterns + drafts fixes; operator applies + bot self-improves. Same trust-zone + capability model from Phases 16-20 enforces on the customer-facing surface too — a public-zoned bot can't leak data even if an operator misconfigures it.
 
@@ -1335,6 +1335,29 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-23 — Parking-lot #65 closed: generator-quality fix for Coral psycopg2
+
+Root-cause fix for the Phase 16 Coral demo crash. The atlas bot the planner generated kept emitting `import psycopg2` with `psycopg2-binary` in `requirements.txt`, and the pre-21 validator's `_DIST_NAME_OVERRIDES` map had no entry for psycopg2 — so the validator flagged the import as missing, the LLM retried with the same broken combination, and eventually the bot deployed with whichever form the LLM happened to land on. When it landed `psycopg2` (source dist), Railway's worker image lacked libpq + a C compiler and the bot crashed at install time. When it landed `psycopg2-binary` but the validator mis-flagged it, the LLM kept trying to "fix" the non-issue.
+
+**Three changes in `backend/agent_generator.py`**:
+
+- `_DIST_NAME_OVERRIDES` reshaped from `dict[str, str]` → `dict[str, list[str]]` so a module can have multiple acceptable dist names. Added `psycopg2 → [psycopg2-binary, psycopg2]`, `psycopg → [psycopg, psycopg-binary, psycopg[binary]]` (psycopg3), `MySQLdb → [mysqlclient]`, `sklearn → [scikit-learn]`, `dateutil → [python-dateutil]`, `dotenv → [python-dotenv]`, `jose → [python-jose]`, `magic → [python-magic]`, `telegram → [python-telegram-bot]`, plus existing entries.
+- `validate_generated_bot` updated to accept either the literal module name OR any of the override list. So `import psycopg2` is satisfied by either `psycopg2` or `psycopg2-binary` in reqs. The error message now reports the canonical (first-listed) override, which is the binary wheel — steers the LLM toward the safer choice on retry.
+- System prompt grew a "Dependency gotchas" section with a module → dist cheat sheet for the seven trickiest cases AND explicit guidance to avoid raw DB drivers ("DO NOT add a raw database driver on your own. The Lightsei worker doesn't ship with libpq / MySQL client libs preinstalled; bots that try to connect to Postgres / MySQL directly fail at install time."). When persistence is genuinely needed, the prompt steers toward `lightsei.get_secret(...)` + a webhook-based design + `psycopg2-binary` if it absolutely must be Postgres.
+
+The Phase 18.6 FailurePanel hint in the dashboard (which catches `/psycopg2/` in error messages and suggests "Use 'edit & retry' and add a note...") stays as a backstop. With the generator-side fix in place, hits to that hint should be vanishingly rare.
+
+**Verification**: 4 new tests in `test_agent_generator.py`:
+
+- `import psycopg2` + `psycopg2-binary` in reqs → passes (the canonical Coral failure mode now resolves correctly).
+- `import psycopg2` + `psycopg2` (source dist) in reqs → also passes (literal name acceptance).
+- `import psycopg2` + neither in reqs → still flags, with the error message naming `psycopg2-binary` so the LLM retry picks the safer variant.
+- Spot-check the extended overrides set: `sklearn` + `scikit-learn`, `dateutil` + `python-dateutil`, `dotenv` + `python-dotenv`, `MySQLdb` + `mysqlclient` — all four pass cleanly.
+
+Full backend suite: **1095 passed in 252s** (was 1090, +5 net new from this fix). 0 regressions. Known #102 flake didn't fire this run.
+
+**What this unblocks**: the generator no longer steers LLMs into the psycopg2 trap that ate two demo runs. Future team-from-readme generations that propose Postgres-shaped bots will get pushed toward the safer dependency pinning + the no-raw-driver guidance in the prompt. The wedge story now extends to "the framework helps the LLM not bork the deploy" too.
 
 ### 2026-05-23 — Phase 21 code-complete: demo artifacts shipped (21.10)
 

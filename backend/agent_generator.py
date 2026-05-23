@@ -428,6 +428,39 @@ The bot you ship MUST:
   worker injects every workspace secret as an env var. Common ones:
   `LIGHTSEI_API_KEY` (always present), `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
   `GOOGLE_API_KEY`, `SLACK_WEBHOOK_URL`. Don't hardcode anything.
+
+# Dependency gotchas
+
+A few common modules have dist names that don't match their import. If you
+use them, pin the dist name on the LEFT (not the import on the right):
+
+| Import in bot.py       | Pin in requirements.txt                |
+|------------------------|----------------------------------------|
+| `import yaml`          | `pyyaml`                               |
+| `import bs4`           | `beautifulsoup4`                       |
+| `import dateutil`      | `python-dateutil`                      |
+| `import dotenv`        | `python-dotenv`                        |
+| `import sklearn`       | `scikit-learn`                         |
+| `import cv2`           | `opencv-python` (or `-headless`)       |
+| `import google`        | `google-generativeai`                  |
+
+DO NOT add a raw database driver (psycopg2, mysqlclient, pymongo, etc.) on
+your own. The Lightsei worker doesn't ship with libpq / MySQL client libs
+preinstalled; bots that try to connect to Postgres / MySQL directly fail at
+install time. If a bot genuinely needs persistence, use:
+
+  - `lightsei.get_secret(...)` + workspace secrets for credentials,
+  - the Lightsei connectors (gmail / google_calendar / google_drive, etc.)
+    for upstream APIs,
+  - a fresh request to the upstream API on every call rather than caching
+    locally.
+
+If the user's description IS something like "watch our Postgres for X" then
+either propose a different shape (call a webhook that watches the DB, dispatch
+to a `messenger` agent) OR explicitly pin `psycopg2-binary` (NOT `psycopg2`)
+in requirements.txt + note in `rationale` that the operator will need to set
+DATABASE_URL in workspace secrets and verify the worker image ships
+`libpq`.
 """
 
 
@@ -560,16 +593,34 @@ def _parse_requirements(source: str) -> set[str]:
 
 # Common PyPI distribution names that don't match their import-time module
 # name. requirements.txt has the dist name; bot.py imports the module.
-_DIST_NAME_OVERRIDES = {
-    # imported_module_top_level: pypi_dist_name
-    "yaml": "pyyaml",
-    "bs4": "beautifulsoup4",
-    "PIL": "pillow",
-    "cv2": "opencv-python",
-    "google": "google-generativeai",  # the closest match for our use case
-    "anthropic": "anthropic",
-    "openai": "openai",
-    "lightsei": "lightsei",
+#
+# Values are lists because some modules have multiple acceptable dist names
+# (e.g. `import psycopg2` is satisfied by either `psycopg2-binary` — the
+# precompiled wheel that doesn't need libpq + a C compiler at install time —
+# or the source `psycopg2` distribution). The validator passes if EITHER
+# the module name itself OR any of the override list appears in
+# requirements.txt.
+#
+# Phase 21 follow-up (#65 — generator quality): added the psycopg2 variants
+# because the Phase 16 Coral demo's atlas bot kept emitting
+# `import psycopg2` with `psycopg2-binary` in requirements, which the
+# pre-21 validator wrongly flagged as missing.
+_DIST_NAME_OVERRIDES: dict[str, list[str]] = {
+    # imported_module_top_level: [acceptable_pypi_dist_names]
+    "yaml": ["pyyaml"],
+    "bs4": ["beautifulsoup4"],
+    "PIL": ["pillow"],
+    "cv2": ["opencv-python", "opencv-python-headless"],
+    "google": ["google-generativeai"],  # closest match for our use case
+    "psycopg2": ["psycopg2-binary", "psycopg2"],  # Phase 16 Coral gotcha
+    "psycopg": ["psycopg", "psycopg-binary", "psycopg[binary]"],  # psycopg3
+    "MySQLdb": ["mysqlclient"],
+    "sklearn": ["scikit-learn"],
+    "dateutil": ["python-dateutil"],
+    "dotenv": ["python-dotenv"],
+    "jose": ["python-jose"],
+    "magic": ["python-magic"],
+    "telegram": ["python-telegram-bot"],
 }
 
 
@@ -632,10 +683,24 @@ def validate_generated_bot(
             continue
         if mod == "lightsei":
             continue
-        # Apply dist-name overrides — `import yaml` → `pyyaml` in reqs.
-        dist = _DIST_NAME_OVERRIDES.get(mod, mod).lower().replace("_", "-")
-        if dist not in declared:
-            missing.append(f"`{mod}` (expected in requirements.txt as `{dist}`)")
+        # Accept either the literal module name OR any name from the
+        # overrides list. Operators sometimes use the source dist
+        # (`psycopg2`) and sometimes the binary wheel (`psycopg2-binary`);
+        # both should satisfy `import psycopg2`. Pre-21 validator forced
+        # the override-only path, which is what bit the Coral demo.
+        literal = mod.lower().replace("_", "-")
+        candidates = [literal]
+        for override in _DIST_NAME_OVERRIDES.get(mod, []):
+            normalized = override.lower().replace("_", "-")
+            if normalized not in candidates:
+                candidates.append(normalized)
+        if not any(c in declared for c in candidates):
+            # Report the canonical (first override or the literal) so the
+            # LLM gets steered toward the preferred dist name on retry.
+            expected = candidates[1] if len(candidates) > 1 else literal
+            missing.append(
+                f"`{mod}` (expected in requirements.txt as `{expected}`)"
+            )
     if missing:
         problems.append(
             "These imports in bot.py aren't declared in requirements.txt: "
