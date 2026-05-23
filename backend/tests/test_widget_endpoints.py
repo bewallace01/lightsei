@@ -77,6 +77,17 @@ def _origin() -> dict[str, str]:
     return {"origin": "https://customer.example.com"}
 
 
+def _iframe_headers(
+    *,
+    frame_origin: str = "https://app.lightsei.com",
+    embed_origin: str = "https://customer.example.com",
+) -> dict[str, str]:
+    return {
+        "origin": frame_origin,
+        "x-lightsei-embed-origin": embed_origin,
+    }
+
+
 # ---------- POST /widget/{public_id}/messages — happy + sad paths ---------- #
 
 
@@ -117,6 +128,30 @@ def test_post_message_403_origin_not_allowed(client):
     detail = r.json()["detail"]
     assert detail["error"] == "widget_origin_not_allowed"
     assert detail["origin"] == "https://attacker.example.org"
+
+
+def test_post_message_accepts_allowed_embed_origin_from_widget_iframe(client):
+    """Iframe fetches come from the Lightsei app origin, but the
+    customer site origin is carried in the widget embed header."""
+    _make_widget_workspace()
+    r = client.post(
+        "/widget/wid_test_42/messages",
+        headers=_iframe_headers(),
+        json={"text": "hi"},
+    )
+    assert r.status_code == 202, r.text
+
+
+def test_post_message_rejects_spoofed_embed_origin_from_untrusted_frame(client):
+    """A random site cannot claim an allowlisted customer origin."""
+    _make_widget_workspace()
+    r = client.post(
+        "/widget/wid_test_42/messages",
+        headers=_iframe_headers(frame_origin="https://attacker.example.org"),
+        json={"text": "hi"},
+    )
+    assert r.status_code == 403
+    assert r.json()["detail"]["error"] == "widget_frame_origin_not_allowed"
 
 
 def test_post_message_503_when_no_customer_facing_bot(client):

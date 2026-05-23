@@ -254,10 +254,55 @@ def test_bridge_no_widget_handler_escalates_as_unconfigured():
         })
 
     assert result["ok"] is False
+    assert result["escalated"] is True
     assert result["error"] == "no_widget_handler_registered"
     assert len(captured) == 1
     assert captured[0]["path"] == "/widget-bot/escalate"
     assert captured[0]["body"]["reason"] == "bot_unconfigured"
+
+
+def test_bridge_no_widget_handler_reports_failed_escalate():
+    captured: list[dict] = []
+    with bridge_fake(
+        capabilities=["widget:respond"],
+        captured=captured,
+    ) as url:
+        lightsei.init(api_key="k", agent_name="vega", base_url=url)
+
+        result = _widget_chat_bridge({
+            "conversation_id": "C_1",
+            "user_message": "hi",
+        })
+
+    assert result["ok"] is False
+    assert result["escalated"] is False
+    assert result["error"] == "no_widget_handler_registered"
+    assert "widget:escalate" in result["escalation_error"]
+    assert captured == []
+
+
+def test_bridge_uncaught_exception_reports_failed_escalate():
+    captured: list[dict] = []
+    with bridge_fake(
+        capabilities=["widget:respond"],
+        captured=captured,
+    ) as url:
+        lightsei.init(api_key="k", agent_name="vega", base_url=url)
+
+        @lightsei.on_chat("widget")
+        def handler(turn):
+            raise ValueError("kaboom")
+
+        result = _widget_chat_bridge({
+            "conversation_id": "C_1",
+            "user_message": "x",
+        })
+
+    assert result["ok"] is False
+    assert result["escalated"] is False
+    assert "kaboom" in result["error"]
+    assert "widget:escalate" in result["escalation_error"]
+    assert captured == []
 
 
 # ---------- None / empty return → no_reply ---------- #

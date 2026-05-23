@@ -6092,7 +6092,11 @@ def widget_post_message(
     import jobs as _jobs
 
     workspace = _we.resolve_workspace_by_public_id(session, public_id)
-    _we.check_widget_origin(workspace, request.headers.get("origin"))
+    _we.check_widget_origin(
+        workspace,
+        request.headers.get("origin"),
+        request.headers.get(_we.WIDGET_EMBED_ORIGIN_HEADER),
+    )
 
     if not workspace.customer_facing_agent_name:
         # No bot wired up yet. Surface a 503 rather than enqueueing a
@@ -6209,7 +6213,11 @@ def widget_get_conversation(
     import widget_endpoints as _we
 
     workspace = _we.resolve_workspace_by_public_id(session, public_id)
-    _we.check_widget_origin(workspace, request.headers.get("origin"))
+    _we.check_widget_origin(
+        workspace,
+        request.headers.get("origin"),
+        request.headers.get(_we.WIDGET_EMBED_ORIGIN_HEADER),
+    )
 
     conv = session.get(WidgetConversation, conversation_id)
     if conv is None or conv.workspace_id != workspace.id:
@@ -6269,7 +6277,11 @@ def widget_get_config(
     import widget_endpoints as _we
 
     workspace = _we.resolve_workspace_by_public_id(session, public_id)
-    _we.check_widget_origin(workspace, request.headers.get("origin"))
+    _we.check_widget_origin(
+        workspace,
+        request.headers.get("origin"),
+        request.headers.get(_we.WIDGET_EMBED_ORIGIN_HEADER),
+    )
 
     bot_name = workspace.customer_facing_agent_name
     bot_display: Optional[dict[str, Any]] = None
