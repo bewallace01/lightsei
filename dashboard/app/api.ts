@@ -2082,3 +2082,66 @@ export async function resolveConversation(
     resolved_escalation_count?: number;
   };
 }
+
+
+// ---------- Phase 21.9: incident-response helpers ---------- //
+
+export type IncidentScanResponse = {
+  clusters_found: number;
+  fixes_generated: number;
+  fixes_applied: number;
+  conversations_touched: number;
+  auto_apply_enabled?: boolean;
+};
+
+export async function scanWidgetIncidentPatterns(options?: {
+  lookback_hours?: number;
+  min_size?: number;
+}): Promise<IncidentScanResponse> {
+  const params = new URLSearchParams();
+  if (options?.lookback_hours !== undefined) {
+    params.set("lookback_hours", String(options.lookback_hours));
+  }
+  if (options?.min_size !== undefined) {
+    params.set("min_size", String(options.min_size));
+  }
+  const qs = params.toString() ? `?${params}` : "";
+  return (await authedJson(
+    `/workspaces/me/widget-incident-response/scan${qs}`,
+    { method: "POST" },
+  )) as IncidentScanResponse;
+}
+
+export async function applyEscalationSuggestedFix(
+  conversationId: string,
+  escalationId: string,
+): Promise<{
+  ok: boolean;
+  applied: boolean;
+  conversations_touched: string[];
+  agents_mutated: string[];
+}> {
+  return (await authedJson(
+    `/workspaces/me/inbox/${encodeURIComponent(
+      conversationId,
+    )}/escalations/${encodeURIComponent(escalationId)}/apply-fix`,
+    { method: "POST" },
+  )) as {
+    ok: boolean;
+    applied: boolean;
+    conversations_touched: string[];
+    agents_mutated: string[];
+  };
+}
+
+export async function dismissEscalationSuggestedFix(
+  conversationId: string,
+  escalationId: string,
+): Promise<{ ok: boolean; dismissed: boolean; noop?: boolean }> {
+  return (await authedJson(
+    `/workspaces/me/inbox/${encodeURIComponent(
+      conversationId,
+    )}/escalations/${encodeURIComponent(escalationId)}/dismiss-fix`,
+    { method: "POST" },
+  )) as { ok: boolean; dismissed: boolean; noop?: boolean };
+}

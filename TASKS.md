@@ -7,13 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 21.9 — Polaris incident-response extension. 21.1-21.5 shipped 2026-05-22; 21.6-21.8 shipped 2026-05-23.**
+> **Phase 21.10 — End-to-end demo (final Phase 21 sub-task). 21.1-21.5 shipped 2026-05-22; 21.6-21.9 shipped 2026-05-23.**
 
 Phase 21 spec locked 2026-05-21. Design choices: iframe-isolated widget; anonymous-only conversations in v1; one customer-facing bot per workspace via `@lightsei.on_chat("widget")`; top-level `/inbox` route. 10 sub-tasks (21.1-21.10).
 
-21.1-21.8 shipped; backend at **1065 passing** (+23 from 21.8); SDK at **150 passing**. End-to-end widget surface is now operator-driveable: pick bot → set origins → copy snippet → paste on customer site → end users chat → operator triages escalations in `/inbox` (take over, reply, resolve).
+21.1-21.9 shipped; backend at **1090 passing** (+25 from 21.9); SDK at **150 passing**. Full Phase 21 pipeline works end-to-end: end user → widget iframe → POST /messages → widget_chat job → widget.chat Command → bot @on_chat handler → reply (or escalate) → operator triages in /inbox → Polaris scans escalation patterns → operator applies the suggested fix to the bot's system prompt → bot retries with new guidance.
 
-NOW is 21.9 — Polaris extends to widget incident response. New Polaris tick task scans `widget_escalations` from the last N hours, clusters by reason + topic, emits a `polaris.issue_pattern` event when a cluster crosses a threshold, attaches a `suggested_fix` jsonb blob to the escalation rows in the cluster. The inbox surfaces "Apply suggested fix" when an escalation has one; applying mutates the bot's `system_prompt` with the proposed addendum. Auto-apply gated on the same consent model as 12D.3.
+NOW is 21.10 — end-to-end demo artifacts: a "Halo" customer site README that team-from-readme can turn into a customer-facing bot, an example fake-customer page that embeds the widget, a runbook (`examples/p21-demo/README.md`) walking through the 5-act demo flow (paste → ask → deflect → escalate → take-over → Polaris suggests → apply → deflects). Mirrors `examples/p20-demo/` shape — artifacts + runbook, live execution is operator-driven.
 
 Phase 20 (integration breadth) shipped 2026-05-20/21: connector schema (20.1), Google OAuth install flow (20.2), three real connectors — Gmail / Calendar / Drive (20.3-20.5), bot-callable endpoint with capability + zone gates (20.6), SDK namespaced helpers (20.7), dashboard /integrations index + per-connector cards (20.8). 20.9 was a coverage rollup satisfied incrementally. 20.10 demo artifacts under `examples/p20-demo/`. Backend at **962 passing** (+126 across Phase 20; started at 836). SDK at **120 passing** (+19 from 20.7).
 
@@ -854,7 +854,7 @@ Real-time updates: poll `GET /workspaces/me/inbox?since=<last_activity>` every 5
 
 Backend endpoints: `GET /workspaces/me/inbox` (list + filter), `GET /workspaces/me/inbox/{conversation_id}` (thread), `POST /workspaces/me/inbox/{conversation_id}/take-over` (operator-owned), `POST /workspaces/me/inbox/{conversation_id}/messages` (operator types a reply), `POST /workspaces/me/inbox/{conversation_id}/resolve`.
 
-### 21.9 — Polaris incident-response extension
+### 21.9 — Polaris incident-response extension ✅ shipped 2026-05-23
 
 New Polaris tick task (alongside 12D.2's cost analysis): scan `widget_escalations` rows from the last N hours, group by reason + by topic embedding (or simpler: by user-message TF-IDF clustering — full embeddings parked for later). When a cluster crosses a threshold (e.g. 3 escalations on similar topics in 24h), emit a `polaris.issue_pattern` event with:
 
@@ -1331,6 +1331,48 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-23 — Phase 21.9 shipped: Polaris widget-incident-response
+
+The closing-the-loop piece. End user → bot escalates → operator triages → **Polaris notices the pattern + drafts a fix** → operator applies → bot retries with new guidance and deflects similar questions. Two halves: a periodic-scan endpoint that clusters open escalations + generates suggested fixes via Anthropic, and an apply/dismiss surface in the inbox.
+
+**Schema** (Alembic 0037): adds `workspaces.polaris_auto_apply_widget_fixes` boolean (default false). The `widget_escalations.suggested_fix` jsonb column already existed from 21.1 — 21.9 just starts populating it.
+
+**Backend** (`backend/widget_incident_response.py` + 3 new endpoints in `main.py`):
+
+- `find_escalation_clusters(session, workspace_id, lookback_hours, min_size)` — pure clustering function. Pulls open escalations from the last N hours, groups by `reason` keyword first, then runs greedy single-link clustering inside each reason group on user-message token overlap (≥2 non-stopword tokens shared). Drops clusters smaller than `min_size`. Returns `{reason, escalation_ids, sample_messages, keywords, size}` per cluster. Bounded sample size + truncated text so the Anthropic prompt stays small. TF-IDF / embeddings parked — the simple token-overlap heuristic handles the demo bar cleanly.
+- `generate_suggested_fix(cluster, anthropic_key)` — Anthropic call. Strict JSON-output prompt with `{kind, summary, detail}` shape. Defensive JSON-fence stripping. Validates the parsed shape (kind must be `system_prompt_addendum` or `add_faq_entry`, detail must be non-empty string). Returns None on transport failure, parse failure, or shape mismatch — scan continues with the next cluster. `anthropic_client_factory` keyword arg for test injection.
+- `append_fix_to_system_prompt(base, fix, applied_at)` — pure function that produces the new system_prompt by appending a marked section: `# Polaris-suggested fix applied <iso>\n<detail>`. Operator can find + revert later.
+- `POST /workspaces/me/widget-incident-response/scan?lookback_hours=&min_size=` — operator-callable endpoint. Pipeline: cluster → for each cluster, draft fix + persist `suggested_fix` on all escalations in cluster + emit `polaris.issue_pattern` event on a `lightsei.system` run → if workspace has `polaris_auto_apply_widget_fixes` set, immediately apply the fix to the bot's system_prompt + resolve the escalations + drop system message in each conversation + flip status back to `open` so the bot retries with the updated guidance. Returns `{clusters_found, fixes_generated, fixes_applied, conversations_touched, auto_apply_enabled}`. 400 if no `ANTHROPIC_API_KEY` workspace secret. Commits the session before the LLM calls (Railway Postgres idle-in-transaction guard — same pattern as `slack_orchestrator` / `team_planner`).
+- `POST /workspaces/me/inbox/{conv_id}/escalations/{esc_id}/apply-fix` — operator hits Apply. Mutates the customer-facing bot's `system_prompt` with the addendum + marks the escalation resolved + stamps `resolved_by_user_id` + drops a system message in the conversation + flips status back to `open`. 409 if the escalation has no `suggested_fix` or has already been resolved.
+- `POST /workspaces/me/inbox/{conv_id}/escalations/{esc_id}/dismiss-fix` — clears `suggested_fix` on the row. Escalation stays open so the operator can still take over / resolve normally. Idempotent on already-dismissed.
+- `PATCH /workspaces/me` extended to accept `polaris_auto_apply_widget_fixes` boolean. `_serialize_workspace` exposes it on every workspace response.
+
+**`polaris.issue_pattern` event**: emitted on a `lightsei.system` run (same agent name as 12D.2's cost-analysis events), so the existing dashboard surface in `/polaris` groups widget patterns alongside cost patterns without code changes. Payload: `{reason, size, keywords, escalation_ids, suggested_fix}`.
+
+**Dashboard** (`dashboard/app/inbox/page.tsx` + `api.ts`):
+
+- New "Scan for patterns" button in the inbox header (right of the title, before "Widget settings"). Calls the scan endpoint; surfaces a flash with `clusters_found` / `fixes_generated` / `fixes_applied` counts.
+- The open-escalation panel grows a suggested-fix card when `escalation.suggested_fix` is non-null: `Polaris suggested: <summary>` heading + `<detail>` rendered as a pre block (operator sees the exact prompt addendum that will land) + `Apply suggested fix` button (indigo) + `Dismiss` button. Both call the new endpoints + refresh the list and detail.
+- `api.ts`: `scanWidgetIncidentPatterns`, `applyEscalationSuggestedFix`, `dismissEscalationSuggestedFix` helpers + the `IncidentScanResponse` type.
+
+**Verification**: 26 new backend tests in `backend/tests/test_widget_incident_response.py`:
+
+- Pure helpers: tokenize drops stopwords + short words; `_looks_similar` requires 2-token overlap; `append_fix_to_system_prompt` adds marked section and handles null base.
+- Clustering: empty when no escalations; groups similar user messages (3+ refund-themed escalations cluster into 1); drops clusters below `min_size`; isolates workspaces; respects lookback window; ignores resolved escalations.
+- `generate_suggested_fix`: parses canned Anthropic response; strips JSON code fences; rejects bad-kind / missing-detail shapes; swallows Anthropic transport exceptions.
+- `/scan` endpoint: 400 when ANTHROPIC_API_KEY missing; no-clusters short-circuits to all-zeros without needing the key; persists `suggested_fix` on every escalation in the cluster; auto-applies when workspace opts in (mutates bot system_prompt + resolves escalations + system message in conversation).
+- `/apply-fix`: mutates system_prompt + marks escalation resolved + flips conversation back to `open` + system message; 409 when no suggested_fix; 409 when already resolved; 404 cross-workspace tenant isolation.
+- `/dismiss-fix`: clears field, escalation stays open; idempotent.
+- `PATCH /workspaces/me` extension: sets + clears the auto-apply flag.
+
+`npx tsc --noEmit` clean. `npx next build`: `/inbox` grows to 5 kB (was 4.5 kB) for the suggested-fix UI. No regressions on the other 28 routes.
+
+Full backend suite: **1090 passed in 193s** (was 1065, +25 net new). 0 regressions modulo the known #102 flake (cleared on solo re-run as usual).
+
+**Recurring tool-call bug observed (again)**: my first `Write` of the Alembic migration carried an unexpected `Edit_old_string` parameter from a copy-paste; the tool rejected it with a clean `InputValidationError`. Re-issued the Write alone and the file landed. Third occurrence in the Lightsei codebase of this exact failure mode — the `feedback_nested_tool_params_fail_silently` memory continues to be load-bearing, but at least this time the failure mode was *loud* (validation error) rather than silent.
+
+**What this unblocks**: Phase 21 is functionally complete after 21.9. 21.10 ships the demo runbook + artifacts (similar to `examples/p20-demo/`) that pull the full end-to-end pipeline together. After 21.10, Phase 21 closes: the customer-facing chat widget surface is operator-driveable end-to-end, the wedge story extends from internal bots (Phase 16-20) to customer-facing bots (Phase 21), and Lightsei's product surface covers both the customer's internal team AND the customer's end users.
 
 ### 2026-05-23 — Phase 21.8 shipped: operator inbox
 

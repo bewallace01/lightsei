@@ -21,10 +21,13 @@ import {
   InboxConversationDetail,
   InboxConversationRow,
   UnauthorizedError,
+  applyEscalationSuggestedFix,
+  dismissEscalationSuggestedFix,
   fetchInbox,
   fetchInboxConversation,
   postInboxOperatorReply,
   resolveConversation,
+  scanWidgetIncidentPatterns,
   takeOverConversation,
 } from "../api";
 import { SensitivityChip } from "../sensitivity";
@@ -101,7 +104,9 @@ export default function InboxPage(): JSX.Element {
   const [error, setError] = useState<string | null>(null);
   const [flash, setFlash] = useState<string | null>(null);
   const [replyText, setReplyText] = useState("");
-  const [busy, setBusy] = useState<"take" | "resolve" | "reply" | null>(null);
+  const [busy, setBusy] = useState<
+    "take" | "resolve" | "reply" | "apply" | "dismiss" | "scan" | null
+  >(null);
 
   const replyRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -236,6 +241,63 @@ export default function InboxPage(): JSX.Element {
     }
   };
 
+  const onScanPatterns = async () => {
+    setBusy("scan");
+    try {
+      const r = await scanWidgetIncidentPatterns();
+      if (r.fixes_generated === 0) {
+        flashTimeout(
+          r.clusters_found === 0
+            ? "No escalation patterns detected."
+            : `Found ${r.clusters_found} cluster${r.clusters_found > 1 ? "s" : ""}, but no fixes generated.`,
+        );
+      } else {
+        const appliedSuffix = r.fixes_applied
+          ? ` ${r.fixes_applied} auto-applied.`
+          : "";
+        flashTimeout(
+          `${r.fixes_generated} suggested fix${r.fixes_generated > 1 ? "es" : ""} ready.${appliedSuffix}`,
+        );
+      }
+      await Promise.all([refreshList(true), refreshDetail(selectedId)]);
+    } catch (e) {
+      if (handleAuthError(e)) return;
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const onApplyFix = async (escalationId: string) => {
+    if (!selectedId) return;
+    setBusy("apply");
+    try {
+      await applyEscalationSuggestedFix(selectedId, escalationId);
+      flashTimeout("Fix applied. Bot's system prompt updated.");
+      await Promise.all([refreshList(true), refreshDetail(selectedId)]);
+    } catch (e) {
+      if (handleAuthError(e)) return;
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const onDismissFix = async (escalationId: string) => {
+    if (!selectedId) return;
+    setBusy("dismiss");
+    try {
+      await dismissEscalationSuggestedFix(selectedId, escalationId);
+      flashTimeout("Suggestion dismissed.");
+      await Promise.all([refreshList(true), refreshDetail(selectedId)]);
+    } catch (e) {
+      if (handleAuthError(e)) return;
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   const escalationOpen = useMemo(
     () =>
       detail?.escalations.find((e) => e.resolved_at === null) || null,
@@ -244,7 +306,7 @@ export default function InboxPage(): JSX.Element {
 
   return (
     <main className="max-w-6xl mx-auto px-6 py-6 text-sm text-zinc-200">
-      <header className="mb-4 flex items-baseline justify-between">
+      <header className="mb-4 flex items-baseline justify-between gap-2">
         <div>
           <h1 className="text-xl font-semibold">Inbox</h1>
           <p className="text-zinc-400 mt-1 text-xs">
@@ -252,12 +314,23 @@ export default function InboxPage(): JSX.Element {
             and operator-owned threads bubble to the top.
           </p>
         </div>
-        <Link
-          href="/widget-settings"
-          className="text-xs text-zinc-400 hover:text-zinc-200 underline"
-        >
-          Widget settings →
-        </Link>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void onScanPatterns()}
+            disabled={busy === "scan"}
+            className="rounded border border-zinc-700 px-3 py-1 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+            title="Scan open escalations for patterns and generate suggested fixes"
+          >
+            {busy === "scan" ? "Scanning…" : "Scan for patterns"}
+          </button>
+          <Link
+            href="/widget-settings"
+            className="text-xs text-zinc-400 hover:text-zinc-200 underline"
+          >
+            Widget settings →
+          </Link>
+        </div>
       </header>
 
       {flash && (
@@ -403,8 +476,43 @@ export default function InboxPage(): JSX.Element {
                       {JSON.stringify(escalationOpen.payload, null, 2)}
                     </pre>
                   )}
-                  {/* 21.9 will add an "Apply suggested fix" button here
-                      when escalationOpen.suggested_fix is non-null. */}
+                  {escalationOpen.suggested_fix && (
+                    <div className="mt-2 rounded border border-indigo-700/60 bg-indigo-950/30 p-2">
+                      <div className="text-xs font-medium text-indigo-200 mb-1">
+                        Polaris suggested:{" "}
+                        <span className="font-normal text-indigo-300/80">
+                          {String(
+                            escalationOpen.suggested_fix.summary ||
+                              escalationOpen.suggested_fix.kind ||
+                              "an improvement",
+                          )}
+                        </span>
+                      </div>
+                      {typeof escalationOpen.suggested_fix.detail === "string" && (
+                        <pre className="text-[11px] text-indigo-100/90 whitespace-pre-wrap mb-2">
+                          {String(escalationOpen.suggested_fix.detail)}
+                        </pre>
+                      )}
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => void onApplyFix(escalationOpen.id)}
+                          disabled={busy === "apply"}
+                          className="rounded bg-indigo-600 hover:bg-indigo-500 px-2.5 py-1 text-xs text-white disabled:opacity-50"
+                        >
+                          {busy === "apply" ? "Applying…" : "Apply suggested fix"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void onDismissFix(escalationOpen.id)}
+                          disabled={busy === "dismiss"}
+                          className="rounded border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+                        >
+                          {busy === "dismiss" ? "…" : "Dismiss"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 

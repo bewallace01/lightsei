@@ -155,6 +155,16 @@ class Workspace(Base):
     allowed_widget_origins: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default=list, server_default=text("'[]'::jsonb"),
     )
+    # Phase 21.9: when the Polaris widget-incident-response scan
+    # produces a suggested_fix on an escalation cluster, should we
+    # automatically apply it (mutating the customer-facing bot's
+    # system_prompt with the addendum) or wait for an operator to
+    # click Apply in /inbox? Default false per CLAUDE.md's
+    # "operator-driven" defaults. The dashboard exposes this on
+    # /widget-settings; the scan reads it at apply time.
+    polaris_auto_apply_widget_fixes: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false"),
+    )
 
 
 class ApiKey(Base):

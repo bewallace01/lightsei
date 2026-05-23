@@ -190,6 +190,10 @@ class WorkspacePatchIn(BaseModel):
     # NULL means "clear the cap" when the client explicitly passes null;
     # the patch handler reads `model_fields_set` to disambiguate.
     budget_usd_monthly: Optional[float] = None
+    # Phase 21.9: opt in to auto-applying Polaris's suggested fixes
+    # to the customer-facing bot's system_prompt without operator
+    # review. Off by default; flipping requires explicit consent.
+    polaris_auto_apply_widget_fixes: Optional[bool] = None
 
 
 class ApiKeyCreateIn(BaseModel):
@@ -528,6 +532,12 @@ def _serialize_workspace(w: Workspace) -> dict[str, Any]:
         "plan_tier": w.plan_tier,
         "free_credits_remaining_usd": float(w.free_credits_remaining_usd or 0),
         "has_stripe_customer": bool(w.stripe_customer_id),
+        # Phase 21.9: when true, Polaris's widget-incident-response
+        # scan auto-applies suggested_fix to the bot's system_prompt
+        # without waiting for operator review.
+        "polaris_auto_apply_widget_fixes": bool(
+            getattr(w, "polaris_auto_apply_widget_fixes", False)
+        ),
     }
 
 
@@ -1753,6 +1763,12 @@ def patch_me(
                     detail="budget_usd_monthly must be >= 0",
                 )
             ws.budget_usd_monthly = Decimal(format(body.budget_usd_monthly, ".2f"))
+    if (
+        "polaris_auto_apply_widget_fixes" in fields
+        and body.polaris_auto_apply_widget_fixes is not None
+    ):
+        # Phase 21.9: opt in / out of auto-applying suggested fixes.
+        ws.polaris_auto_apply_widget_fixes = bool(body.polaris_auto_apply_widget_fixes)
     session.flush()
     return _serialize_workspace(ws)
 
@@ -7144,6 +7160,374 @@ def inbox_resolve(
         "status": "resolved",
         "resolved_escalation_count": len(open_escalations),
     }
+
+
+# ---------- Phase 21.9: Polaris widget-incident-response ---------- #
+
+
+@app.post("/workspaces/me/widget-incident-response/scan")
+def scan_widget_incident_patterns(
+    lookback_hours: int = 24,
+    min_size: int = 3,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 21.9: scan open widget escalations for patterns + write
+    a suggested_fix on the rows in each detected cluster.
+
+    Pipeline (each step a no-op if its precondition isn't met —
+    scans never fail just because there's nothing to do):
+
+      1. Cluster open escalations from the last `lookback_hours`
+         (default 24) grouping by `reason` + token-overlap on the
+         escalating user message. Drop clusters smaller than
+         `min_size` (default 3).
+      2. For each cluster, call Anthropic to draft a `suggested_fix`
+         dict. Anthropic failures are swallowed per-cluster (logged
+         + skip that cluster).
+      3. Persist the suggested_fix on every escalation row in the
+         cluster so the inbox can surface it.
+      4. Emit a `polaris.issue_pattern` event per cluster so the
+         dashboard's Polaris insights surface (12D.2) picks it up
+         alongside the existing cost-analysis patterns.
+      5. If the workspace has `polaris_auto_apply_widget_fixes` set,
+         immediately apply the fix to the customer-facing bot's
+         system_prompt + resolve the escalations + drop a system
+         message in each conversation.
+
+    Returns a summary: `{clusters_found, fixes_generated,
+    fixes_applied, conversations_touched}`.
+    """
+    import widget_incident_response as _wir
+
+    workspace = session.get(Workspace, auth.workspace_id)
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+
+    clusters = _wir.find_escalation_clusters(
+        session, auth.workspace_id,
+        lookback_hours=max(1, min(168, int(lookback_hours))),
+        min_size=max(2, min(50, int(min_size))),
+    )
+
+    if not clusters:
+        return {
+            "clusters_found": 0,
+            "fixes_generated": 0,
+            "fixes_applied": 0,
+            "conversations_touched": 0,
+        }
+
+    # Anthropic key for fix generation. If unset, surface a 400 —
+    # operators need to know the scan can't run without it.
+    secret_row = session.get(
+        WorkspaceSecret, (auth.workspace_id, "ANTHROPIC_API_KEY")
+    )
+    if secret_row is None:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "missing_anthropic_key",
+                "message": (
+                    "this workspace has no ANTHROPIC_API_KEY secret set. "
+                    "Add it on /account before running the scan."
+                ),
+            },
+        )
+
+    import secrets_crypto
+    try:
+        anthropic_key = secrets_crypto.decrypt(secret_row.encrypted_value)
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="couldn't decrypt ANTHROPIC_API_KEY",
+        )
+
+    # Commit before the LLM calls — Railway Postgres kills
+    # idle-in-transaction connections during multi-second waits.
+    # Same pattern as slack_orchestrator / team_planner.
+    session.commit()
+
+    fixes_generated = 0
+    fixes_applied = 0
+    conversations_touched_set: set[str] = set()
+    auto_apply = bool(workspace.polaris_auto_apply_widget_fixes)
+
+    for cluster in clusters:
+        fix = _wir.generate_suggested_fix(cluster, anthropic_key)
+        if fix is None:
+            continue
+        fixes_generated += 1
+
+        # Persist suggested_fix on every escalation in the cluster.
+        # Cluster size capped by the scan's min_size; bulk-update.
+        escalation_rows = session.execute(
+            select(WidgetEscalation).where(
+                WidgetEscalation.id.in_(cluster["escalation_ids"])
+            )
+        ).scalars().all()
+        for esc in escalation_rows:
+            esc.suggested_fix = fix
+
+        # Emit a polaris.issue_pattern event so the existing 12D.2
+        # insights surface picks it up alongside cost-analysis
+        # patterns. Run row is named lightsei.system (same as
+        # cost-analysis events) so the dashboard's Polaris view
+        # groups them together.
+        _emit_issue_pattern_event(
+            session,
+            workspace_id=auth.workspace_id,
+            cluster=cluster,
+            fix=fix,
+        )
+
+        if auto_apply:
+            # Apply the fix immediately. _apply_widget_suggested_fix
+            # handles the agent mutation + escalation resolution +
+            # system message + counts.
+            applied = _apply_widget_suggested_fix(
+                session,
+                workspace_id=auth.workspace_id,
+                escalation_rows=escalation_rows,
+                fix=fix,
+                operator_user_id=None,  # auto-applied; no operator
+            )
+            fixes_applied += 1
+            conversations_touched_set.update(applied["conversations_touched"])
+
+        session.flush()
+
+    return {
+        "clusters_found": len(clusters),
+        "fixes_generated": fixes_generated,
+        "fixes_applied": fixes_applied,
+        "conversations_touched": len(conversations_touched_set),
+        "auto_apply_enabled": auto_apply,
+    }
+
+
+def _emit_issue_pattern_event(
+    session: Session,
+    *,
+    workspace_id: str,
+    cluster: dict[str, Any],
+    fix: dict[str, Any],
+) -> None:
+    """Drop a polaris.issue_pattern event on a lightsei.system run.
+    Same pattern as 12D.2's cost_analysis events so they show up
+    side-by-side in /polaris."""
+    now = utcnow()
+    run_id = str(uuid.uuid4())
+    session.add(Run(
+        id=run_id,
+        workspace_id=workspace_id,
+        agent_name="lightsei.system",
+        started_at=now,
+        ended_at=now,
+        sensitivity_level="internal",
+    ))
+    session.flush()
+    session.add(Event(
+        workspace_id=workspace_id,
+        run_id=run_id,
+        agent_name="lightsei.system",
+        kind="polaris.issue_pattern",
+        payload={
+            "reason": cluster["reason"],
+            "size": cluster["size"],
+            "keywords": cluster.get("keywords") or [],
+            "escalation_ids": cluster["escalation_ids"],
+            "suggested_fix": fix,
+        },
+        timestamp=now,
+    ))
+    session.flush()
+
+
+def _apply_widget_suggested_fix(
+    session: Session,
+    *,
+    workspace_id: str,
+    escalation_rows: list["WidgetEscalation"],
+    fix: dict[str, Any],
+    operator_user_id: Optional[str],
+) -> dict[str, Any]:
+    """Apply a suggested fix to the bot and resolve the escalations.
+
+    Mutates the customer-facing bot's `system_prompt` with the
+    addendum + stamps the cluster's escalations resolved + drops a
+    system message into each affected conversation. Pure side-effect
+    helper; returns a small summary the caller stitches into the
+    scan / endpoint response.
+    """
+    import widget_incident_response as _wir
+
+    now = utcnow()
+    conversations_touched: set[str] = set()
+    agents_mutated: set[str] = set()
+
+    # Pull all the conversations the cluster spans + their bots in
+    # one query each. Cluster size is bounded by min_size; cost is
+    # small.
+    conv_ids = {e.conversation_id for e in escalation_rows}
+    convs = session.execute(
+        select(WidgetConversation).where(
+            WidgetConversation.id.in_(conv_ids),
+            WidgetConversation.workspace_id == workspace_id,
+        )
+    ).scalars().all()
+    convs_by_id = {c.id: c for c in convs}
+
+    # Bot mutation: snap the system_prompt on each unique customer-
+    # facing bot referenced in the cluster. Usually all rows point
+    # at the same bot (one workspace, one customer-facing bot), but
+    # the data shape allows divergence (e.g. operator swapped the
+    # bot mid-window).
+    bot_names = {
+        c.customer_facing_agent_name
+        for c in convs
+        if c.customer_facing_agent_name
+    }
+    for name in bot_names:
+        agent = session.get(Agent, (workspace_id, name))
+        if agent is None:
+            continue
+        agent.system_prompt = _wir.append_fix_to_system_prompt(
+            agent.system_prompt, fix, applied_at=now,
+        )
+        agent.updated_at = now
+        agents_mutated.add(name)
+
+    # Resolve each escalation + drop a system message in its thread.
+    for esc in escalation_rows:
+        if esc.resolved_at is not None:
+            # Already resolved; skip (idempotent).
+            continue
+        esc.resolved_at = now
+        esc.resolved_by_user_id = operator_user_id
+
+        conv = convs_by_id.get(esc.conversation_id)
+        if conv is None:
+            continue
+        # Flip back to open so the bot can take new messages with
+        # the updated system_prompt. Status is operator_owned /
+        # escalated → open. Resolved threads stay resolved.
+        if conv.status in ("escalated", "operator_owned"):
+            conv.status = "open"
+        conv.last_message_at = now
+        session.add(WidgetMessage(
+            conversation_id=conv.id,
+            role="system",
+            text=(
+                "Polaris updated the bot based on this conversation "
+                "and similar ones. The bot will try again with new "
+                "guidance."
+            ),
+            sent_at=now,
+        ))
+        conversations_touched.add(conv.id)
+
+    session.flush()
+    return {
+        "conversations_touched": conversations_touched,
+        "agents_mutated": agents_mutated,
+    }
+
+
+@app.post(
+    "/workspaces/me/inbox/{conversation_id}/escalations/"
+    "{escalation_id}/apply-fix"
+)
+def apply_escalation_suggested_fix(
+    conversation_id: str,
+    escalation_id: str,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 21.9: operator applies the Polaris-suggested fix on
+    an escalation.
+
+    Mutates the bot's system_prompt with the addendum + marks the
+    escalation resolved + drops a system message in the conversation
+    + flips the conversation back to `open` so the bot retries with
+    the new guidance. 404 if the escalation isn't on this
+    workspace's conversation; 409 if it has no suggested_fix; 409
+    if the fix has already been applied (escalation resolved)."""
+    conv = _load_inbox_conversation(session, auth.workspace_id, conversation_id)
+
+    esc = session.get(WidgetEscalation, escalation_id)
+    if esc is None or esc.conversation_id != conv.id:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "escalation_not_found"},
+        )
+
+    if not esc.suggested_fix:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "no_suggested_fix",
+                "message": (
+                    "this escalation has no Polaris-suggested fix. "
+                    "Run the scan first."
+                ),
+            },
+        )
+
+    if esc.resolved_at is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "escalation_already_resolved",
+                "message": "this escalation was already resolved.",
+            },
+        )
+
+    applied = _apply_widget_suggested_fix(
+        session,
+        workspace_id=auth.workspace_id,
+        escalation_rows=[esc],
+        fix=esc.suggested_fix,
+        operator_user_id=(auth.user.id if auth.user else None),
+    )
+    return {
+        "ok": True,
+        "applied": True,
+        "conversations_touched": list(applied["conversations_touched"]),
+        "agents_mutated": list(applied["agents_mutated"]),
+    }
+
+
+@app.post(
+    "/workspaces/me/inbox/{conversation_id}/escalations/"
+    "{escalation_id}/dismiss-fix"
+)
+def dismiss_escalation_suggested_fix(
+    conversation_id: str,
+    escalation_id: str,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 21.9: operator dismisses the suggested fix. Clears
+    `suggested_fix` on the escalation row; leaves the escalation
+    open so the operator can still take over / resolve normally.
+    Idempotent on already-dismissed."""
+    conv = _load_inbox_conversation(session, auth.workspace_id, conversation_id)
+
+    esc = session.get(WidgetEscalation, escalation_id)
+    if esc is None or esc.conversation_id != conv.id:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "escalation_not_found"},
+        )
+
+    if not esc.suggested_fix:
+        return {"ok": True, "dismissed": True, "noop": True}
+
+    esc.suggested_fix = None
+    session.flush()
+    return {"ok": True, "dismissed": True}
 
 
 # ---------- Phase 11.2: approval endpoints + auto-approval CRUD ---------- #
