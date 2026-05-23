@@ -60,6 +60,7 @@ def _load_default_handlers() -> None:
     import eval_runner  # noqa: F401
     import slack_orchestrator  # noqa: F401  (Phase 19.4)
     import team_planner  # noqa: F401
+    import widget_orchestrator  # noqa: F401  (Phase 21.6)
 
 
 def claim_pending_job(session: Session) -> Optional[dict[str, Any]]:

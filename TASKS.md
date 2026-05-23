@@ -7,13 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 21.6 — Widget chat job handler (orchestrator). 21.1-21.5 shipped 2026-05-22.**
+> **Phase 21.7 — Widget settings page. 21.1-21.5 shipped 2026-05-22; 21.6 shipped 2026-05-23.**
 
 Phase 21 spec locked 2026-05-21. Design choices: iframe-isolated widget; anonymous-only conversations in v1; one customer-facing bot per workspace via `@lightsei.on_chat("widget")`; top-level `/inbox` route. 10 sub-tasks (21.1-21.10).
 
-21.1-21.5 shipped 2026-05-22; backend at **1018 passing** (+14 from 21.5); SDK at **140 passing** (+20 from 21.5).
+21.1-21.5 shipped 2026-05-22; 21.6 shipped 2026-05-23; backend at **1028 passing** (+10 from 21.6); SDK at **150 passing** (+10 from 21.6). User-message → bot-reply round trip now works end-to-end (modulo the operator picking a bot via the 21.7 settings page).
 
-NOW is 21.6 — `widget_chat` job handler in a new `backend/widget_orchestrator.py` (parallel to `slack_orchestrator.py`). Picks up `widget_chat` jobs enqueued by 21.2's POST /messages, loads the conversation + last N messages, dispatches the `@on_chat("widget")` handler on the customer-facing bot, persists the response. Handles `LightseiEscalate` raised from the handler by calling /widget-bot/escalate on the bot's behalf. The piece that lights up the user-message → bot-reply round trip.
+NOW is 21.7 — dashboard `/widget-settings` page. Operator picks the customer-facing bot (dropdown of deployed agents), edits the `allowed_widget_origins` allowlist, sees a copyable snippet pre-filled with the workspace's `widget_public_id` (minted on first visit via the 21.5 `ensure_widget_public_id` helper). PATCH `/workspaces/me/widget-settings` + GET `/workspaces/me/widget-settings` backend endpoints. "Test it now" link opens the workspace's own widget at `/widget/{public_id}` for the operator to play with before pasting on a customer site.
 
 Phase 20 (integration breadth) shipped 2026-05-20/21: connector schema (20.1), Google OAuth install flow (20.2), three real connectors — Gmail / Calendar / Drive (20.3-20.5), bot-callable endpoint with capability + zone gates (20.6), SDK namespaced helpers (20.7), dashboard /integrations index + per-connector cards (20.8). 20.9 was a coverage rollup satisfied incrementally. 20.10 demo artifacts under `examples/p20-demo/`. Backend at **962 passing** (+126 across Phase 20; started at 836). SDK at **120 passing** (+19 from 20.7).
 
@@ -820,7 +820,7 @@ Two new SDK helpers:
 
 Plus the typed exception `LightseiEscalate(reason, payload)` — the `@on_chat` handler can raise it to escalate without a separate explicit call. Cleaner code path for the "I don't know" branch.
 
-### 21.6 — Widget chat job handler
+### 21.6 — Widget chat job handler ✅ shipped 2026-05-23
 
 New handler in `backend/jobs.py` for `kind='widget_chat'`. Pure module `backend/widget_orchestrator.py` owns the logic, parallel to `slack_orchestrator.py` from Phase 19.4:
 
@@ -1331,6 +1331,54 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-23 — Phase 21.6 shipped: widget chat orchestrator + SDK bridge
+
+The piece that lights up the user-message → bot-reply round trip end-to-end. Two halves: backend orchestrator that enqueues a per-bot Command per widget message, + SDK-side bridge that picks the Command up and dispatches to the user's `@on_chat("widget")` handler.
+
+**Backend `backend/widget_orchestrator.py`** (parallel to `slack_orchestrator.py` from Phase 19.4 — same pattern: orchestrator finds the bot, the actual LLM call happens in the bot's deployed process via Command dispatch):
+
+`run_widget_chat_job(session, workspace_id, payload)`:
+
+1. Load the `WidgetConversation` (skip if missing or cross-workspace — payload may have aged across tenants).
+2. Skip if conversation is already `resolved` or `operator_owned` (21.2 already gates this on enqueue but defense in depth).
+3. Look up the customer-facing bot by `conversation.customer_facing_agent_name` (snapshotted at conversation-start so renaming the workspace pointer mid-thread doesn't break in-flight conversations).
+4. If the agent row was deleted between operator pick + this job run, persist a `system` message ("No customer-facing bot is configured yet — please contact the operator.") and return `failed`. The end user sees the message in the iframe + the operator can take over from `/inbox`.
+5. Capability defense-in-depth: bot must hold `widget:respond` (21.5 also enforces at endpoint). If missing, persist a `bot`-role message ("This bot isn't set up to answer chat yet — please contact the operator.") and return `skipped`. The reasoning for `bot`-role here (not `system`): reads more naturally as "the bot said it can't help" than a framework-style system notice.
+6. Pull the conversation's last `WIDGET_HISTORY_LIMIT=20` messages, reverse to chronological. Pluck the new user message out as `user_message`; the rest goes in `conversation_history`.
+7. Enqueue a `Command(kind="widget.chat", approval_state="approved", expires_at=now+24h)` on the bot with payload `{conversation_id, user_message, conversation_history}`. Returns `{status: "dispatched", target_agent, command_id, conversation_id, history_count}`.
+
+Registered via `jobs.register_handler("widget_chat", ...)`, with `widget_orchestrator` added to `jobs._load_default_handlers` so the runner picks it up on startup.
+
+**SDK `sdk/lightsei/_chat.py`** — built-in `@on_command("widget.chat")` bridge handler `_widget_chat_bridge(payload)`:
+
+1. Extract `conversation_id`, `user_message`, `conversation_history` from the command payload. Missing `conversation_id` → return error (defense in depth — the orchestrator always sends it).
+2. Look up the user-registered `@on_chat("widget")` handler via `get_chat_handler("widget")`. If none registered, the bot has `widget:respond` granted but no handler code — escalate as `bot_unconfigured` so the operator sees it in `/inbox` rather than the conversation going silent.
+3. Call the handler with a structured `turn` dict: `{conversation_id, user_message, conversation_history}`.
+4. **Three return-shape branches**:
+   - String reply → POST `/widget-bot/respond` via `lightsei.respond`. Return `{ok: True, responded: True}`.
+   - `None` or empty/whitespace string → no_reply (the handler decided not to reply this turn — e.g. "still thinking, will follow up async"). No HTTP call. Return `{ok: True, no_reply: True}`.
+   - Non-string, non-None → handler bug. Log + return error. No HTTP call.
+5. **Three exception branches**:
+   - `LightseiEscalate` (control-flow signal from 21.5) → POST `/widget-bot/escalate` with the exception's `reason` + `payload`. Return `{ok: True, escalated: True, reason}`.
+   - Any other exception → escalate as `bot_crash` with `payload={"error": repr(exc)}`. Don't let an exception in the escalate call propagate either; graceful degradation per CLAUDE.md. Return `{ok: False, escalated: True, error}`.
+   - If the escalate call itself raises a `LightseiError` (transport failure, capability missing), log + return `{ok: False, escalated: False, error}`.
+
+Registered as a side effect of importing `_chat.py` (same pattern as `_commands.py`'s built-in `ping` handler). The bridge is a clean no-op if the bot doesn't use the widget, so unconditional registration doesn't harm non-widget bots.
+
+**End-to-end flow now lit up**: end user types in iframe → `POST /widget/{public_id}/messages` enqueues `widget_chat` job → orchestrator handler picks it up + finds bot + enqueues `widget.chat` Command → bot's SDK command poller picks the Command up + dispatches to bridge → bridge calls `@on_chat("widget")` handler → handler returns string OR raises `LightseiEscalate` → bridge posts via `/widget-bot/respond` or `/widget-bot/escalate` → widget poll picks up the new message + paints it in the iframe.
+
+**Verification**: 10 new backend tests in `backend/tests/test_widget_orchestrator.py` + 10 new SDK tests in `sdk/tests/test_widget_chat_bridge.py`.
+
+Backend tests cover: happy path enqueues a `widget.chat` Command with `approval_state="approved"` + payload shape; `user_message` is plucked separately from `conversation_history` (no duplication); history clamps to `WIDGET_HISTORY_LIMIT`; missing conversation → skipped; cross-workspace conversation → skipped (tenant isolation); missing bot agent row → system message + status failed; missing `widget:respond` capability → bot-role message + status skipped; `resolved` conversation skipped; `operator_owned` conversation skipped; handler is registered in `jobs._HANDLERS` after import.
+
+SDK tests cover: bridge is auto-registered under `widget.chat` in the command handler registry; string return posts to `/widget-bot/respond` with the right body shape; turn dict passes through correctly with full history; `LightseiEscalate` routes to `/widget-bot/escalate` with the exception's reason + payload; uncaught exception escalates as `bot_crash` with the `repr(exc)` in payload; no widget handler registered escalates as `bot_unconfigured`; `None` and empty/whitespace returns are `no_reply` without HTTP calls; non-string non-None returns are errors without HTTP; missing `conversation_id` in payload returns clean error.
+
+Both test files use the existing `widget_bot_fake` / `bridge_fake` HTTP server pattern (modeled on `connector_fake` from earlier phases).
+
+Full SDK suite: **150 passed in 36s** (was 140, +10 net new). Full backend suite: **1028 passed in 185s** (was 1018, +10 net new). 0 regressions either side. Known #102 flake didn't fire.
+
+**What this unblocks**: 21.7 (widget settings page) is the operator-side surface — pick the customer-facing bot, edit the origin allowlist, copy the snippet. After 21.7, an operator can wire up the widget end-to-end through the dashboard without any backend or DB poking. 21.8 (operator inbox) is then the surface that surfaces the escalations + lets the operator take over conversations the bot couldn't handle.
 
 ### 2026-05-22 — Phase 21.5 shipped: SDK escalate helper + on_chat widget extension
 
