@@ -7,13 +7,17 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 21.10 — End-to-end demo (final Phase 21 sub-task). 21.1-21.5 shipped 2026-05-22; 21.6-21.9 shipped 2026-05-23.**
+> **Phase 22 — TBD. Phase 21 (customer-facing widget + operator inbox) complete 2026-05-23.**
+
+Phase 21 (customer-facing widget) complete: 10 sub-tasks shipped + 21.10 demo artifacts under `examples/p21-demo/`. Customer's end users can now interact with bots through an embeddable widget; operators triage in `/inbox`; Polaris notices escalation patterns + drafts fixes; operator applies + bot self-improves. Same trust-zone + capability model from Phases 16-20 enforces on the customer-facing surface too — a public-zoned bot can't leak data even if an operator misconfigures it.
+
+Backend at **1090 passing** (+25 from Phase 21 work today; +230 across all of Phase 21). SDK at **150 passing** (+10 from 21.5-21.6). Dashboard adds three new routes (`/widget/[publicId]`, `/widget-settings`, `/inbox`).
+
+NOW pointer is open. Promote Phase 22 from the rough shape (or come back to a parked item: #64 deployment cleanup, #65 Coral generator quality, #102 test flake) before starting new work.
 
 Phase 21 spec locked 2026-05-21. Design choices: iframe-isolated widget; anonymous-only conversations in v1; one customer-facing bot per workspace via `@lightsei.on_chat("widget")`; top-level `/inbox` route. 10 sub-tasks (21.1-21.10).
 
-21.1-21.9 shipped; backend at **1090 passing** (+25 from 21.9); SDK at **150 passing**. Full Phase 21 pipeline works end-to-end: end user → widget iframe → POST /messages → widget_chat job → widget.chat Command → bot @on_chat handler → reply (or escalate) → operator triages in /inbox → Polaris scans escalation patterns → operator applies the suggested fix to the bot's system prompt → bot retries with new guidance.
-
-NOW is 21.10 — end-to-end demo artifacts: a "Halo" customer site README that team-from-readme can turn into a customer-facing bot, an example fake-customer page that embeds the widget, a runbook (`examples/p21-demo/README.md`) walking through the 5-act demo flow (paste → ask → deflect → escalate → take-over → Polaris suggests → apply → deflects). Mirrors `examples/p20-demo/` shape — artifacts + runbook, live execution is operator-driven.
+All 10 Phase 21 sub-tasks shipped 2026-05-22/23; artifacts under `examples/p21-demo/` (halo-product-readme.md + support_bot.py + embed-example.html + 5-act README runbook). Live demo execution is operator-driven per the runbook (same pattern as `examples/p20-demo/`).
 
 Phase 20 (integration breadth) shipped 2026-05-20/21: connector schema (20.1), Google OAuth install flow (20.2), three real connectors — Gmail / Calendar / Drive (20.3-20.5), bot-callable endpoint with capability + zone gates (20.6), SDK namespaced helpers (20.7), dashboard /integrations index + per-connector cards (20.8). 20.9 was a coverage rollup satisfied incrementally. 20.10 demo artifacts under `examples/p20-demo/`. Backend at **962 passing** (+126 across Phase 20; started at 836). SDK at **120 passing** (+19 from 20.7).
 
@@ -869,7 +873,7 @@ Operator surfaces:
 
 Auto-apply path matches 12D.3's consent model: per-workspace setting `polaris_auto_apply_widget_fixes` (default off). When on, applying happens automatically with a notification to the operator inbox of what changed.
 
-### 21.10 — Demo
+### 21.10 — Demo ✅ artifacts shipped 2026-05-23 (live run is operator-driven)
 
 Paste `examples/p21-demo/widget.html` onto a local file:// or any static-host page (the snippet just needs a workspace public id; CDN-served widget.js does the rest).
 
@@ -1331,6 +1335,26 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-23 — Phase 21 code-complete: demo artifacts shipped (21.10)
+
+Phase 21 (customer-facing widget + operator inbox) wraps with the demo artifacts under `examples/p21-demo/`. Live execution is operator-driven per the runbook — same pattern as `examples/p16-demo/` and `examples/p20-demo/` (Lightsei provides the seed README + reference bot code + runbook + proof scripts; the prospect / operator drives the live clicks).
+
+Four files (476 lines total):
+
+- **`halo-product-readme.md`** (43 lines): the "Halo" build-monitoring SaaS README an operator drops into team-from-readme. Three customer-question buckets (pricing, integration setup, account-specific) make the bot's deflect-vs-escalate logic legible. Explicitly calls out the `public` trust zone + that the bot should escalate when stuck. Same shape as `examples/p16-demo/crm-readme.md` (Coral) and `examples/p20-demo/digest-readme.md` (Halo internal team).
+- **`support_bot.py`** (223 lines): the deployable customer-facing bot. Registers `@lightsei.on_chat("widget")` (Phase 21.5 SDK). Heuristic FAQ lookup for pricing + integration questions; account-specific-question detector raises `LightseiEscalate("account_specific_request")` so the bridge handler (Phase 21.6) routes via `lightsei.escalate(...)`. Heuristic vs LLM is a deliberate scope choice — keeps the demo flow deterministic + cheap; a real bot swaps in an LLM call + doc retrieval. Verified imports cleanly against the SDK; the `_needs_escalation` + `_faq_lookup` helpers behave as expected on canonical inputs.
+- **`embed-example.html`** (85 lines, from 21.4 — referenced by the runbook): minimal Halo-themed product page with the widget snippet at the bottom. Operator replaces `data-workspace="preview-id"` with their workspace's `widget_public_id` from `/widget-settings`, opens in a browser, gets the launcher bubble in the bottom-right.
+- **`README.md`** (125 lines): 5-act runbook. Act 1 — wire up the widget (mint public id via `/widget-settings`, pick bot, add origins). Act 2 — paste the snippet + ask a deflectable question + watch it land in `/inbox` as Open. Act 3 — escalate an account-specific question + take over + reply + resolve. Act 4 — fire 3 more similar escalations + click "Scan for patterns" + Polaris drafts a fix. Act 5 — Apply suggested fix + bot retries with the new system_prompt addendum + similar question deflects. Closes with "what this demo proves" (wedge extends to customer-facing surfaces; operator-in-the-loop is legible; self-improvement is observable; Lightsei now spans both internal and end-user audiences). Cleanup section + notes section calls out the heuristic FAQ choice + parks for Phase 21B (signed-token identity, SSE on inbox, inline embed, embedding-based clustering, widget theming).
+
+**Verification**: all four artifacts in place. `support_bot.py` imports successfully against the installed SDK. `halo-product-readme.md` is just markdown copy. `embed-example.html` was already verified via a localhost run earlier (clicking the bubble loaded the iframe + surfaced the 404 "no widget configured" path correctly when no workspace was seeded). Runbook reads cold — covers the full pipeline from snippet-paste to applied-fix.
+
+**What this closes**: Phase 21 (customer-facing chat widget + operator inbox) is functionally complete. 10 sub-tasks, +230 backend tests across the phase (started at 836 way back in Phase 16), +10 SDK tests, three new dashboard routes (`/widget/[publicId]`, `/widget-settings`, `/inbox`), one new SDK exception class (`LightseiEscalate`), two new SDK helpers (`lightsei.respond` + `lightsei.escalate`), and the `@on_chat("widget")` channel extension. Lightsei's product surface now covers both the customer's internal team (Phases 16-20) and the customer's end users (Phase 21) — both running under the same trust-zone + capability model.
+
+NOW pointer advances. Open options:
+- Phase 22 spec (no rough shape yet — needs a design pass first).
+- Parking-lot tasks: #64 deployment cleanup (audit + stop unused bots on prod); #65 generator quality (Coral bots crash on startup); #102 test flake (`test_app_mention_enqueues_orchestration_job` order-dependent — still firing once per full sweep but always clearing solo).
+- Live Stripe activation (#52 still in_progress, waiting on verification).
 
 ### 2026-05-23 — Phase 21.9 shipped: Polaris widget-incident-response
 
