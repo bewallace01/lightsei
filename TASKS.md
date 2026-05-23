@@ -7,13 +7,13 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 21.8 — Operator inbox (`/inbox`). 21.1-21.5 shipped 2026-05-22; 21.6 + 21.7 shipped 2026-05-23.**
+> **Phase 21.9 — Polaris incident-response extension. 21.1-21.5 shipped 2026-05-22; 21.6-21.8 shipped 2026-05-23.**
 
 Phase 21 spec locked 2026-05-21. Design choices: iframe-isolated widget; anonymous-only conversations in v1; one customer-facing bot per workspace via `@lightsei.on_chat("widget")`; top-level `/inbox` route. 10 sub-tasks (21.1-21.10).
 
-21.1-21.7 shipped; backend at **1042 passing** (+14 from 21.7); SDK at **150 passing**. An operator can now wire up the widget end-to-end through the dashboard: pick the customer-facing bot (auto-grants capabilities), set the allowed-origins list, copy the snippet, paste on the customer site — all without a single Python or DB poke.
+21.1-21.8 shipped; backend at **1065 passing** (+23 from 21.8); SDK at **150 passing**. End-to-end widget surface is now operator-driveable: pick bot → set origins → copy snippet → paste on customer site → end users chat → operator triages escalations in `/inbox` (take over, reply, resolve).
 
-NOW is 21.8 — top-level `/inbox` dashboard route. Two-column list+thread view. Filters (open / escalated / operator-owned / resolved). Operator can take over conversations (pauses bot), reply directly, mark resolved. Backend endpoints: `GET /workspaces/me/inbox` (list + filter), `GET /workspaces/me/inbox/{conversation_id}` (thread), `POST /workspaces/me/inbox/{conversation_id}/take-over`, `POST /workspaces/me/inbox/{conversation_id}/messages`, `POST /workspaces/me/inbox/{conversation_id}/resolve`.
+NOW is 21.9 — Polaris extends to widget incident response. New Polaris tick task scans `widget_escalations` from the last N hours, clusters by reason + topic, emits a `polaris.issue_pattern` event when a cluster crosses a threshold, attaches a `suggested_fix` jsonb blob to the escalation rows in the cluster. The inbox surfaces "Apply suggested fix" when an escalation has one; applying mutates the bot's `system_prompt` with the proposed addendum. Auto-apply gated on the same consent model as 12D.3.
 
 Phase 20 (integration breadth) shipped 2026-05-20/21: connector schema (20.1), Google OAuth install flow (20.2), three real connectors — Gmail / Calendar / Drive (20.3-20.5), bot-callable endpoint with capability + zone gates (20.6), SDK namespaced helpers (20.7), dashboard /integrations index + per-connector cards (20.8). 20.9 was a coverage rollup satisfied incrementally. 20.10 demo artifacts under `examples/p20-demo/`. Backend at **962 passing** (+126 across Phase 20; started at 836). SDK at **120 passing** (+19 from 20.7).
 
@@ -843,7 +843,7 @@ New dashboard page `dashboard/app/widget-settings/page.tsx` (linked from `/integ
 
 Backend: `PATCH /workspaces/me/widget-settings` updates `customer_facing_agent_id` + `allowed_widget_origins`. `GET /workspaces/me/widget-settings` returns the current values + the public id.
 
-### 21.8 — /inbox dashboard route
+### 21.8 — /inbox dashboard route ✅ shipped 2026-05-23
 
 New top-level route `dashboard/app/inbox/page.tsx` + nav entry. Two-column layout:
 
@@ -1331,6 +1331,47 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-23 — Phase 21.8 shipped: operator inbox
+
+Top-level `/inbox` route + five backend endpoints. The operator-side surface that lets a human triage escalations + intervene in widget conversations the bot couldn't handle.
+
+**Backend** (`backend/main.py`) — five new endpoints under `/workspaces/me/inbox`:
+
+- `GET /workspaces/me/inbox?status=&since=&limit=` — conversation list. Filter values: `all`, `active` (default; open + escalated + operator_owned), `open`, `escalated`, `operator_owned`, `resolved`. `since` is an ISO timestamp drives the polling-refresh shape. Each row carries `{id, status, customer_facing_agent_name, sensitivity_level, anon_user_id, started_at, last_message_at, resolved_at, open_escalation_count, last_message_preview, last_message_role}`. Preview is truncated at `INBOX_PREVIEW_CHARS=140` with an ellipsis. **Ordering**: escalated rows bumped to the top regardless of recency (they need attention), then operator_owned, then everything else by `last_message_at DESC`. Bulk queries for agents / last messages / open escalation counts avoid N+1. Response includes `as_of` server timestamp so the dashboard can compute a fresh `since` cursor without trusting client clocks.
+- `GET /workspaces/me/inbox/{conversation_id}` — thread view. Full conversation metadata + ordered message list + escalation rows (open + resolved). The escalation row's `suggested_fix` field is null until 21.9 ships.
+- `POST /workspaces/me/inbox/{conversation_id}/take-over` — flips `status='operator_owned'`, drops a system message ("An operator has joined the conversation.") into the thread, bumps `last_message_at`. Idempotent on already-operator_owned (returns `noop: true`); 409 `conversation_resolved` on resolved threads (re-opening parked to a future surface). Once operator-owned, the 21.2 POST endpoint skips enqueueing orchestrator jobs + 21.6 skips dispatching — the bot is paused.
+- `POST /workspaces/me/inbox/{conversation_id}/messages` — operator types a reply. Body `{text}` (max 8000 chars). Persists a `role='operator'` message. **Allowed on open/escalated/operator_owned** — the operator can chime in even without taking over. 409 on resolved.
+- `POST /workspaces/me/inbox/{conversation_id}/resolve` — wraps the thread up. Sets `status='resolved'`, stamps `resolved_at`, drops a system message ("This conversation has been marked resolved by an operator."), and **resolves all open escalation rows on the conversation** (each one's `resolved_at` + `resolved_by_user_id` to the operator). Returns `{resolved_escalation_count}`. Idempotent.
+
+Shared `_load_inbox_conversation` helper for tenant-scoped lookup (404 on miss or cross-workspace) — same shape as the bot endpoints' helper from 21.5.
+
+**Dashboard** (`dashboard/app/inbox/page.tsx`) — two-column layout:
+
+- **Left** (320px sidebar): conversation list with filter chips (`Active` / `Escalated` / `I'm handling` / `Open` / `Resolved` / `All`). Each row: status badge (color-coded by status), zone chip, `last_message_preview` (line-clamp-2), agent name + relative time (`12m ago`), open escalation count badge if any. Click selects the conversation. Auto-selects the first one on initial load.
+- **Right** (flex-1): selected conversation thread. Header with agent name + zone + status badge. Open-escalation panel above the message pane (rose-tinted) showing reason + payload — leaves room for the 21.9 "Apply suggested fix" button to land in. Messages pane with role-tinted bubbles (`user` neutral, `bot` indigo, `operator` emerald right-aligned with `operator` label, `system` amber italic with `system ·` prefix). Action bar: `Take over` (amber) + `Mark resolved` (emerald-outlined) + textarea + Send. Take-over button hides when already operator-owned. Resolved threads show a wrap-up message instead of the action bar (re-opening parked).
+
+**Polling**: 5s interval, re-fetches both the list and the selected thread. Naive full-refresh (no `since` cursor consumption in v1) — the demo cadence handles it cleanly; cursor-based incremental refresh can land later if conversation volume warrants it.
+
+**Keyboard**: ⌘+Enter (or Ctrl+Enter) sends the reply. Hint shown in the action bar.
+
+**Dashboard supporting changes**:
+- `api.ts`: `fetchInbox({status?, since?})`, `fetchInboxConversation(id)`, `takeOverConversation(id)`, `postInboxOperatorReply(id, text)`, `resolveConversation(id)` + the `InboxConversationRow`, `InboxConversationDetail`, `InboxMessage`, `InboxEscalation` types.
+- `Header.tsx`: new top-level `Inbox` nav entry between `Trust zones` and `Account`. Mirrors the spec — the inbox is a first-class surface, not buried under integrations.
+
+**Verification**: 23 new backend tests in `backend/tests/test_widget_inbox_endpoints.py` cover all five endpoints:
+
+- GET list: default `active` filter; escalated-bumped-to-top sort (escalated with older `last_message_at` ranks above more-recent open); explicit-status filtering; invalid status → 422; per-row preview/zone/agent surface; preview truncation with ellipsis; open escalation count; `?since=` cursor; tenant isolation; null `sensitivity_level` fallback when the agent was deleted.
+- GET thread: chronological message order; escalations array; 404 on unknown id; tenant isolation.
+- Take over: status flip + system message + idempotency + 409 on resolved.
+- Operator reply: persists operator-role message + 409 on resolved + allowed on open/escalated without take-over.
+- Resolve: status + `resolved_at` + cascading escalation resolution + system message + idempotency + tenant isolation.
+
+`npx tsc --noEmit` clean. `npx next build` adds `/inbox` as 4.5 kB static. No regressions on the existing 28 routes.
+
+Full backend suite: **1065 passed in 197s** (was 1042, +23 net new). 0 regressions. Known #102 flake didn't fire this run.
+
+**What this unblocks**: 21.9 (Polaris incident-response) plugs into the existing escalation surface — the `suggested_fix` jsonb field on `widget_escalations` already exists from 21.1, the inbox already has a panel where the button will land, and the schema supports clustering by reason out of the box. After 21.9 lands, the full Phase 21 demo flow works: end user asks → bot escalates → operator triages → Polaris notices the pattern → operator applies the suggested fix → next similar question deflects.
 
 ### 2026-05-23 — Phase 21.7 shipped: widget settings page
 

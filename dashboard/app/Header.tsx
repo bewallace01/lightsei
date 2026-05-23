@@ -85,6 +85,7 @@ const NAV: NavItem[] = [
     ],
   },
   { kind: "link", href: "/zones", label: "Trust zones" },
+  { kind: "link", href: "/inbox", label: "Inbox" },
   {
     kind: "group",
     label: "Integrations",

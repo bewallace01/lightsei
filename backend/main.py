@@ -6703,6 +6703,449 @@ def patch_widget_settings(
     return get_widget_settings(auth=auth, session=session)
 
 
+# ---------- Phase 21.8: operator inbox endpoints ---------- #
+
+
+# Conversation list defaults — small enough to render quickly,
+# big enough that the dashboard rarely needs to paginate. Cursor-
+# based pagination is parked to a future surface; the inbox is
+# typically small (tens of conversations at v1 scale).
+INBOX_DEFAULT_LIMIT = 50
+INBOX_MAX_LIMIT = 200
+INBOX_PREVIEW_CHARS = 140
+
+
+_INBOX_STATUS_FILTERS = {
+    "all",
+    "open",
+    "escalated",
+    "operator_owned",
+    "resolved",
+    # Convenience grouping: anything still needing attention. Useful
+    # default for the "open + escalated + operator_owned" view that
+    # excludes resolved threads.
+    "active",
+}
+
+
+def _serialize_inbox_conversation_row(
+    conv: "WidgetConversation",
+    *,
+    agent: Optional["Agent"],
+    last_message: Optional["WidgetMessage"],
+    open_escalation_count: int,
+) -> dict[str, Any]:
+    """Per-row shape for the conversation list. Compact —
+    drops full message bodies + escalation payloads."""
+    preview = ""
+    if last_message and last_message.text:
+        preview = last_message.text[:INBOX_PREVIEW_CHARS]
+        if len(last_message.text) > INBOX_PREVIEW_CHARS:
+            preview = preview + "…"
+    return {
+        "id": conv.id,
+        "status": conv.status,
+        "customer_facing_agent_name": conv.customer_facing_agent_name,
+        # Snapshot the bot's current zone for the row; if the agent
+        # was deleted, surface null so the dashboard chip falls back
+        # to a placeholder rather than crashing.
+        "sensitivity_level": agent.sensitivity_level if agent else None,
+        "anon_user_id": conv.anon_user_id,
+        "started_at": conv.started_at.isoformat(),
+        "last_message_at": conv.last_message_at.isoformat(),
+        "resolved_at": conv.resolved_at.isoformat() if conv.resolved_at else None,
+        "open_escalation_count": open_escalation_count,
+        "last_message_preview": preview,
+        "last_message_role": last_message.role if last_message else None,
+    }
+
+
+@app.get("/workspaces/me/inbox")
+def list_inbox(
+    status: str = "active",
+    since: Optional[str] = None,
+    limit: int = INBOX_DEFAULT_LIMIT,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 21.8: list widget conversations for the operator inbox.
+
+    Filters (`?status=`):
+      - all              → every conversation
+      - active (default) → open + escalated + operator_owned
+      - open / escalated / operator_owned / resolved → exact match
+
+    `?since=` is an ISO timestamp; only returns conversations with
+    `last_message_at > since`. Drives the dashboard's polling refresh
+    without re-rendering everything.
+
+    Ordering: escalated rows bumped to the top (they need attention),
+    then everyone else by `last_message_at DESC` (most-recently-active
+    first).
+    """
+    if status not in _INBOX_STATUS_FILTERS:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "invalid_status_filter",
+                "valid": sorted(_INBOX_STATUS_FILTERS),
+            },
+        )
+    limit = max(1, min(INBOX_MAX_LIMIT, int(limit)))
+
+    q = select(WidgetConversation).where(
+        WidgetConversation.workspace_id == auth.workspace_id
+    )
+    if status == "active":
+        q = q.where(WidgetConversation.status.in_(
+            ["open", "escalated", "operator_owned"]
+        ))
+    elif status != "all":
+        q = q.where(WidgetConversation.status == status)
+
+    if since:
+        try:
+            since_dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail="since must be an ISO timestamp",
+            )
+        q = q.where(WidgetConversation.last_message_at > since_dt)
+
+    # Pull the conversations first. Order is applied after we layer
+    # in the "escalated first" sort in Python so we don't need a
+    # complicated SQL CASE expression.
+    q = q.order_by(WidgetConversation.last_message_at.desc()).limit(limit)
+    conversations = session.execute(q).scalars().all()
+
+    # Bulk-fetch the customer-facing agents + last message per
+    # conversation + open escalation counts to avoid N+1.
+    agent_keys = {
+        (auth.workspace_id, c.customer_facing_agent_name)
+        for c in conversations
+        if c.customer_facing_agent_name
+    }
+    agents_by_key: dict[tuple[str, str], "Agent"] = {}
+    if agent_keys:
+        agent_rows = session.execute(
+            select(Agent).where(
+                Agent.workspace_id == auth.workspace_id,
+                Agent.name.in_({k[1] for k in agent_keys}),
+            )
+        ).scalars().all()
+        agents_by_key = {(a.workspace_id, a.name): a for a in agent_rows}
+
+    # Last message per conversation. Cheap one-shot query against
+    # the (conversation_id, sent_at) index from Phase 21.1.
+    last_messages_by_conv: dict[str, WidgetMessage] = {}
+    if conversations:
+        conv_ids = [c.id for c in conversations]
+        # Per-conversation latest: subquery for max(id), then join.
+        # The Phase 21.1 index on (conversation_id, sent_at) makes
+        # this cheap.
+        from sqlalchemy import func as _func
+        latest_ids = session.execute(
+            select(
+                WidgetMessage.conversation_id,
+                _func.max(WidgetMessage.id).label("max_id"),
+            )
+            .where(WidgetMessage.conversation_id.in_(conv_ids))
+            .group_by(WidgetMessage.conversation_id)
+        ).all()
+        max_id_set = [row.max_id for row in latest_ids]
+        if max_id_set:
+            last_msg_rows = session.execute(
+                select(WidgetMessage).where(WidgetMessage.id.in_(max_id_set))
+            ).scalars().all()
+            last_messages_by_conv = {
+                m.conversation_id: m for m in last_msg_rows
+            }
+
+    # Open escalations counted per conversation. Used by the row
+    # renderer to badge "needs attention" conversations.
+    open_escalation_counts: dict[str, int] = {}
+    if conversations:
+        from sqlalchemy import func as _func
+        counts = session.execute(
+            select(
+                WidgetEscalation.conversation_id,
+                _func.count(WidgetEscalation.id).label("n"),
+            )
+            .where(
+                WidgetEscalation.conversation_id.in_(
+                    [c.id for c in conversations]
+                ),
+                WidgetEscalation.resolved_at.is_(None),
+            )
+            .group_by(WidgetEscalation.conversation_id)
+        ).all()
+        open_escalation_counts = {row.conversation_id: row.n for row in counts}
+
+    rows = [
+        _serialize_inbox_conversation_row(
+            c,
+            agent=agents_by_key.get((auth.workspace_id, c.customer_facing_agent_name or "")),
+            last_message=last_messages_by_conv.get(c.id),
+            open_escalation_count=open_escalation_counts.get(c.id, 0),
+        )
+        for c in conversations
+    ]
+
+    # Bump escalated rows to the top. Stable sort preserves the
+    # last_message_at DESC ordering within each group.
+    def _sort_key(row):
+        # Lower priority value = sorted earlier.
+        if row["status"] == "escalated":
+            return 0
+        if row["status"] == "operator_owned":
+            return 1
+        return 2
+
+    rows.sort(key=_sort_key)
+
+    return {
+        "conversations": rows,
+        "filter": status,
+        "limit": limit,
+        # Server's current time helps the dashboard compute a fresh
+        # since cursor for the next poll without trusting client clocks.
+        "as_of": utcnow().isoformat(),
+    }
+
+
+def _load_inbox_conversation(
+    session: Session, workspace_id: str, conversation_id: str,
+) -> "WidgetConversation":
+    """Shared helper: load a conversation scoped to the workspace.
+    Same shape as the helper the bot endpoints use."""
+    conv = session.get(WidgetConversation, conversation_id)
+    if conv is None or conv.workspace_id != workspace_id:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "conversation_not_found",
+                "message": (
+                    f"conversation {conversation_id!r} not in this workspace"
+                ),
+            },
+        )
+    return conv
+
+
+@app.get("/workspaces/me/inbox/{conversation_id}")
+def get_inbox_conversation(
+    conversation_id: str,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 21.8: thread view for a single conversation.
+
+    Returns the full conversation metadata, the message list in
+    chronological order, and any escalation rows (resolved + open).
+    Operators read this to triage + decide whether to take over.
+    """
+    conv = _load_inbox_conversation(session, auth.workspace_id, conversation_id)
+
+    messages = session.execute(
+        select(WidgetMessage)
+        .where(WidgetMessage.conversation_id == conv.id)
+        .order_by(WidgetMessage.sent_at, WidgetMessage.id)
+    ).scalars().all()
+
+    escalations = session.execute(
+        select(WidgetEscalation)
+        .where(WidgetEscalation.conversation_id == conv.id)
+        .order_by(WidgetEscalation.escalated_at)
+    ).scalars().all()
+
+    agent = None
+    if conv.customer_facing_agent_name:
+        agent = session.get(
+            Agent, (auth.workspace_id, conv.customer_facing_agent_name)
+        )
+
+    return {
+        "id": conv.id,
+        "status": conv.status,
+        "customer_facing_agent_name": conv.customer_facing_agent_name,
+        "sensitivity_level": agent.sensitivity_level if agent else None,
+        "anon_user_id": conv.anon_user_id,
+        "started_at": conv.started_at.isoformat(),
+        "last_message_at": conv.last_message_at.isoformat(),
+        "resolved_at": conv.resolved_at.isoformat() if conv.resolved_at else None,
+        "messages": [
+            {
+                "id": m.id,
+                "role": m.role,
+                "text": m.text,
+                "sent_at": m.sent_at.isoformat(),
+            }
+            for m in messages
+        ],
+        "escalations": [
+            {
+                "id": e.id,
+                "reason": e.reason,
+                "payload": e.payload or {},
+                "suggested_fix": e.suggested_fix,
+                "escalated_at": e.escalated_at.isoformat(),
+                "resolved_at": e.resolved_at.isoformat() if e.resolved_at else None,
+            }
+            for e in escalations
+        ],
+    }
+
+
+@app.post("/workspaces/me/inbox/{conversation_id}/take-over")
+def inbox_take_over(
+    conversation_id: str,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 21.8: operator takes over the conversation.
+
+    Flips `status='operator_owned'`, drops a system message into the
+    thread (so the end user's iframe shows the handoff), bumps
+    `last_message_at`. Idempotent on already-operator_owned (returns
+    `noop: true`). Refuses on `resolved` (operator should re-open
+    explicitly — not in v1).
+
+    Once the conversation is operator_owned, 21.2's POST /messages
+    skips enqueueing the orchestrator job (bot is paused) and 21.6's
+    orchestrator skips dispatching. Subsequent end-user messages
+    are recorded but no bot reply lands.
+    """
+    conv = _load_inbox_conversation(session, auth.workspace_id, conversation_id)
+
+    if conv.status == "operator_owned":
+        return {"ok": True, "status": "operator_owned", "noop": True}
+    if conv.status == "resolved":
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "conversation_resolved",
+                "message": (
+                    "this conversation has been resolved; reopening from "
+                    "the inbox is not supported in v1."
+                ),
+            },
+        )
+
+    now = utcnow()
+    conv.status = "operator_owned"
+    conv.last_message_at = now
+    session.add(WidgetMessage(
+        conversation_id=conv.id,
+        role="system",
+        text="An operator has joined the conversation.",
+        sent_at=now,
+    ))
+    session.flush()
+    return {"ok": True, "status": "operator_owned"}
+
+
+class InboxOperatorReplyIn(BaseModel):
+    """Body for `POST /workspaces/me/inbox/{id}/messages` (Phase 21.8).
+
+    Operator types a reply directly into the conversation. The bot
+    is paused (conversation should be `operator_owned`) so the
+    reply doesn't race with bot output."""
+    text: str = Field(min_length=1, max_length=WIDGET_MESSAGE_MAX_LEN)
+
+
+@app.post("/workspaces/me/inbox/{conversation_id}/messages")
+def inbox_operator_reply(
+    conversation_id: str,
+    body: InboxOperatorReplyIn,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 21.8: persist an operator-typed reply into the
+    conversation.
+
+    Refuses if the conversation is `resolved` (don't let an operator
+    accidentally re-open a closed thread by typing). Allowed on
+    `open`/`escalated`/`operator_owned` — operators can also reply
+    to an escalation row without taking over first (the system
+    message remains; the operator just chimes in).
+    """
+    conv = _load_inbox_conversation(session, auth.workspace_id, conversation_id)
+    if conv.status == "resolved":
+        raise HTTPException(
+            status_code=409,
+            detail={"error": "conversation_resolved"},
+        )
+
+    now = utcnow()
+    msg = WidgetMessage(
+        conversation_id=conv.id,
+        role="operator",
+        text=body.text,
+        sent_at=now,
+    )
+    session.add(msg)
+    conv.last_message_at = now
+    session.flush()
+    return {
+        "ok": True,
+        "message_id": msg.id,
+        "conversation_id": conv.id,
+    }
+
+
+@app.post("/workspaces/me/inbox/{conversation_id}/resolve")
+def inbox_resolve(
+    conversation_id: str,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 21.8: operator wraps up the conversation.
+
+    Sets `status='resolved'`, stamps `resolved_at`, drops a system
+    message into the thread, and resolves any open escalation rows
+    (stamps each one's `resolved_at` + `resolved_by_user_id` to the
+    operator). Idempotent on already-resolved.
+    """
+    conv = _load_inbox_conversation(session, auth.workspace_id, conversation_id)
+    if conv.status == "resolved":
+        return {"ok": True, "status": "resolved", "noop": True}
+
+    now = utcnow()
+    conv.status = "resolved"
+    conv.resolved_at = now
+    conv.last_message_at = now
+
+    # Resolve any open escalations on the conversation. Stamp the
+    # operator as the resolver so the audit trail captures who
+    # closed it.
+    open_escalations = session.execute(
+        select(WidgetEscalation).where(
+            WidgetEscalation.conversation_id == conv.id,
+            WidgetEscalation.resolved_at.is_(None),
+        )
+    ).scalars().all()
+    operator_user_id = (
+        auth.user.id if auth.user else None
+    )
+    for esc in open_escalations:
+        esc.resolved_at = now
+        esc.resolved_by_user_id = operator_user_id
+
+    session.add(WidgetMessage(
+        conversation_id=conv.id,
+        role="system",
+        text="This conversation has been marked resolved by an operator.",
+        sent_at=now,
+    ))
+    session.flush()
+    return {
+        "ok": True,
+        "status": "resolved",
+        "resolved_escalation_count": len(open_escalations),
+    }
+
+
 # ---------- Phase 11.2: approval endpoints + auto-approval CRUD ---------- #
 
 

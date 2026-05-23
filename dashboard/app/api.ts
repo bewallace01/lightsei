@@ -1968,3 +1968,117 @@ export async function patchWidgetSettings(patch: {
     body: JSON.stringify(patch),
   })) as WidgetSettings;
 }
+
+
+// ---------- Phase 21.8: operator inbox helpers ---------- //
+
+export type InboxConversationRow = {
+  id: string;
+  status: "open" | "escalated" | "operator_owned" | "resolved";
+  customer_facing_agent_name: string | null;
+  sensitivity_level: SensitivityLevel | null;
+  anon_user_id: string | null;
+  started_at: string;
+  last_message_at: string;
+  resolved_at: string | null;
+  open_escalation_count: number;
+  last_message_preview: string;
+  last_message_role: "user" | "bot" | "operator" | "system" | null;
+};
+
+export type InboxListResponse = {
+  conversations: InboxConversationRow[];
+  filter: string;
+  limit: number;
+  as_of: string;
+};
+
+export type InboxMessage = {
+  id: number;
+  role: "user" | "bot" | "operator" | "system";
+  text: string;
+  sent_at: string;
+};
+
+export type InboxEscalation = {
+  id: string;
+  reason: string;
+  payload: Record<string, unknown>;
+  suggested_fix: Record<string, unknown> | null;
+  escalated_at: string;
+  resolved_at: string | null;
+};
+
+export type InboxConversationDetail = {
+  id: string;
+  status: InboxConversationRow["status"];
+  customer_facing_agent_name: string | null;
+  sensitivity_level: SensitivityLevel | null;
+  anon_user_id: string | null;
+  started_at: string;
+  last_message_at: string;
+  resolved_at: string | null;
+  messages: InboxMessage[];
+  escalations: InboxEscalation[];
+};
+
+export async function fetchInbox(options?: {
+  status?: string;
+  since?: string;
+}): Promise<InboxListResponse> {
+  const params = new URLSearchParams();
+  if (options?.status) params.set("status", options.status);
+  if (options?.since) params.set("since", options.since);
+  const qs = params.toString() ? `?${params}` : "";
+  return (await authedJson(`/workspaces/me/inbox${qs}`)) as InboxListResponse;
+}
+
+export async function fetchInboxConversation(
+  conversationId: string,
+): Promise<InboxConversationDetail> {
+  return (await authedJson(
+    `/workspaces/me/inbox/${encodeURIComponent(conversationId)}`,
+  )) as InboxConversationDetail;
+}
+
+export async function takeOverConversation(
+  conversationId: string,
+): Promise<{ ok: boolean; status: string; noop?: boolean }> {
+  return (await authedJson(
+    `/workspaces/me/inbox/${encodeURIComponent(conversationId)}/take-over`,
+    { method: "POST" },
+  )) as { ok: boolean; status: string; noop?: boolean };
+}
+
+export async function postInboxOperatorReply(
+  conversationId: string,
+  text: string,
+): Promise<{ ok: boolean; message_id: number; conversation_id: string }> {
+  return (await authedJson(
+    `/workspaces/me/inbox/${encodeURIComponent(conversationId)}/messages`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text }),
+    },
+  )) as { ok: boolean; message_id: number; conversation_id: string };
+}
+
+export async function resolveConversation(
+  conversationId: string,
+): Promise<{
+  ok: boolean;
+  status: string;
+  noop?: boolean;
+  resolved_escalation_count?: number;
+}> {
+  return (await authedJson(
+    `/workspaces/me/inbox/${encodeURIComponent(conversationId)}/resolve`,
+    { method: "POST" },
+  )) as {
+    ok: boolean;
+    status: string;
+    noop?: boolean;
+    resolved_escalation_count?: number;
+  };
+}
