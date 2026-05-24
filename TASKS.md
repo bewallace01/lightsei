@@ -7,13 +7,15 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 22 — TBD. Phase 21 complete 2026-05-23. Parking-lot #64 (deployment cleanup) + #65 (Coral psycopg2 generator fix) + #102 (test flake) + #167 (vela investigation) + #168 (worker heartbeat terminal-status defense) all closed 2026-05-23.**
+> **Phase 22 — 22.1 schema for triggers (alembic 0038 + Trigger model + schema tests). Phase 22 spec locked 2026-05-24. Theme: scheduled bots + event triggers (cron + webhook in v1; event-based parked to 22B).**
 
 Phase 21 (customer-facing widget) complete: 10 sub-tasks shipped + 21.10 demo artifacts under `examples/p21-demo/`. Customer's end users can now interact with bots through an embeddable widget; operators triage in `/inbox`; Polaris notices escalation patterns + drafts fixes; operator applies + bot self-improves. Same trust-zone + capability model from Phases 16-20 enforces on the customer-facing surface too — a public-zoned bot can't leak data even if an operator misconfigures it.
 
 Backend at **1090 passing** (+25 from Phase 21 work today; +230 across all of Phase 21). SDK at **150 passing** (+10 from 21.5-21.6). Dashboard adds three new routes (`/widget/[publicId]`, `/widget-settings`, `/inbox`).
 
-NOW pointer is open. Promote Phase 22 from the rough shape (or come back to a parked item: #64 deployment cleanup, #65 Coral generator quality, #102 test flake) before starting new work.
+Phase 22 spec promoted 2026-05-24. Today bots only run reactively (Slack mention, widget message, manual deploy). Phase 22 adds the "AI coworker on a schedule" surface — cron triggers + webhook triggers — so a bot can be configured to fire on its own. v1 scope is 10 sub-tasks (22.1-22.10): schema, CRUD endpoints, scheduler loop in worker, scheduled_run job handler + run-row link, SDK `lightsei.trigger` accessor, public webhook endpoint, per-agent dashboard panel, /runs filter + badge, test sweep, demo artifacts. Event-based connector triggers (Gmail label, Drive change) parked to Phase 22B.
+
+Concurrently open: parking-lot #169 (Resend wired on prod) + #170 (REQUIRE_LIVE safety switch) closed 2026-05-23/24. Stripe live mode (#52) still blocked external. Other open: parking-lot #64 backend cold-start fix + worker GitHub-link follow-up.
 
 Phase 21 spec locked 2026-05-21. Design choices: iframe-isolated widget; anonymous-only conversations in v1; one customer-facing bot per workspace via `@lightsei.on_chat("widget")`; top-level `/inbox` route. 10 sub-tasks (21.1-21.10).
 
@@ -895,6 +897,170 @@ Items deferred from 21 v1 that the design contemplated but didn't ship:
 - Heuristic escalation (low confidence, repeated follow-ups) in addition to explicit `lightsei.escalate(...)`.
 - Embedding-based pattern detection in Polaris (vs the TF-IDF heuristic that ships in 21.9).
 - Custom widget theming (color, logo, position).
+
+## Phase 22: Scheduled bots + event triggers
+
+Today bots only run reactively, Slack mention, widget message, manual deploy/run. Phase 22 adds the "AI coworker that does things on a schedule" surface: an operator picks a deployed bot, picks a schedule (or generates a webhook token), and the bot fires on its own. This is the second-biggest Viktor-shaped wedge after trust zones; a huge class of non-technical use cases (daily digest, weekly report, hourly inbox scrub, "ping me when something happens" with a webhook from another service) all live behind it. Lightsei's product surface has been reactive end-to-end since Phase 6; Phase 22 makes it proactive.
+
+Rough shape (the three bullets that became the Phase 22 spec below):
+
+1. **Cron triggers.** Operator picks a deployed bot + a schedule via a friendly picker (every weekday 9am, every hour, custom cron). A scheduler loop in the worker process polls the `triggers` table every 60s, enqueues a `scheduled_run` job for any trigger whose next_run_at has passed. Bot runs in its declared zone with its usual capabilities, trigger is just a different entry point.
+2. **Webhook triggers.** Operator generates a webhook token for a bot. POST to `/triggers/{token}/fire` runs the bot with the request body as payload. Lets Lightsei plug into Zapier, n8n, cron-as-a-service, anything that can curl. Token IS the auth (no Bearer); per-token rate limit.
+3. **Trigger-aware SDK + dashboard surface.** Read-only `lightsei.trigger` accessor tells the bot whether it was cron-fired vs webhook-fired vs manually run + exposes the webhook payload. Per-agent Triggers panel for create/edit/delete + enable/disable toggle. Run cards in `/runs` grow a "triggered by" badge.
+
+Demo: deploy a daily-digest bot. Set a cron trigger for "every weekday 9am" (operator picks via the picker; system stores the compiled `0 9 * * 1-5`). At 9am the trigger fires, the bot runs, the operator sees the run in `/runs` with the trigger badge. Then add a webhook trigger to the same bot. `curl -X POST https://api.lightsei.com/triggers/{token}/fire -d '{"channel":"#sales"}'`. Bot fires again, this time receiving the curl body as `lightsei.trigger.webhook_payload`. Operator sees both runs side-by-side in `/runs?trigger_id=...`.
+
+### Design choices locked 2026-05-24 (the answers that drove the sub-task breakdown below)
+
+- **Two trigger kinds in v1: cron + webhook.** Event-based triggers (Gmail label applied, Drive change, Calendar event tagged) parked to Phase 22B. Each event source needs its own polling or webhook integration; designing that surface deserves its own pass and bloats the spec if folded in here.
+- **Scheduler lives in the worker process.** No new Railway service; the worker already runs 24/7 doing deployments. A new tick loop polls `triggers WHERE enabled AND next_run_at <= NOW()` every 60s. Polling beats per-trigger background timers: simpler reasoning, no orphaned timers on restart, recovers naturally from worker downtime (catches up on missed triggers when it wakes up, with a 24h grace window so a long outage doesn't dump 1000 backfill runs at once).
+- **Cron expressions: 5-field standard via `croniter`.** Dashboard picker compiles friendly choices (daily, weekdays, weekly, hourly) to cron strings; an "advanced" field lets operators paste raw cron. `croniter` is the right primitive, well-maintained, handles next-fire correctly across DST, used by Airflow, Prefect, Dagster.
+- **Webhook auth: token in URL.** `POST /triggers/{token}/fire`. Pattern matches GitHub webhooks. Token is 32 bytes of URL-safe random, stored hashed in the triggers row. Per-token rate limit (e.g. 60 fires/minute) to protect the worker queue. Rotate by deleting + re-creating the trigger.
+- **Trust zones unchanged.** Triggers don't bypass anything. The bot still runs in its declared zone, capabilities still gate, connectors still enforce. Triggers are just a different entry point, same shape as Slack chat vs widget chat vs manual run.
+- **SDK changes are additive only.** Existing bots can be triggered without any code changes (the bot's main entry point runs as today). `lightsei.trigger` is a read-only accessor a bot can opt into to know how it was invoked; absence-of-trigger means the run was manual.
+- **No multi-trigger fan-out in v1.** One trigger fires, one run. If an operator wants the same bot fired by both a cron and a webhook, they create two trigger rows. Chained triggers ("when bot A finishes, fire bot B") parked to Phase 22B.
+
+### 22.1 — Schema for triggers
+
+One new table:
+
+- `triggers`: id (uuid pk), workspace_id (fk → workspaces, cascade), agent_id (fk → agents, cascade), kind (`cron` / `webhook`), schedule (text, nullable; the cron expression for kind=cron), webhook_token_hash (text, nullable; sha256 of the unhashed token for kind=webhook), name (short label the operator types, e.g. "morning digest"), enabled (bool, default true), next_run_at (timestamptz, nullable; pre-computed for cron, NULL for webhook), last_run_at (timestamptz, nullable), last_run_id (fk → runs, nullable), last_run_status (text, nullable; mirrors the run's status for quick dashboard rendering), created_at, updated_at.
+
+Indexes: `(enabled, next_run_at)` (the scheduler's hot query), `(workspace_id, agent_id)` (per-agent triggers list), unique `(webhook_token_hash)` where not null (token lookup on the public webhook endpoint).
+
+Alembic migration `0038_triggers.py`. SQLAlchemy `Trigger` model in `backend/models.py`. Schema tests under `backend/tests/test_triggers_schema.py`: foreign-key behaviour, cascade on workspace + agent delete, unique constraint on webhook_token_hash, defaults.
+
+### 22.2 — Trigger backend module + CRUD endpoints
+
+Pure helper module `backend/triggers.py`:
+
+- `compute_next_run_at(schedule: str, after: datetime) -> datetime` (croniter wrapper).
+- `validate_cron(schedule: str) -> None` (raises ValueError with a friendly message if invalid).
+- `mint_webhook_token() -> tuple[str, str]` (returns plaintext + sha256 hash; plaintext shown once at creation, hash persisted).
+- `friendly_schedule_to_cron(preset: str) -> str` for the dashboard picker presets (daily, weekdays, weekly, hourly).
+
+REST surface scoped under the agent:
+
+- `POST /agents/{id}/triggers`: operator creates a trigger. Body: `{kind, name, schedule?, preset?}`. Validates that the agent is deployed + the caller has workspace-admin permission. Returns the new trigger row; for `kind=webhook` returns the plaintext token exactly once.
+- `GET /agents/{id}/triggers`: list triggers for the agent.
+- `PATCH /triggers/{id}`: body `{enabled?, name?, schedule?}`. Re-validates cron + recomputes next_run_at if schedule changed.
+- `DELETE /triggers/{id}`: hard delete (run history persists via `runs` rows, which only reference trigger_id as a soft FK).
+
+Tests cover: cron validation rejects garbage, token plaintext only returned once, workspace ownership gating, schedule edits recompute next_run_at, deleting a trigger doesn't delete past runs.
+
+### 22.3 — Scheduler loop in worker
+
+New module `worker/scheduler.py`. Loop:
+
+```python
+while not shutdown:
+    now = utcnow()
+    grace_window = timedelta(hours=24)  # don't backfill arbitrarily-old missed runs
+    due = session.execute(
+        select(Trigger)
+          .where(Trigger.enabled.is_(True))
+          .where(Trigger.kind == "cron")
+          .where(Trigger.next_run_at <= now)
+          .where(Trigger.next_run_at >= now - grace_window)
+          .order_by(Trigger.next_run_at)
+          .with_for_update(skip_locked=True)
+    ).scalars().all()
+    for trigger in due:
+        enqueue_scheduled_run(trigger)
+        trigger.next_run_at = compute_next_run_at(trigger.schedule, now)
+        trigger.last_run_at = now
+    session.commit()
+    sleep(60)
+```
+
+`SELECT ... FOR UPDATE SKIP LOCKED` so the same scheduler scaling out (future) doesn't double-fire. Single-worker today, but the pattern is right.
+
+Triggers older than the 24h grace window get their next_run_at fast-forwarded to the next future fire without a backfill, captured in a startup-time sweep so a long outage doesn't dump a stampede.
+
+Tests with frozen clock (`freezegun`): a due trigger gets a job enqueued + next_run_at advances; a non-enabled trigger doesn't; an outdated (past grace window) trigger fast-forwards without firing.
+
+### 22.4 — `scheduled_run` job handler + run-row link
+
+New `generation_jobs` kind `scheduled_run`. Payload: `{trigger_id, webhook_payload?}`. Handler:
+
+1. Load the trigger + agent. If either is gone (race with delete), log + drop.
+2. Dispatch the agent via the existing run-creation code path. New `Run` row tagged with `triggered_by_trigger_id` (new nullable fk column on `runs`).
+3. After the run completes (success or error), patch `triggers.last_run_id` + `triggers.last_run_status` so the dashboard list query renders quickly.
+
+Adds two columns: `runs.triggered_by_trigger_id` (fk → triggers, nullable, on-delete SET NULL), `runs.trigger_kind` (text snapshot of the trigger's kind at fire time, so deleting the trigger doesn't lose the "this was a cron run" badge on the run card). Migration `0039_runs_trigger_link.py`.
+
+Tests with `Run` factory + stubbed dispatcher: scheduled_run handler enqueues a Run, sets the right columns, updates trigger's last_run_* fields.
+
+### 22.5 — SDK: `lightsei.trigger` accessor
+
+New module `sdk/lightsei/_trigger.py`. Public surface:
+
+- `lightsei.trigger.kind`: `'cron' | 'webhook' | 'manual'`. `'manual'` when there's no trigger (regular deploy/run path).
+- `lightsei.trigger.scheduled_at`: datetime; only set for `cron` kind, otherwise None.
+- `lightsei.trigger.webhook_payload`: dict from the POST body when `kind == 'webhook'`, None otherwise.
+- `lightsei.trigger.name`: short label from `triggers.name`, useful for log/print debugging.
+
+Implementation: stored in a `ContextVar` set by the run bootstrap when the run started via a trigger. Matches the `contextvars` pattern already used by `lightsei.init`.
+
+Backwards-compatible: bots that don't reference `lightsei.trigger` work unchanged. Tests cover all four properties under each kind + the absence case.
+
+### 22.6 — Webhook trigger endpoint
+
+`POST /triggers/{token}/fire`: public, unauthenticated except for the token in the URL. Endpoint:
+
+1. SHA256 the URL token, look up `triggers.webhook_token_hash`. If no row or `enabled=false`, return 404 (don't leak whether the token shape is valid).
+2. Per-token rate-limit (60 fires/min, returnable via Retry-After).
+3. Read the body as JSON (cap at 1 MB). If non-JSON, store as `{raw: <text>}`.
+4. Enqueue `scheduled_run` job with `{trigger_id, webhook_payload}`. Patch `triggers.last_run_at = now`.
+5. Return `{run_id: <id>, status: "queued"}` immediately.
+
+Tests: invalid token returns 404, disabled trigger returns 404, rate limit triggers Retry-After, oversized body returns 413, valid request enqueues a job with the payload intact.
+
+### 22.7 — Dashboard: per-agent Triggers panel
+
+New panel on `dashboard/app/agents/[id]/page.tsx` (existing agent detail surface, below the deploy + capabilities + zones blocks). Renders:
+
+- List of existing triggers with: name, kind badge (cron, webhook), schedule (rendered as "Every weekday at 9:00 AM" via a human-readable cron parser), next run time, last run status pill, enable/disable toggle, delete button.
+- "+ New trigger" button opens a modal:
+  - Tab 1, Cron: friendly picker (Daily, Weekdays, Weekly, Hourly, Custom) + an "advanced cron" field for the Custom option. Live preview of the next 3 fire times below the field.
+  - Tab 2, Webhook: operator names the trigger; on create, the modal shows the plaintext token + a copyable `curl` example + a "I've copied it, dismiss" button. After dismiss, the token is gone (only the hash persists).
+
+API helpers in `dashboard/lib/api.ts`: `listAgentTriggers`, `createAgentTrigger`, `patchTrigger`, `deleteTrigger`. Standard pattern from earlier phases.
+
+### 22.8 — Dashboard: /runs filter + trigger badge
+
+Two small additions:
+
+- `/runs` query string accepts `?trigger_id=<id>` (already filterable by other dimensions). Backend `/workspaces/me/runs` adds the corresponding filter.
+- Run card grows a small badge "Triggered by: cron" (with the trigger name in a tooltip) or "Triggered by: webhook" or no badge (manual). Reads from `runs.trigger_kind` + a small backend-side join to fetch the trigger name for the tooltip.
+
+Tests: `?trigger_id=` filters as expected; runs without a trigger render without the badge; deleted-trigger runs still render the badge (using the snapshotted `trigger_kind`).
+
+### 22.9 — Test sweep + tsc + next build smoke
+
+Full backend pytest pass. SDK pytest pass. Dashboard `tsc --noEmit` + `next build`. Live smoke: create a cron trigger on a deployed bot, wait one minute past `next_run_at`, verify a Run row appears with the right `trigger_kind`. Curl the webhook endpoint, verify a second Run row appears.
+
+### 22.10 — Demo artifacts
+
+`examples/p22-demo/`:
+
+- `daily-digest-readme.md`: seed README for a "morning briefing" bot: pulls recent Calendar events + unread Gmail labeled "important" + outputs a Markdown summary to a Slack channel. Reuses Phase 20 connectors so the demo lands an end-to-end story.
+- `digest_bot.py`: reference code. Demonstrates: (a) a bot whose main entry point reads `lightsei.trigger.kind` to log whether it ran scheduled or webhook-fired; (b) zone declared as `pii` so the Gmail call is allowed; (c) the cron + webhook trigger both invoke the same handler.
+- `README.md`: 5-act runbook: deploy via team-from-readme, set the cron, wait/fast-forward, see the run, add webhook, curl it, see the second run, check `/runs?trigger_id=...`.
+
+Demo proves: (a) bots are proactive now (Lightsei's surface is no longer reactive-only); (b) the trust-zone + capability model still holds (a public bot can't get triggered into doing PII work just because the trigger had a payload); (c) the integration story now extends both directions, Phase 20 brought external tools into the bot's reach, Phase 22 lets external systems initiate bot work.
+
+### Phase 22B (parked)
+
+Items deferred from 22 v1 that the design contemplated but didn't ship:
+
+- Event-based triggers from connectors (Gmail label applied, Drive change, Calendar event tagged).
+- Chained triggers ("when bot A finishes successfully, fire bot B").
+- Conditional triggers ("only fire if last run's output contained X").
+- Trigger run-history page (today, history is just /runs?trigger_id=).
+- Trigger templates ("hourly inbox scrub" prebuilt for common bot types).
+- Friendly-cron in the inverse direction (operator pastes raw cron, dashboard renders "every other Tuesday at 3pm").
+- Webhook signing (HMAC body verification beyond the URL-token model).
 
 Phases 1-4 shipped 2026-04-25 (spine, cost-cap guardrail, Anthropic + streaming, hosted-readiness). Phase 5 shipped 2026-04-26 (PaaS-for-agents). Phase 6 shipped 2026-04-27 (Polaris orchestrator). Phase 7 shipped 2026-04-28 (output validation, advisory). Phase 8 shipped 2026-04-28 (blocking validators). Phase 9 shipped 2026-04-30 (notifications). Phase 10 shipped 2026-05-01 (GitHub integration: push-to-deploy + Polaris reads docs from the repo). Phase 11 starts the dispatch story: Polaris commands a team of executor agents instead of just emitting plans you read. Phase 11B turns the home page into a real command center while we're at it. Phase 12 is multi-provider so the team can pick the right model per task.
 
