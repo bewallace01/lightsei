@@ -68,6 +68,7 @@ from models import (
     Session as SessionRow,
     Thread,
     ThreadMessage,
+    Trigger,
     User,
     ValidatorConfig,
     WidgetConversation,
@@ -75,6 +76,7 @@ from models import (
     WidgetMessage,
     Workspace,
     WorkspaceSecret,
+    is_valid_trigger_kind,
 )
 import github_api
 import notifications
@@ -1066,6 +1068,245 @@ def delete_agent(
     if a is None:
         raise HTTPException(status_code=404, detail="agent not found")
     session.delete(a)
+    session.flush()
+    return {"status": "ok"}
+
+
+# ---------- Phase 22.2: triggers (cron + webhook) ---------- #
+
+
+class TriggerCreateIn(BaseModel):
+    """Body for POST /agents/{agent_name}/triggers.
+
+    `kind` is 'cron' or 'webhook'. For cron, exactly one of `schedule`
+    (raw 5-field expression) or `preset` (friendly name from
+    `triggers.known_presets()`) must be set. For webhook, both are
+    ignored: a fresh token is minted and the plaintext returned once
+    in the response.
+    """
+
+    kind: str
+    name: str
+    schedule: Optional[str] = None
+    preset: Optional[str] = None
+
+
+class TriggerPatchIn(BaseModel):
+    """Body for PATCH /triggers/{trigger_id}.
+
+    All fields optional; only those set are applied. `schedule` is
+    only meaningful for cron triggers; trying to set it on a webhook
+    trigger 422s.
+    """
+
+    enabled: Optional[bool] = None
+    name: Optional[str] = None
+    schedule: Optional[str] = None
+
+
+def _serialize_trigger(t: Trigger) -> dict[str, Any]:
+    """Trigger row → API shape. Never includes the webhook_token_hash:
+    even the hash is sensitive (a brute-force target). The plaintext
+    is only returned in the POST response and never again."""
+    return {
+        "id": t.id,
+        "workspace_id": t.workspace_id,
+        "agent_name": t.agent_name,
+        "kind": t.kind,
+        "schedule": t.schedule,
+        "name": t.name,
+        "enabled": t.enabled,
+        "next_run_at": (
+            t.next_run_at.isoformat() if t.next_run_at else None
+        ),
+        "last_run_at": (
+            t.last_run_at.isoformat() if t.last_run_at else None
+        ),
+        "last_run_id": t.last_run_id,
+        "last_run_status": t.last_run_status,
+        "created_at": t.created_at.isoformat(),
+        "updated_at": t.updated_at.isoformat(),
+    }
+
+
+@app.post("/agents/{agent_name}/triggers")
+def create_agent_trigger(
+    agent_name: str,
+    body: TriggerCreateIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 22.2: create a trigger on an agent.
+
+    422 on unknown kind, malformed cron, conflicting schedule+preset,
+    or schedule fields on a webhook kind. 404 if the agent doesn't
+    exist in the caller's workspace. On success returns the new
+    trigger row PLUS (for kind=webhook) the plaintext token under
+    `webhook_token`. Plaintext is only returned this once; the
+    operator must capture it from the response.
+    """
+    import triggers as _trigmod
+
+    if not is_valid_trigger_kind(body.kind):
+        raise HTTPException(
+            status_code=422,
+            detail=f"unknown trigger kind: {body.kind!r}",
+        )
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(
+            status_code=422, detail="trigger name is required",
+        )
+
+    a = session.get(Agent, (workspace_id, agent_name))
+    if a is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+
+    now = utcnow()
+    schedule: Optional[str] = None
+    next_run_at: Optional[datetime] = None
+    webhook_token_hash: Optional[str] = None
+    plaintext_token: Optional[str] = None
+
+    if body.kind == "cron":
+        try:
+            schedule = _trigmod.resolve_schedule(
+                schedule=body.schedule, preset=body.preset,
+            )
+            next_run_at = _trigmod.compute_next_run_at(schedule, now)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+    else:  # webhook
+        if body.schedule or body.preset:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "webhook triggers don't take a schedule; "
+                    "they fire on POST /triggers/{token}/fire"
+                ),
+            )
+        plaintext_token, webhook_token_hash = _trigmod.mint_webhook_token()
+
+    t = Trigger(
+        id=str(uuid.uuid4()),
+        workspace_id=workspace_id,
+        agent_name=agent_name,
+        kind=body.kind,
+        schedule=schedule,
+        webhook_token_hash=webhook_token_hash,
+        name=name,
+        enabled=True,
+        next_run_at=next_run_at,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(t)
+    session.flush()
+
+    out = _serialize_trigger(t)
+    if plaintext_token is not None:
+        # Returned once; never again. Operator copies from the modal.
+        out["webhook_token"] = plaintext_token
+    return out
+
+
+@app.get("/agents/{agent_name}/triggers")
+def list_agent_triggers(
+    agent_name: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, list[dict[str, Any]]]:
+    """Phase 22.2: list triggers for an agent.
+
+    404 if the agent doesn't exist in the caller's workspace. Returns
+    `{triggers: [...]}` ordered by created_at desc so the newest is
+    rendered at the top of the dashboard panel.
+    """
+    a = session.get(Agent, (workspace_id, agent_name))
+    if a is None:
+        raise HTTPException(status_code=404, detail="agent not found")
+
+    rows = session.execute(
+        select(Trigger)
+        .where(Trigger.workspace_id == workspace_id)
+        .where(Trigger.agent_name == agent_name)
+        .order_by(desc(Trigger.created_at))
+    ).scalars().all()
+    return {"triggers": [_serialize_trigger(t) for t in rows]}
+
+
+@app.patch("/triggers/{trigger_id}")
+def patch_trigger(
+    trigger_id: str,
+    body: TriggerPatchIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 22.2: update enabled, name, or schedule on a trigger.
+
+    404 if the trigger doesn't exist OR belongs to a different
+    workspace (don't leak existence across tenants). 422 if `schedule`
+    is set on a webhook-kind trigger or if the new cron is malformed.
+    Schedule changes recompute next_run_at so the scheduler picks up
+    the new cadence on its next tick.
+    """
+    import triggers as _trigmod
+
+    t = session.get(Trigger, trigger_id)
+    if t is None or t.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="trigger not found")
+
+    changed = False
+    if body.enabled is not None:
+        t.enabled = body.enabled
+        changed = True
+    if body.name is not None:
+        new_name = body.name.strip()
+        if not new_name:
+            raise HTTPException(
+                status_code=422, detail="trigger name cannot be empty",
+            )
+        t.name = new_name
+        changed = True
+    if body.schedule is not None:
+        if t.kind != "cron":
+            raise HTTPException(
+                status_code=422,
+                detail="only cron triggers have a schedule",
+            )
+        try:
+            _trigmod.validate_cron(body.schedule)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        t.schedule = body.schedule.strip()
+        t.next_run_at = _trigmod.compute_next_run_at(
+            t.schedule, utcnow(),
+        )
+        changed = True
+
+    if changed:
+        t.updated_at = utcnow()
+        session.flush()
+    return _serialize_trigger(t)
+
+
+@app.delete("/triggers/{trigger_id}")
+def delete_trigger(
+    trigger_id: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, str]:
+    """Phase 22.2: hard-delete a trigger.
+
+    404 on unknown id or wrong-tenant access. Past runs that were
+    triggered by this row stay (the 22.4 `runs.triggered_by_trigger_id`
+    column will SET NULL on delete via its FK), preserving history
+    visibility on /runs.
+    """
+    t = session.get(Trigger, trigger_id)
+    if t is None or t.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="trigger not found")
+    session.delete(t)
     session.flush()
     return {"status": "ok"}
 
