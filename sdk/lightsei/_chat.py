@@ -155,7 +155,17 @@ def _widget_chat_bridge(payload):
             logger.warning(
                 "widget.chat bridge: escalate call failed: %s", exc,
             )
-        return {"ok": False, "error": "no_widget_handler_registered"}
+            return {
+                "ok": False,
+                "escalated": False,
+                "error": "no_widget_handler_registered",
+                "escalation_error": str(exc),
+            }
+        return {
+            "ok": False,
+            "escalated": True,
+            "error": "no_widget_handler_registered",
+        }
 
     turn = {
         "conversation_id": conversation_id,
@@ -196,8 +206,16 @@ def _widget_chat_bridge(payload):
                 reason="bot_crash",
                 payload={"error": repr(exc)},
             )
-        except Exception:
-            pass
+        except Exception as inner:
+            logger.warning(
+                "widget.chat bridge: bot_crash escalate failed: %s", inner,
+            )
+            return {
+                "ok": False,
+                "escalated": False,
+                "error": repr(exc),
+                "escalation_error": str(inner),
+            }
         return {"ok": False, "escalated": True, "error": repr(exc)}
 
     # Successful return. Two shapes accepted: a string reply or

@@ -24,7 +24,9 @@ settings side).
 from __future__ import annotations
 
 import secrets
+import os
 from typing import Optional
+from urllib.parse import urlsplit
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -34,6 +36,7 @@ from models import Workspace
 
 
 WIDGET_PUBLIC_ID_LEN = 22  # token_urlsafe(16) → ~22 chars; URL-safe, no padding
+WIDGET_EMBED_ORIGIN_HEADER = "x-lightsei-embed-origin"
 
 
 # ---------- Workspace lookup ---------- #
@@ -78,24 +81,81 @@ def resolve_workspace_by_public_id(
 # ---------- Origin enforcement ---------- #
 
 
-def check_widget_origin(workspace: Workspace, origin: Optional[str]) -> None:
-    """Raise 403 if `origin` is not in the workspace's allowlist.
+def _origin_from_url(value: str) -> Optional[str]:
+    """Return scheme://host[:port] for an absolute URL or origin string."""
+    try:
+        parsed = urlsplit(value)
+    except Exception:
+        return None
+    if not parsed.scheme or not parsed.netloc:
+        return None
+    return f"{parsed.scheme}://{parsed.netloc}"
 
-    The end user's browser sends an `Origin` header on every
-    cross-origin POST; iframes inherit the parent document's origin.
-    Allowlist is an exact-match list of `https://host[:port]` strings
-    — wildcards punted to a future surface (the v1 settings page
-    asks the operator to add one entry per domain).
+
+def _trusted_widget_frame_origins() -> set[str]:
+    """Origins allowed to serve the iframe that calls the widget API."""
+    raw = os.environ.get("LIGHTSEI_WIDGET_FRAME_ORIGINS")
+    origins: set[str] = set()
+    if raw:
+        candidates = [p.strip() for p in raw.split(",") if p.strip()]
+    else:
+        dashboard = (
+            os.environ.get("LIGHTSEI_DASHBOARD_BASE_URL")
+            or os.environ.get("LIGHTSEI_DASHBOARD_URL")
+            or "https://app.lightsei.com"
+        )
+        candidates = [dashboard, "http://localhost:3000", "http://127.0.0.1:3000"]
+    for candidate in candidates:
+        origin = _origin_from_url(candidate)
+        if origin:
+            origins.add(origin)
+    return origins
+
+
+def check_widget_origin(
+    workspace: Workspace,
+    origin: Optional[str],
+    embed_origin: Optional[str] = None,
+) -> None:
+    """Raise 403 if the embedding site is not in the workspace allowlist.
+
+    The iframe is served from Lightsei, so browser fetches to the API
+    carry the iframe origin in `Origin`. The iframe also sends the
+    browser-derived parent origin in `X-Lightsei-Embed-Origin`, and
+    that is the value checked against the customer allowlist. The
+    custom header is trusted only when the request itself comes from
+    a known Lightsei iframe origin.
+
+    Direct non-iframe requests keep the legacy behavior: their own
+    `Origin` header is checked against the allowlist. That keeps curl
+    and focused endpoint tests simple without allowing another site to
+    spoof the iframe header.
 
     An empty allowlist refuses every request. The operator's first
     job after picking the customer-facing bot is to add the
     customer's site origins; until then the widget can't be embedded.
 
-    A missing Origin header is also refused. Same-origin form posts
-    sometimes omit it, but the widget is always cross-origin (iframe
-    on app.lightsei.com served into a customer's page).
+    A missing effective origin is also refused. Same-origin form posts
+    sometimes omit it, but the widget is always cross-origin.
     """
-    if not origin:
+    effective_origin = origin
+    if embed_origin:
+        frame_origin = _origin_from_url(origin or "")
+        if frame_origin not in _trusted_widget_frame_origins():
+            raise HTTPException(
+                status_code=403,
+                detail={
+                    "error": "widget_frame_origin_not_allowed",
+                    "origin": origin,
+                    "message": (
+                        "widget embed origin headers are only accepted from "
+                        "the Lightsei-hosted iframe."
+                    ),
+                },
+            )
+        effective_origin = _origin_from_url(embed_origin)
+
+    if not effective_origin:
         raise HTTPException(
             status_code=403,
             detail={
@@ -109,14 +169,14 @@ def check_widget_origin(workspace: Workspace, origin: Optional[str]) -> None:
         )
 
     allowed = list(workspace.allowed_widget_origins or [])
-    if origin not in allowed:
+    if effective_origin not in allowed:
         raise HTTPException(
             status_code=403,
             detail={
                 "error": "widget_origin_not_allowed",
-                "origin": origin,
+                "origin": effective_origin,
                 "message": (
-                    f"origin {origin!r} is not on this workspace's "
+                    f"origin {effective_origin!r} is not on this workspace's "
                     "widget allowlist. Ask the operator to add it on "
                     "the widget settings page."
                 ),
@@ -168,6 +228,7 @@ def ensure_widget_public_id(session: Session, workspace: Workspace) -> str:
     surface so a fresh workspace doesn't get a public id until the
     operator opts in.
     """
+    session.refresh(workspace, with_for_update=True)
     if workspace.widget_public_id:
         return workspace.widget_public_id
 

@@ -66,6 +66,7 @@ type ConversationResponse = {
 
 const POLL_INTERVAL_MS = 1500;
 const ANON_ID_LEN = 24;
+const EMBED_ORIGIN_HEADER = "x-lightsei-embed-origin";
 
 
 // ---------- Local storage helpers ---------- //
@@ -107,6 +108,33 @@ function saveConversationId(publicId: string, conversationId: string | null): vo
   }
 }
 
+function getEmbedOrigin(): string | null {
+  if (typeof window === "undefined") return null;
+  const ancestorOrigins = (window.location as Location & {
+    ancestorOrigins?: DOMStringList;
+  }).ancestorOrigins;
+  if (ancestorOrigins && ancestorOrigins.length > 0) {
+    return ancestorOrigins[0] || null;
+  }
+  if (document.referrer) {
+    try {
+      return new URL(document.referrer).origin;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function widgetHeaders(
+  embedOrigin: string | null,
+  extra?: Record<string, string>,
+): Record<string, string> {
+  const headers: Record<string, string> = { ...(extra || {}) };
+  if (embedOrigin) headers[EMBED_ORIGIN_HEADER] = embedOrigin;
+  return headers;
+}
+
 
 // ---------- Trust-zone copy ---------- //
 
@@ -141,6 +169,7 @@ export default function WidgetIframePage(): JSX.Element {
 
   const seenMessageIdRef = useRef<number>(0);
   const paneRef = useRef<HTMLDivElement | null>(null);
+  const embedOrigin = useMemo(() => getEmbedOrigin(), []);
 
   // ---------- Mount: load stored + fetch config ---------- //
 
@@ -155,6 +184,7 @@ export default function WidgetIframePage(): JSX.Element {
       try {
         const r = await fetch(`${API_URL}/widget/${publicId}/config`, {
           credentials: "omit",
+          headers: widgetHeaders(embedOrigin),
         });
         if (!r.ok) {
           const body = await r.json().catch(() => ({}));
@@ -169,7 +199,7 @@ export default function WidgetIframePage(): JSX.Element {
     return () => {
       cancelled = true;
     };
-  }, [publicId]);
+  }, [publicId, embedOrigin]);
 
   // ---------- Polling ---------- //
 
@@ -178,7 +208,10 @@ export default function WidgetIframePage(): JSX.Element {
     try {
       const r = await fetch(
         `${API_URL}/widget/${publicId}/conversations/${conversationId}?since=${seenMessageIdRef.current}`,
-        { credentials: "omit" },
+        {
+          credentials: "omit",
+          headers: widgetHeaders(embedOrigin),
+        },
       );
       if (!r.ok) {
         if (r.status === 404) {
@@ -201,7 +234,7 @@ export default function WidgetIframePage(): JSX.Element {
     } catch {
       // Network blip — silently retry on the next tick.
     }
-  }, [publicId, conversationId]);
+  }, [publicId, conversationId, embedOrigin]);
 
   // First load when the conversation id appears (mount path).
   useEffect(() => {
@@ -264,7 +297,7 @@ export default function WidgetIframePage(): JSX.Element {
       const r = await fetch(`${API_URL}/widget/${publicId}/messages`, {
         method: "POST",
         credentials: "omit",
-        headers: { "content-type": "application/json" },
+        headers: widgetHeaders(embedOrigin, { "content-type": "application/json" }),
         body: JSON.stringify({
           conversation_id: conversationId || null,
           text,
@@ -299,7 +332,7 @@ export default function WidgetIframePage(): JSX.Element {
     } finally {
       setSending(false);
     }
-  }, [publicId, input, sending, conversationId, anonUserId]);
+  }, [publicId, input, sending, conversationId, anonUserId, embedOrigin]);
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === "Enter" && !e.shiftKey) {
