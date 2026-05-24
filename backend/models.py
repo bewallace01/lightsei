@@ -235,10 +235,33 @@ class Run(Base):
     sensitivity_level: Mapped[str] = mapped_column(
         String(16), nullable=False, server_default=DEFAULT_SENSITIVITY_LEVEL,
     )
+    # Phase 22.4: link back to the trigger that fired this run, if any.
+    # SET NULL on trigger delete so the run row survives trigger cleanup.
+    # NULL means "manual run" — the bot was kicked from the CLI, the
+    # dashboard "run now" button, or a connector callback.
+    triggered_by_trigger_id: Mapped[Optional[str]] = mapped_column(
+        String(36),
+        ForeignKey("triggers.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    # Phase 22.4: snapshot of triggers.kind at fire time. The FK above
+    # goes NULL on trigger delete, but the /runs badge still wants to
+    # render "Triggered by: cron" against historical rows. The snapshot
+    # makes that possible without a JOIN that returns nothing.
+    trigger_kind: Mapped[Optional[str]] = mapped_column(
+        String(16), nullable=True,
+    )
 
     __table_args__ = (
         Index("idx_runs_started_at", started_at.desc()),
         Index("idx_runs_ws_started_at", "workspace_id", started_at.desc()),
+        # Phase 22.4: /runs?trigger_id= filter (22.8). Partial WHERE
+        # keeps the index tight since most rows are manual.
+        Index(
+            "ix_runs_workspace_trigger",
+            "workspace_id", "triggered_by_trigger_id",
+            postgresql_where=text("triggered_by_trigger_id IS NOT NULL"),
+        ),
     )
 
 

@@ -719,6 +719,21 @@ def post_event(
 
     if event.kind in ("run_ended", "run_completed", "run_failed"):
         run.ended_at = ts
+        # Phase 22.4: mirror the run's terminal status back to the
+        # trigger that fired it, so the dashboard list query
+        # (/agents/{name}/triggers) renders the latest outcome without
+        # a JOIN on runs. Map the event kind to a short status string;
+        # treat plain `run_ended` (no explicit success / failure) as
+        # `succeeded` so the operator's most-recent-fire pill is
+        # green by default.
+        if run.triggered_by_trigger_id is not None:
+            from models import Trigger as _Trigger
+            t = session.get(_Trigger, run.triggered_by_trigger_id)
+            if t is not None:
+                t.last_run_status = (
+                    "failed" if event.kind == "run_failed" else "succeeded"
+                )
+                t.updated_at = ts
 
     # Phase 11B.1: incrementally roll up per-run cost. We need a flushed
     # run row before add_run_cost_from_event can session.get(Run, ...),
