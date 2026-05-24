@@ -29,6 +29,7 @@ import {
   UnauthorizedError,
 } from "../../api";
 import { SensitivityChip } from "../../sensitivity";
+import TriggersPanel from "./TriggersPanel";
 
 function fmt(iso: string | null): string {
   if (!iso) return "—";
@@ -579,6 +580,8 @@ export default function AgentPage({ params }: { params: { name: string } }) {
           </div>
         </details>
       )}
+
+      <TriggersPanel agentName={agentName} />
 
       <section className="mb-10">
         <h2 className="text-[11px] font-semibold text-gray-500 mb-4 uppercase tracking-wider">

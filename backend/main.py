@@ -1335,6 +1335,45 @@ def delete_trigger(
     return {"status": "ok"}
 
 
+class TriggerSchedulePreviewIn(BaseModel):
+    """Body for POST /triggers/preview-schedule."""
+
+    schedule: str
+    count: int = 3
+
+
+@app.post("/triggers/preview-schedule")
+def preview_schedule(
+    body: TriggerSchedulePreviewIn,
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 22.7: return the next N fire times for a cron expression.
+
+    Lets the dashboard's cron picker render "next fires at…" without
+    pulling croniter into the Next.js bundle. Authed (workspace_id
+    enforced) but doesn't touch the DB — pure compute.
+
+    422 on a malformed cron. `count` is clamped to [1, 10] so a
+    typo can't generate megabytes of timestamps.
+    """
+    import triggers as _trigmod
+
+    n = max(1, min(int(body.count or 3), 10))
+    try:
+        _trigmod.validate_cron(body.schedule)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    now = utcnow()
+    out: list[str] = []
+    after = now
+    for _ in range(n):
+        nxt = _trigmod.compute_next_run_at(body.schedule, after)
+        out.append(nxt.isoformat())
+        after = nxt
+    return {"next_runs": out}
+
+
 # Per-token rate limit on the public webhook endpoint. 60/minute is
 # generous for honest automation (Zapier, cron-as-a-service) and
 # tight enough that a misbehaving caller can't drown the worker queue.

@@ -2145,3 +2145,87 @@ export async function dismissEscalationSuggestedFix(
     { method: "POST" },
   )) as { ok: boolean; dismissed: boolean; noop?: boolean };
 }
+
+// ---------- Phase 22.7: trigger helpers ---------- //
+
+export type TriggerKind = "cron" | "webhook";
+
+export type Trigger = {
+  id: string;
+  workspace_id: string;
+  agent_name: string;
+  kind: TriggerKind;
+  schedule: string | null;
+  name: string;
+  enabled: boolean;
+  next_run_at: string | null;
+  last_run_at: string | null;
+  last_run_id: string | null;
+  last_run_status: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+// Webhook-kind create responses include the plaintext token exactly
+// once (the row only stores its sha256 hash). Operators must capture
+// it from the dashboard modal; there's no recovery path.
+export type TriggerWithToken = Trigger & {
+  webhook_token?: string;
+};
+
+export type TriggerCreateBody =
+  | { kind: "cron"; name: string; schedule: string }
+  | { kind: "cron"; name: string; preset: string }
+  | { kind: "webhook"; name: string };
+
+export async function listAgentTriggers(
+  agentName: string,
+): Promise<Trigger[]> {
+  const body = (await authedJson(
+    `/agents/${encodeURIComponent(agentName)}/triggers`,
+  )) as { triggers: Trigger[] };
+  return body.triggers;
+}
+
+export async function createAgentTrigger(
+  agentName: string,
+  body: TriggerCreateBody,
+): Promise<TriggerWithToken> {
+  return (await authedJson(
+    `/agents/${encodeURIComponent(agentName)}/triggers`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  )) as TriggerWithToken;
+}
+
+export async function patchTrigger(
+  triggerId: string,
+  patch: { enabled?: boolean; name?: string; schedule?: string },
+): Promise<Trigger> {
+  return (await authedJson(`/triggers/${encodeURIComponent(triggerId)}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(patch),
+  })) as Trigger;
+}
+
+export async function deleteTrigger(triggerId: string): Promise<void> {
+  await authedJson(`/triggers/${encodeURIComponent(triggerId)}`, {
+    method: "DELETE",
+  });
+}
+
+export async function previewSchedule(
+  schedule: string,
+  count = 3,
+): Promise<string[]> {
+  const body = (await authedJson(`/triggers/preview-schedule`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ schedule, count }),
+  })) as { next_runs: string[] };
+  return body.next_runs;
+}
