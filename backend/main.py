@@ -1335,6 +1335,97 @@ def delete_trigger(
     return {"status": "ok"}
 
 
+# Per-token rate limit on the public webhook endpoint. 60/minute is
+# generous for honest automation (Zapier, cron-as-a-service) and
+# tight enough that a misbehaving caller can't drown the worker queue.
+_WEBHOOK_FIRE_LIMIT_PER_MIN = 60
+
+
+@app.post("/triggers/{token}/fire")
+async def fire_webhook_trigger(
+    token: str,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 22.6: public endpoint that fires a webhook trigger.
+
+    Token in the URL IS the auth (GitHub-shaped). Body is forwarded
+    to the bot as `lightsei.trigger.webhook_payload`; JSON bodies are
+    parsed, non-JSON bodies are wrapped as `{raw: <text>}`. Body cap
+    comes from the global middleware (LIGHTSEI_MAX_BODY_BYTES).
+
+    Returns immediately with `{run_id, status: "queued"}`; the bot
+    runs out-of-band via the existing scheduled_run handler + SDK
+    polling. Returns 404 for unknown tokens, tokens that don't belong
+    to a webhook trigger, or disabled triggers — same response for
+    all three so we don't leak whether the token shape is valid.
+    """
+    import json as _json
+
+    import jobs as _jobs
+    import triggers as _trigmod
+
+    _digest = _trigmod.hash_webhook_token(token)
+
+    # Per-token rate limit fires BEFORE the DB lookup so a flood of
+    # invalid tokens still gets throttled (same plaintext token →
+    # same key, but valid token holders also benefit from the cap).
+    limits.rate_limit(
+        f"trigger_fire:{_digest}",
+        limit=_WEBHOOK_FIRE_LIMIT_PER_MIN,
+    )
+
+    trigger = session.execute(
+        select(Trigger).where(Trigger.webhook_token_hash == _digest)
+    ).scalars().first()
+    # Same 404 for missing / non-webhook / disabled. Don't leak.
+    if (
+        trigger is None
+        or trigger.kind != "webhook"
+        or not trigger.enabled
+    ):
+        raise HTTPException(status_code=404, detail="trigger not found")
+
+    body = await request.body()
+    if body:
+        try:
+            webhook_payload: Any = _json.loads(body.decode("utf-8"))
+            # Top-level non-dict (list, string, number) is valid JSON
+            # but awkward to expose to the bot as a dict; wrap so
+            # `lightsei.trigger.webhook_payload` is always a dict.
+            if not isinstance(webhook_payload, dict):
+                webhook_payload = {"value": webhook_payload}
+        except (ValueError, UnicodeDecodeError):
+            webhook_payload = {"raw": body.decode("utf-8", errors="replace")}
+    else:
+        webhook_payload = {}
+
+    now = utcnow()
+    run_id = str(uuid.uuid4())
+    job_id = str(uuid.uuid4())
+
+    _jobs.enqueue_job(
+        session,
+        job_id=job_id,
+        workspace_id=trigger.workspace_id,
+        kind="scheduled_run",
+        request_payload={
+            "trigger_id": trigger.id,
+            "webhook_payload": webhook_payload,
+            "run_id": run_id,
+        },
+    )
+    trigger.last_run_at = now
+    trigger.updated_at = now
+    session.flush()
+
+    return {
+        "run_id": run_id,
+        "status": "queued",
+        "trigger_id": trigger.id,
+    }
+
+
 def _serialize_plan_event(
     row: Event, validations: list[dict[str, Any]] | None = None
 ) -> dict[str, Any]:

@@ -103,7 +103,11 @@ def run_scheduled_job(
         }
 
     now = _utcnow()
-    run_id = str(uuid.uuid4())
+    # The webhook endpoint (22.6) pre-allocates a run_id at enqueue
+    # time so it can return it to the caller immediately. Fall back to
+    # minting one here when the scheduler tick (22.3) enqueued the job
+    # — that path doesn't need to know the id up front.
+    run_id = payload.get("run_id") or str(uuid.uuid4())
     scheduled_at_iso = (trigger.next_run_at.isoformat()
                         if trigger.next_run_at else None)
 
