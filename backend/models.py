@@ -87,6 +87,18 @@ def is_valid_widget_message_role(role: object) -> bool:
     return isinstance(role, str) and role in _VALID_WIDGET_MESSAGE_ROLES
 
 
+# Phase 22.1: trigger kinds. Same validate-app-side pattern as the
+# widget statuses above. 'cron' uses a 5-field cron expression in
+# `triggers.schedule`; 'webhook' uses `triggers.webhook_token_hash`
+# for the public POST /triggers/{token}/fire path. Event-based
+# kinds (Gmail label, Drive change) are parked to Phase 22B.
+_VALID_TRIGGER_KINDS: frozenset[str] = frozenset({"cron", "webhook"})
+
+
+def is_valid_trigger_kind(kind: object) -> bool:
+    return isinstance(kind, str) and kind in _VALID_TRIGGER_KINDS
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -1647,5 +1659,102 @@ class WidgetEscalation(Base):
             "ix_widget_escalations_open_recent",
             text("escalated_at DESC"),
             postgresql_where=text("resolved_at IS NULL"),
+        ),
+    )
+
+
+class Trigger(Base):
+    """Phase 22.1: one row per configured trigger on an agent.
+
+    Two kinds in v1: 'cron' (recurring schedule, scheduler loop in
+    worker fires on next_run_at) and 'webhook' (token in URL, fired
+    by external POST /triggers/{token}/fire). Event-based kinds
+    (Gmail label, Drive change, Calendar event tagged) are parked to
+    Phase 22B.
+
+    Agent reference is `agent_name: String` not a real FK because
+    the agents table has a composite PK (workspace_id, name). Same
+    snapshot pattern as Deployment + WidgetConversation; app-side
+    queries resolve via the (workspace_id, agent_name) pair.
+
+    Cron rows: `schedule` is required + parsed via croniter,
+    `next_run_at` is pre-computed so the scheduler's hot query is a
+    simple WHERE filter. Webhook rows: `webhook_token_hash` is the
+    sha256 of the plaintext token (returned to the operator once at
+    create-time), partial-unique so multiple cron rows coexist.
+    `next_run_at` is NULL for webhook rows.
+
+    `last_run_id` is a real FK (runs.id is single-column). SET NULL
+    on run delete so the trigger survives run cleanup.
+    `last_run_status` is a snapshot of the last run's status, kept
+    on this row so the dashboard list renders without a JOIN.
+    """
+
+    __tablename__ = "triggers"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    agent_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    schedule: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True,
+    )
+    webhook_token_hash: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True,
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("true"),
+        default=True,
+    )
+    next_run_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    last_run_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    last_run_id: Mapped[Optional[str]] = mapped_column(
+        String,
+        ForeignKey("runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    last_run_status: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+
+    __table_args__ = (
+        # Scheduler's hot query: enabled cron triggers due to fire,
+        # ordered by next_run_at. Partial-where keeps the index
+        # small (webhook rows always have NULL next_run_at + don't
+        # need the scheduler to look at them).
+        Index(
+            "ix_triggers_due",
+            "enabled", "next_run_at",
+            postgresql_where=text("kind = 'cron'"),
+        ),
+        # Per-agent triggers list (dashboard panel in 22.7).
+        Index(
+            "ix_triggers_workspace_agent",
+            "workspace_id", "agent_name",
+        ),
+        # Webhook token lookup. Partial-unique: multiple cron rows
+        # (NULL hash) coexist, only populated hashes must be unique.
+        Index(
+            "ix_triggers_webhook_token",
+            "webhook_token_hash",
+            unique=True,
+            postgresql_where=text("webhook_token_hash IS NOT NULL"),
         ),
     )
