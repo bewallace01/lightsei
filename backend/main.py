@@ -588,11 +588,20 @@ def on_startup() -> None:
     import eval_runner
     eval_runner.start_eval_cron()
 
+    # Phase 22.3: cron-trigger scheduler. Ticks every 60s, enqueues
+    # a `scheduled_run` job for any cron trigger whose next_run_at has
+    # passed (within a 24h grace window). 22.4 ships the handler that
+    # actually dispatches the bot run.
+    import scheduler
+    scheduler.start_scheduler()
+
 
 @app.on_event("shutdown")
 async def on_shutdown() -> None:
     import eval_runner
     import jobs
+    import scheduler
+    await scheduler.stop_scheduler()
     await eval_runner.stop_eval_cron()
     await jobs.stop_runner()
 
