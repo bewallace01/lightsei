@@ -7,9 +7,9 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 24 complete 2026-05-25. NOW pointer is open. The team-from-readme planner is now wedge-aware end to end: emits structured sensitivity_hint + capabilities per bot, dashboard renders editable Zone + Capabilities chips, deploy carries values through, freeform constraints steer per-bot allow-lists. JYNI re-test confirmed an A+ result (atlas=public+[internet, send_command]; vega=pii+[connector:jyni_crm]; descriptions echo freeform word-for-word).**
+> **Phase 25 — 25.1 schema: end_users + end_user_sessions + end_user_vendor_links (alembic 0042) + magic-link auth table for end users. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
-Phase 24 (planner emits structured zone + capabilities) complete: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
+Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
 Backend at **1249 passing** (+11 across Phase 24; started at 1238). SDK unchanged at **164**. Dashboard's `/agents/team-from-readme` grew with Zone + Capabilities editors per bot. No new routes.
 
@@ -1269,6 +1269,335 @@ Items the design considered but didn't ship:
 - Voice/meeting-room widget surface (the "meeting room" half of the JYNI example). Vapi or Daily.co integration; ~1-2 weeks.
 - Custom-app connector primitive ("JYNI is a Lightsei connector" adapter so bots can authenticate to JYNI's API with operator-configurable read vs write actions). Generalizes the connector pattern beyond Google. ~3-4 days.
 - Planner-side "narrow vs broad" capability templates the operator can prefer (Compliance, Builder, Research-only) before planning, so the LLM has a stronger prior.
+
+## Phase 25-29: Lightsei end-user app (consumer-facing chat arc)
+
+Phases 25-29 build out the **end-user-facing chat surface**, the second product surface alongside the operator dashboard. Today Lightsei is exclusively for *businesses* (operators configuring bots for their team or for their customers' embedded widget). Phases 25-29 add a surface where the *end users themselves* (people buying from a Lightsei-using business) get accounts, sign in across devices, chat persistently with bots from the vendors they're subscribed to, on web and on a real native iOS app.
+
+Motivated by the JYNI conversation 2026-05-25: customer-facing fit is the wedge. The Phase 21 widget gives JYNI's customers' customers an embed on the vendor's site, but that's a tab they close. A standalone chat surface + iOS app means the bot follows the end customer wherever they go, same Viktor-shaped positioning, but for the *consumer* of an AI-coworker product, not just the operator who configured it.
+
+Spec'd as five phases to make scope explicit. Real engineering effort across all five = **~2-3 months**. Bailey opted for full-scope-up-front spec so the arc is documented; we ship one phase at a time but the design is locked across all five so per-phase decisions don't repaint the next four.
+
+### Phase 25: End-user identity model
+
+The foundation. Today the only humans Lightsei knows about are **operators** (Workspace members, Bailey, JYNI staff, etc.). Phase 25 adds **end users** as a distinct entity: they sign into Lightsei separately, can be linked to multiple workspaces (vendors) as a "customer" of those vendors' bots, and carry conversations across devices via persistent identity. This is Phase 21B's parked signed-token piece, properly built.
+
+Rough shape:
+
+1. **End-user accounts.** New `end_users` table + magic-link auth flow + per-end-user session table. Distinct from `users` (operators); same workspace can have many end users + many operators.
+2. **End-user-to-vendor linking.** `end_user_vendor_links` join table: an end user is "subscribed" to a workspace as a customer. The vendor (operator) controls which end users are linked (today: invite code, future: vendor-issued direct invite).
+3. **Widget endpoint accepts end-user identity.** Phase 21 widget endpoints (`POST /widget/{public_id}/messages`) take an optional bearer token from an end-user session. When set, the conversation is scoped to that end user (persistent across devices); when unset, falls back to existing anonymous behavior. Bot's `lightsei.end_user` context exposes the identified end-user id + display name to handlers.
+
+Demo: end user Alice gets a magic-link from JYNI. Lands on `app.lightsei.com/auth/end-user/magic-link?token=...`, signs in, lands at `/c` (the consumer home, Phase 26 ships the actual UI; in Phase 25 it's a placeholder). She's now linked to JYNI as an end-user. Her widget conversations from now on carry her identity; from any device she logs in on, her conversation history is hers.
+
+### Design choices locked 2026-05-25
+
+- **Separate `end_users` table, not a flag on `users`.** Operators and end users have different fields (operator = email + password / OAuth + workspace membership; end user = email + magic-link + display name + cross-vendor links). One table with a "role" flag would muddle every existing query. Separation is cheap; the join table cleanly handles their relationship.
+- **Magic-link auth only for end users (no password) in v1.** Lowest-friction signup; matches the Phase 17.2 magic-link flow operators have. Password support stays parked: adds rotation/reset complexity without unlocking anything for the consumer use case.
+- **Anonymous Phase 21 conversations still work.** End-user identity is **opt-in** for v1. Existing widget embeds with no signed-in user keep working exactly as today (anonymous `widget_conversations.anon_user_id`). Phase 25's signed-token shape is just a richer extension on the same table.
+- **End-user-vendor linking is invite-code only in v1.** Vendor issues a code (UUID-shaped); end user enters it during signup or via an "I have an invite code" flow on `/c`. Public discovery / claim parks to Phase 27B alongside trust-and-safety questions (who can publish themselves as a vendor on Lightsei?).
+- **SDK exposes `lightsei.end_user.id`, `.email`, `.display_name`.** Read-only properties on a new SDK accessor, same shape as `lightsei.trigger` from Phase 22.5. Bot handlers can branch on identified-vs-anonymous; PII-zoned bots get the identified info; public-zoned bots get a redacted version (id only, no email).
+- **Cross-vendor isolation: zero data leak.** An end user linked to vendor A and vendor B sees their conversations with A's bots completely separate from B's. The Phase 16 trust-zone wedge applies: vendor A's PII bot cannot see vendor B's end user data. Tested explicitly in 25.6.
+
+### 25.1: Schema for end_users + sessions + vendor links + magic-link tokens
+
+One new alembic migration (`0042_end_user_identity.py`) adds four tables:
+
+- `end_users` (id uuid pk, email unique, display_name nullable, email_verified bool default false, auth_provider default 'magic_link', created_at, updated_at).
+- `end_user_sessions` (id pk, end_user_id fk → end_users cascade, token_hash unique, created_at, expires_at, revoked_at nullable). Parallel to the operator `sessions` table.
+- `end_user_vendor_links` (composite pk (end_user_id, workspace_id), end_user_id fk → end_users cascade, workspace_id fk → workspaces cascade, linked_via varchar(32) default 'invite_code', linked_at, removed_at nullable).
+- `end_user_signin_tokens` (token_hash pk, end_user_id fk, created_at, expires_at, consumed_at nullable): same shape as operator `email_signin_tokens` from Phase 17.
+
+Also extends `widget_conversations` with a nullable `end_user_id` fk (existing `anon_user_id` stays, null = identified, fall back to anon for legacy / opt-out conversations).
+
+Models in `backend/models.py`: `EndUser`, `EndUserSession`, `EndUserVendorLink`, `EndUserSigninToken`. Schema tests in `backend/tests/test_end_user_schema.py`.
+
+### 25.2: End-user magic-link auth flow
+
+Two new endpoints, parallel to the operator magic-link from Phase 17.2:
+
+- `POST /auth/end-user/magic-link/request`: body `{email, vendor_invite_code?}`. Always returns 200 (no-leak contract). If `vendor_invite_code` is set, the magic link's consumption side will also create an end_user_vendor_links row.
+- `POST /auth/end-user/magic-link/consume`: body `{token, vendor_invite_code?}`. Creates or finds the end_user row, mints an `end_user_sessions` token, optionally links to vendor. Returns `{end_user, session_token, linked_vendors}`.
+
+Email template (via Resend, same `email_provider.py` shape from Phase 17), distinct copy from operator magic links so end users see something branded for them.
+
+Tests: signup-then-signin contract, vendor invite code happy-path, no-leak on unknown email, rate limiting per email.
+
+### 25.3: End-user session auth resolver
+
+New `backend/end_user_auth.py`: `get_end_user(authorization)` dep that resolves an `EndUserSession` from a bearer token and returns the linked `EndUser` row + their linked vendors. Distinct from operator auth (`backend/auth.py`) so the two never confuse signatures. Pages that accept end-user auth pass through this dep explicitly.
+
+Tests: valid token resolves, expired returns 401, revoked returns 401, token matching an operator session returns 401 (cross-token-type protection).
+
+### 25.4: Widget endpoints accept end-user identity
+
+`POST /widget/{public_id}/messages` + `GET /widget/{public_id}/conversations/{conversation_id}` extended to accept an optional `Authorization: Bearer <end_user_session_token>`. When present + valid + the end user is linked to this workspace, the conversation is scoped to `widget_conversations.end_user_id`. When absent or unlinked, falls back to existing anonymous behavior.
+
+`widget_conversations` queries filter on `end_user_id` when the request is authenticated so an end user only sees their own threads. Tests: identified user sees own conversations only; anonymous user sees only the `anon_user_id`-scoped ones; cross-vendor isolation (end user A linked to vendor A doesn't see vendor B's conversations even if they're a member of both).
+
+### 25.5: SDK `lightsei.end_user` accessor
+
+`sdk/lightsei/_end_user.py`: ContextVar-backed accessor, same pattern as `lightsei.trigger` from Phase 22.5. Properties: `id`, `email` (PII bots only, redacted for public bots), `display_name`, `is_identified` (false when anonymous). Set by the widget orchestrator (Phase 21.6) before invoking the bot's `@on_chat("widget")` handler. Tests cover all four properties under identified + anonymous, plus the PII-zone redaction.
+
+### 25.6: Cross-vendor isolation tests
+
+The load-bearing security test. End user Alice is linked to vendor A AND vendor B. She has conversations with both vendors' bots. Verify:
+
+- Alice's session token resolves correctly against vendor A's widget endpoint → sees her vendor-A conversations only.
+- Same token against vendor B's widget endpoint → sees her vendor-B conversations only.
+- Vendor A's PII-zoned bot cannot read vendor B's conversation metadata, payloads, or end-user info (Phase 16 trust-zone + workspace-scoping double-walls).
+- Vendor A operator cannot see Alice's vendor-B conversations from the operator inbox even though it's the same end_user_id.
+
+### 25.7: Tests + sweep + memory
+
+Backend pytest. SDK pytest. Dashboard tsc + next build (no UI surface yet in 25; the `/c` placeholder is one route). Save a memory documenting the end-user-vs-operator split.
+
+### Phase 25B (parked)
+
+- Password auth for end users (alongside magic link).
+- Sign in with Apple / Google OAuth for end users.
+- Self-service end-user account deletion + GDPR export.
+- Per-vendor display-name override (Alice shows as "Alice Smith" to vendor A but "alice@example.com" to vendor B).
+
+---
+
+### Phase 26: Standalone chat surface + PWA
+
+Builds the actual chat-with-bots-across-vendors web surface end users see. A standalone `/c` route on the existing dashboard (shared cookie + auth surface, no separate subdomain needed) where signed-in end users see their conversations + can start new ones. PWA manifest + service worker makes it installable to iOS home screen with native-app feel (full-screen, app icon, splash screen).
+
+Rough shape:
+
+1. **`/c` home for end users**, list of vendors the end user is linked to, recent conversations per vendor, "Start a new conversation" button per vendor.
+2. **`/c/{vendor_slug}` per-vendor chat**, conversation list + thread view for one vendor's bot. Reuses Phase 21 widget orchestrator on the backend; the surface is just a different render of the same conversation data.
+3. **PWA install**, `manifest.json`, service worker, `apple-touch-icon`, splash screens. iOS 16.4+ home-screen install is the target; Android adds-to-home-screen comes for free.
+
+Demo: Alice opens `app.lightsei.com/c` after Phase 25's magic-link signin → sees JYNI in her vendor list → taps in → starts a conversation with vega → conversation persists across browser sessions. She taps "Add to Home Screen" in Safari → JYNI/Lightsei icon on her iPhone home screen. Opens it from there → full-screen, no browser chrome, same conversation history.
+
+### Design choices locked 2026-05-25
+
+- **Path-based routing on existing dashboard, not subdomain.** `/c` shares auth cookies + RSC infrastructure with `/agents`, `/inbox`, etc. A subdomain (`chat.lightsei.com`) would require a separate auth + CORS surface. Pay that complexity only if there's a reason (e.g., custom-vendor-domain hosting becomes a paid feature later).
+- **Per-vendor slug, vendor-controlled.** `workspaces.vendor_slug` column (lowercase URL-safe, 3-32 chars). Operator claims one on `/workspace-settings`. Used in URL: `/c/jyni`. Vendor's `widget_public_id` (Phase 21) stays as the iframe-embed handle; the slug is the human-readable consumer-facing handle.
+- **Bot picker minimal in v1.** Each vendor has at most one customer-facing bot (Phase 21.7's `customer_facing_agent_name`). The chat surface shows just that one. Multi-bot-per-vendor consumer chat parks to Phase 26B (would need a per-bot routing UI that v1 doesn't need).
+- **Conversation list is paginated by `last_message_at desc`, cap 50 per fetch.** Same shape as Phase 21.8's `/inbox`. Server-side pagination via `?since=` cursor.
+- **PWA manifest is per-vendor only for v1.** Single Lightsei-branded PWA (icon + splash + name = "Lightsei"); the per-vendor branding lives inside the app (vendor logo in header, vendor name in conversation list). Per-vendor PWAs (each vendor's chat installs as its own app with the vendor's name + icon) parks to Phase 26B: requires per-vendor manifests served from per-vendor paths, more infra.
+- **No live updates in v1 (polling-only).** The chat polls `/widget/{public_id}/conversations/{conversation_id}?since=...` every 2-3s while focused. SSE / WebSocket parks until Phase 28 (push notifications give "open the app" signal; in-app live updates can stay polling for a while).
+
+### 26.1: Vendor slug schema + claim endpoint
+
+Alembic 0043 adds `workspaces.vendor_slug` (varchar(32) nullable, unique). Validator: 3-32 chars, lowercase, `[a-z0-9-]`. `POST /workspaces/me/vendor-slug` body `{slug}` claims it for the active workspace (409 if taken, 422 on invalid). `GET /workspaces/me` returns it. Schema test confirms uniqueness; endpoint tests cover claim + validation + workspace-scoped access.
+
+### 26.2: `/c` standalone routes (end-user-authed)
+
+Three new dashboard routes:
+
+- `/c`: vendor list (one card per linked vendor, "Open chat" button).
+- `/c/{slug}`: vendor chat (conversation list + thread view side-by-side on desktop, drill-in on mobile).
+- `/c/auth/magic-link`: end-user magic-link consume page (mirror of operator `/auth/magic-link`).
+
+These pages use end-user auth (Phase 25.3), not operator auth. Auth context comes from a separate cookie (`lightsei.end_user_session`) so end users don't get confused with operator sessions. Layout chrome distinct from operator dashboard (no header nav, no constellation map, just chat).
+
+### 26.3: End-user session cookie + dashboard infrastructure
+
+Add `lightsei.end_user_session` cookie handling parallel to operator session. New helpers in `dashboard/app/api.ts`: `getEndUserSessionToken`, `setEndUserSession`, `clearEndUserSession`. New `endUserAuthedJson` helper for fetches that should use end-user auth. Auth fallback chain: end-user token if on `/c` routes, operator token otherwise.
+
+### 26.4: PWA manifest + service worker
+
+`dashboard/app/manifest.ts` (Next.js manifest route) returns Lightsei branding (icon, theme color, full-screen display). Service worker (`dashboard/public/sw.js`) caches the `/c` shell for offline open; passes everything else through. Apple touch icon set + iOS splash screens (the painful `apple-touch-icon-*.png` matrix at every iPhone resolution).
+
+### 26.5: Install prompt + onboarding
+
+Lightweight "Add to Home Screen" tooltip on `/c` for iOS Safari users who haven't installed (detected via standalone media query). After install, the tooltip stops showing.
+
+### 26.6: Tests + tsc + next build smoke
+
+Backend tests for vendor-slug endpoint. Dashboard tsc + next build (new routes increase bundle slightly; budget on `/c` is ~5 kB). Live smoke: install the PWA on a real iPhone, open it, verify a conversation works end-to-end.
+
+### Phase 26B (parked)
+
+- Per-vendor PWAs (each vendor's chat installs as its own app with its own icon + name). Requires per-vendor manifests served from per-vendor paths.
+- Custom vendor domain hosting (`chat.jyni.com` instead of `app.lightsei.com/c/jyni`): needs Cloudflare-for-SaaS-style infra.
+- Multi-bot-per-vendor consumer chat (vendor exposes multiple bots, end user picks).
+- Subdomain rebrand if Lightsei brand fades behind vendor brand long-term.
+
+---
+
+### Phase 27: Cross-vendor subscriptions + my-bots index
+
+Today (after Phase 25-26) an end user lands at `/c` and sees the vendors they're linked to, but linking is invite-only and one-vendor-at-a-time. Phase 27 builds the **vendor index** experience: end users browse subscribed vendors, redeem additional invite codes, unsubscribe, view a unified "my bots" home that's the actual front door once they're subscribed to multiple vendors.
+
+Rough shape:
+
+1. **`/c` becomes the unified my-bots home.** Vendor cards with unread counts, "ADD a vendor" affordance, "Unsubscribe" per vendor.
+2. **Invite-code redemption flow**, `/c/redeem?code=...` or in-app code entry. Adds an `end_user_vendor_links` row.
+3. **Per-vendor settings**, end user's display name override per vendor (Phase 25B's parked piece, promoted), notification preferences per vendor (Phase 28 wires the actual push), unsubscribe.
+
+Demo: Alice (already linked to JYNI from Phase 25) opens `/c`, clicks "Add a vendor", enters `Halo` invite code → linked to Halo. Her `/c` home now shows both JYNI and Halo as cards. She taps each to chat. Both conversations persist; JYNI's vega cannot see Halo's bot's data and vice versa.
+
+### Design choices locked 2026-05-25
+
+- **Invite-code only in v1; public discovery parked.** Vendors generate invite codes via a new operator endpoint; end users redeem. Public discovery (a directory of vendors on Lightsei) opens trust-and-safety questions (who can claim a vendor? what about impersonation?) we don't want to litigate yet.
+- **Unsubscribe is soft-revoke, not hard delete.** Sets `end_user_vendor_links.removed_at` to now. Past conversations stay accessible to the end user (read-only); no new messages can be sent. Vendor can re-invite to restore.
+- **Vendor's invite codes are bulk-mintable.** Vendor operator generates N codes at once on the workspace settings page (Phase 23.5 surface gets a new section). Each code is single-use, 30-day TTL.
+- **Per-vendor notification prefs default to ON.** End users get notified by default when their vendor's bot replies; they can disable per-vendor or globally.
+- **My-bots home is the new chat front door.** `/c` in Phase 26 = vendor list; in Phase 27 = my-bots dashboard. Same path, richer content.
+
+### 27.1: Schema for invite codes + per-vendor end-user settings
+
+Alembic 0044 adds:
+- `vendor_invite_codes` (code uuid pk, workspace_id fk, created_at, expires_at, consumed_at nullable, consumed_by_end_user_id fk nullable).
+- New columns on `end_user_vendor_links`: `display_name_override` nullable, `notification_pref` (`all` / `mentions` / `off`, default `all`), `removed_at` nullable.
+
+### 27.2: Backend endpoints
+
+- `POST /workspaces/me/end-user-invites` body `{count}`: mints N invite codes, returns plaintext codes (shown to operator once).
+- `GET /workspaces/me/end-user-invites`: list outstanding codes.
+- `DELETE /workspaces/me/end-user-invites/{code}`: revoke.
+- `POST /me/end-user/redeem-invite` body `{code}`: end-user-authed; redeems + creates link.
+- `GET /me/end-user/vendors`: list linked vendors with unread counts.
+- `PATCH /me/end-user/vendors/{workspace_id}`: update notification_pref + display_name_override.
+- `DELETE /me/end-user/vendors/{workspace_id}`: soft-revoke (set removed_at).
+
+### 27.3: Operator surface for invite-code management
+
+`/workspace-settings` (Phase 23.5) grows an "End-user invites" section: list active codes, generate-N-codes button, copy code, revoke code.
+
+### 27.4: End-user `/c` my-bots index
+
+`/c` becomes the vendor-cards home: one card per linked vendor (logo, name, last message preview, unread count, "Open chat" CTA). "+ Add vendor" opens invite-code entry modal. Per-vendor "Settings" link to `/c/{slug}/settings`.
+
+### 27.5: Per-vendor end-user settings page
+
+`/c/{slug}/settings`, end user manages display name override + notification pref + unsubscribe for that vendor.
+
+### 27.6: Tests + sweep
+
+Backend tests cover invite code mint + redeem + revoke + soft-unsubscribe. Cross-vendor isolation tests extended for the "unsubscribed end user still reads past conversations but can't send new" case. Dashboard tsc + next build.
+
+### Phase 27B (parked)
+
+- Public vendor directory (`/c/discover`).
+- Vendor-issued direct invite (vendor types end-user email + Lightsei mails the invite link). Higher friction for vendor, smoother for end user.
+- End-user-initiated subscription requests (end user discovers vendor, requests link, vendor approves): multi-step trust flow.
+- Per-bot-within-vendor subscriptions (end user only wants vendor A's "support" bot, not vendor A's "sales" bot).
+
+---
+
+### Phase 28: Push notifications (web)
+
+End users see bot replies, escalations, vendor-initiated nudges via push notification even when the PWA is closed. Web Push API (VAPID) on iOS 16.4+ Safari + Android Chrome. Native APNS lives in Phase 29 (iOS app); web push covers the PWA surface for both web + iOS-home-screen-installed.
+
+Rough shape:
+
+1. **VAPID infra**, generate key pair, sign push payloads server-side, deliver via web-push protocol.
+2. **Service worker push handler**, receives push, shows notification, deep-links into the right conversation on click.
+3. **Per-end-user push subscriptions**, store endpoint + p256dh + auth from `PushManager.subscribe()`.
+4. **Send triggers**, bot replies, escalations from `/inbox` operator side, vendor-initiated outreach.
+
+Demo: Alice taps "Enable notifications" on `/c`. Closes the app. JYNI's vega bot sends a follow-up message via the operator inbox → Alice's iPhone shows a notification "JYNI: Following up on your refund question." Tap → app opens to that conversation.
+
+### Design choices locked 2026-05-25
+
+- **Web Push via VAPID, not Firebase Cloud Messaging.** VAPID is the open standard; FCM adds Google dependency for marginal gain. Web Push works natively on iOS 16.4+ PWA and modern Chrome / Firefox / Edge.
+- **`LIGHTSEI_VAPID_PUBLIC_KEY` + `LIGHTSEI_VAPID_PRIVATE_KEY` env vars on the backend.** Generated once via `py-vapid`. Public key shipped to the frontend at build time (it's public: that's literally the point of VAPID).
+- **Push delivery is best-effort, not retried.** Push endpoints can be stale (uninstalled app, revoked subscription); we'll get 410 from the push service and clean up the subscription row. No retry queue: if push fails, the in-app polling catches it on next open.
+- **Per-conversation push enabled by default; per-vendor pref overrides.** Phase 27's `notification_pref` column gates: `all` = every reply pushes; `mentions` = only when bot @-mentions the end user (future hook); `off` = never push.
+- **Click handler deep-links to the conversation.** Service worker's `notificationclick` opens / focuses the `/c/{slug}/conversation/{id}` URL.
+- **No batching / digest in v1.** Each push is independent. Smart digest (collapse multiple unread → single notification) parks.
+
+### 28.1: Schema for push subscriptions
+
+Alembic 0045 adds `end_user_push_subscriptions` (id pk, end_user_id fk cascade, endpoint text, p256dh text, auth text, created_at, last_used_at nullable, revoked_at nullable). Composite unique on `(end_user_id, endpoint)` so re-subscribing from the same device doesn't dup-row.
+
+### 28.2: Backend push send module
+
+`backend/push.py`, pure module wrapping `py-vapid` + `pywebpush`. Helpers: `send_to_end_user(end_user_id, title, body, deep_link_url)` finds all active subscriptions + sends. Cleans up 410 (Gone) responses.
+
+### 28.3: Wire push into widget orchestrator + inbox
+
+Phase 21.6 widget orchestrator: after persisting bot response, call `push.send_to_end_user(...)` if the recipient is identified + has notifications enabled. Same hook in `/inbox` operator-reply endpoint (Phase 21.8).
+
+### 28.4: Service worker push handler
+
+Extend `dashboard/public/sw.js` to register a `push` event listener that calls `self.registration.showNotification(...)` + a `notificationclick` listener that deep-links.
+
+### 28.5: Subscription UI
+
+`/c` shows an "Enable notifications" prompt for end users who haven't subscribed. On click, calls `PushManager.subscribe()` + POSTs the subscription to backend.
+
+### 28.6: Tests + sweep
+
+Backend tests with `pywebpush` stubbed: subscription roundtrip, send-to-end-user hits the right subscriptions, 410 cleanup. Dashboard tsc + build.
+
+### Phase 28B (parked)
+
+- Smart digest (collapse N unread → one notification).
+- Push silencer per time window (no notifications between 9pm-7am).
+- "Mentions only" push pref (requires bots to @-mention end users explicitly).
+- Email fallback for offline end users.
+
+---
+
+### Phase 29: Native iOS app
+
+The real native iOS app on the App Store. Swift + SwiftUI single-codebase. Thin client over the existing backend APIs, no duplicate business logic. APNS for push notifications (web push doesn't reach native; need a native bridge). Sign in with Apple as a first-class auth option (App Store guideline-required when offering third-party social login).
+
+Rough shape:
+
+1. **Xcode project + SwiftUI scaffolding.** Bundle id, app icon, splash screens, Info.plist, deep-link routing.
+2. **Auth flow.** Magic link via universal links (tap link in email → opens app, not Safari) + Sign in with Apple. Token stored in Keychain.
+3. **Conversation surface**, vendor list view, conversation list, thread view. Mirrors PWA surface.
+4. **APNS push**, Apple Push Notification service. Register device token on signin → backend stores per `end_user_devices` row → send via APNS HTTP/2 API.
+5. **Distribution**, TestFlight for beta testers + App Store submission.
+
+Demo: Bailey downloads the Lightsei app from TestFlight on his iPhone, signs in with Apple, sees his subscribed vendors (created in Phase 26), taps JYNI, has a conversation with vega. Receives a push notification when vega replies asynchronously. Notifications work the same as the PWA but with proper APNS delivery (faster + more reliable than web push on iOS).
+
+### Design choices locked 2026-05-25
+
+- **SwiftUI single-codebase, iOS 16+ minimum.** iOS 16 lets us drop UIKit fallbacks for most things + access modern SwiftUI features. Excludes ~5% of iPhones (mostly very old devices); acceptable tradeoff.
+- **Thin client architecture.** No business logic in the app; every interaction calls the existing backend `/c` + `/me/end-user/*` endpoints. App stays small; logic stays server-side; bug fixes ship via backend deploy, not app store review.
+- **Sign in with Apple alongside magic link.** Both options on the signin screen. Apple guideline 4.8 mandates SiwA if you offer ANY third-party social login (Google, Facebook, etc.): we don't, so SiwA is optional, but it's the lowest-friction iOS signin path so we ship it.
+- **APNS via the Apple Push Notification Service HTTP/2 API.** Token-based (JWT signed with .p8 key) rather than certificate-based. Backend gets new env vars: `LIGHTSEI_APNS_KEY_ID`, `LIGHTSEI_APNS_TEAM_ID`, `LIGHTSEI_APNS_PRIVATE_KEY`.
+- **Universal links for magic-link signin.** Magic-link email contains `https://app.lightsei.com/auth/end-user/magic-link?token=...`. iOS opens the app if installed (via apple-app-site-association at `/.well-known/`), falls back to PWA otherwise. Same URL, two surfaces.
+- **TestFlight before App Store submission.** Beta with ~10 real JYNI end-users for ~2 weeks; iterate on crashes + UX. Submit to App Store only after the beta cycle.
+- **App Store IAP NOT in v1.** End users don't pay Lightsei directly; the vendor pays. Apple's IAP rule only kicks in for in-app purchases of digital goods consumed in-app. We're a B2B SaaS with an end-user surface: same posture as Salesforce iOS app or Front iOS app, neither does IAP.
+
+### 29.1: Xcode scaffolding + deep links
+
+New `ios/` directory at repo root with Lightsei Xcode project. SwiftUI App entry. App icon + 8 size launch images. Bundle id `com.lightsei.app` (assumes the developer account is registered). Universal link config + `apple-app-site-association` JSON shipped from backend.
+
+### 29.2: Auth flow + Keychain
+
+Magic-link landing screen (passed token from universal link), Sign in with Apple button (handled via AuthenticationServices framework + a new backend endpoint `POST /auth/end-user/apple` that exchanges Apple's signed identity token for a Lightsei end-user session). Token cached in iOS Keychain via `KeychainAccess` Swift package.
+
+### 29.3: Conversation surfaces (SwiftUI)
+
+`VendorListView` (list of linked vendors with unread badges), `ConversationListView` (per-vendor conversation list), `ConversationThreadView` (message bubbles, input bar, send button). Polling for new messages while focused; switches to push when backgrounded.
+
+### 29.4: APNS device registration + push delivery
+
+App requests notification permission on first chat-open; on grant, registers with APNS + POSTs the device token to `POST /me/end-user/devices` body `{device_token, platform: 'ios', app_version}`. Backend `push.py` adds an `apns_send_to_end_user(...)` helper that fans out to all the end user's iOS devices via APNS HTTP/2.
+
+### 29.5: Vendor subscription UI
+
+End user can redeem an invite code from inside the app (mirrors web flow). Per-vendor settings (display name, notification pref, unsubscribe) live in a settings screen reachable from each vendor's chat.
+
+### 29.6: TestFlight pipeline
+
+Github Actions workflow that builds + signs + uploads to App Store Connect on every `ios-release-v*` git tag. Requires Apple ID + app-specific password + .p8 key as GH Actions secrets.
+
+### 29.7: App Store submission
+
+Privacy policy URL, marketing copy, screenshots (8 sizes), demo account for Apple reviewers, App Privacy questionnaire, age rating questionnaire. First submission usually takes 1-3 weeks; rejections often require text-change tweaks (privacy policy URL, demo account credentials, etc.).
+
+### Phase 29B (parked)
+
+- Android app (separate Kotlin codebase OR React Native / Flutter cross-platform rewrite: defer until iOS validates).
+- iPad layout (iOS apps run on iPad in iPhone-mode by default; native iPad layout is its own sub-effort).
+- Apple Watch companion (notification glance).
+- Widgets (iOS home screen widget showing latest message or vendor activity).
+- Share extension (share text from another iOS app → start a conversation in Lightsei).
+
+---
 
 Phases 1-4 shipped 2026-04-25 (spine, cost-cap guardrail, Anthropic + streaming, hosted-readiness). Phase 5 shipped 2026-04-26 (PaaS-for-agents). Phase 6 shipped 2026-04-27 (Polaris orchestrator). Phase 7 shipped 2026-04-28 (output validation, advisory). Phase 8 shipped 2026-04-28 (blocking validators). Phase 9 shipped 2026-04-30 (notifications). Phase 10 shipped 2026-05-01 (GitHub integration: push-to-deploy + Polaris reads docs from the repo). Phase 11 starts the dispatch story: Polaris commands a team of executor agents instead of just emitting plans you read. Phase 11B turns the home page into a real command center while we're at it. Phase 12 is multi-provider so the team can pick the right model per task.
 
