@@ -433,6 +433,13 @@ export default function Header() {
                   <WorkspaceSwitcher onClose={() => setMenuOpen(false)} />
                   <div className="py-1 border-t border-gray-100">
                     <Link
+                      href="/workspace-settings"
+                      role="menuitem"
+                      className="block px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                    >
+                      Workspace settings
+                    </Link>
+                    <Link
                       href="/account"
                       role="menuitem"
                       className="block px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"

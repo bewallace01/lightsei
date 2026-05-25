@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -15,6 +16,7 @@ import {
   fetchWorkspace,
   getStoredUser,
   getStoredWorkspace,
+  listMyWorkspaces,
   renameWorkspace,
   revokeApiKey,
   revokeSession,
@@ -23,7 +25,9 @@ import {
   SessionWorkspace,
   setSecret,
   setSession,
+  switchMyWorkspace,
   UnauthorizedError,
+  WorkspaceMembership,
   WorkspaceSecretMeta,
 } from "../api";
 import {
@@ -61,6 +65,10 @@ export default function AccountPage() {
   const [savingSecret, setSavingSecret] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Phase 23.5: workspace memberships for the Workspaces section.
+  const [memberships, setMemberships] = useState<WorkspaceMembership[]>([]);
+  const [switchingTo, setSwitchingTo] = useState<string | null>(null);
+
   // Phase 17.7: billing state.
   const [billingBusy, setBillingBusy] = useState<"checkout" | "portal" | null>(null);
   const [billingError, setBillingError] = useState<string | null>(null);
@@ -74,17 +82,19 @@ export default function AccountPage() {
 
   const loadAll = async () => {
     try {
-      const [ws, ks, ss, sc] = await Promise.all([
+      const [ws, ks, ss, sc, wsList] = await Promise.all([
         fetchWorkspace(),
         fetchApiKeys(),
         fetchSessions(),
         fetchSecrets().catch(() => [] as WorkspaceSecretMeta[]),
+        listMyWorkspaces().catch(() => [] as WorkspaceMembership[]),
       ]);
       setWorkspace(ws);
       setName(ws.name);
       setKeys(ks);
       setSessions(ss);
       setSecrets(sc);
+      setMemberships(wsList);
       setError(null);
     } catch (e) {
       if (e instanceof UnauthorizedError) {
@@ -94,6 +104,23 @@ export default function AccountPage() {
       setError(String(e));
     }
   };
+
+  async function onSwitchWorkspace(workspaceId: string) {
+    if (switchingTo) return;
+    setSwitchingTo(workspaceId);
+    try {
+      await switchMyWorkspace(workspaceId);
+      // Full refresh: every workspace-scoped block on this page (keys,
+      // secrets, billing) is keyed to the active workspace and needs
+      // to re-fetch.
+      router.refresh();
+      await loadAll();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSwitchingTo(null);
+    }
+  }
 
   // Poll fetchWorkspace until plan_tier flips to 'paid' (webhook lands
   // within ~1s of Checkout success). Stops on flip, on timeout (45s),
@@ -280,6 +307,69 @@ export default function AccountPage() {
           {error}
         </div>
       )}
+
+      {/* --- Phase 23.5: Workspaces --- */}
+      <section className="mb-12">
+        <h2 className="text-[11px] font-semibold text-gray-500 mb-4 uppercase tracking-wider">
+          Workspaces
+        </h2>
+        {memberships.length === 0 ? (
+          <div className="text-sm text-gray-400 italic">loading…</div>
+        ) : (
+          <ul className="rounded-lg border border-gray-200 divide-y divide-gray-100">
+            {memberships.map((m) => (
+              <li
+                key={m.id}
+                className="px-4 py-3 flex items-center gap-4 text-sm"
+              >
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-gray-900 truncate">
+                      {m.name}
+                    </span>
+                    {m.is_active && (
+                      <span
+                        className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 ring-1 ring-indigo-600/20"
+                        aria-label="active workspace"
+                      >
+                        active
+                      </span>
+                    )}
+                    <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-gray-50 text-gray-600 ring-1 ring-gray-500/20">
+                      {m.role}
+                    </span>
+                  </div>
+                  <div className="text-xs text-gray-500 mt-0.5">
+                    Joined {fmt(m.joined_at)} · plan {m.plan_tier}
+                  </div>
+                </div>
+                {!m.is_active && (
+                  <button
+                    type="button"
+                    onClick={() => onSwitchWorkspace(m.id)}
+                    disabled={switchingTo !== null}
+                    className="text-xs px-2 py-1 rounded ring-1 ring-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    {switchingTo === m.id ? "Switching…" : "Switch"}
+                  </button>
+                )}
+                {m.is_active && (
+                  <Link
+                    href="/workspace-settings"
+                    className="text-xs px-2 py-1 rounded ring-1 ring-gray-300 text-gray-700 hover:bg-gray-50 no-underline"
+                  >
+                    Open settings
+                  </Link>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+        <div className="text-xs text-gray-400 mt-2">
+          Need another workspace? Use the dropdown in the top-right to
+          create one.
+        </div>
+      </section>
 
       {/* --- Billing --- */}
       <section className="mb-12">
