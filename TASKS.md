@@ -7,9 +7,9 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 22 complete 2026-05-24. NOW pointer is open. Promote the next phase (or come back to a parked item: #64 backend cold-start, worker GitHub-link follow-up) before starting new work.**
+> **Phase 23 — 23.1 schema (workspace_members + sessions.active_workspace_id + alembic 0040 + per-existing-user backfill). Phase 23 spec locked 2026-05-24. Theme: multiple workspaces per account. Promoted from the parking lot today; surfaced by trying to test Lightsei against JYNI (a real second project) and hitting the one-workspace-per-account wall.**
 
-Phase 22 (scheduled bots + webhook triggers) complete: 10 sub-tasks shipped + 22.10 demo artifacts under `examples/p22-demo/`. Bots can fire on a cron schedule or via a token-authed POST. `@lightsei.on_trigger` + `lightsei.trigger` (kind / scheduled_at / webhook_payload / name) round out the SDK; the dashboard's per-agent Triggers panel + `/runs?trigger_id=` filter + run-card badge round out the operator surface. Trust-zone + capability gates unchanged: a triggered run flows through the same dispatch path as a Slack mention or widget chat.
+Phase 22 (scheduled bots + webhook triggers) complete 2026-05-24: 10 sub-tasks shipped + 22.10 demo artifacts under `examples/p22-demo/`. Bots can fire on a cron schedule or via a token-authed POST. `@lightsei.on_trigger` + `lightsei.trigger` (kind / scheduled_at / webhook_payload / name) round out the SDK; the dashboard's per-agent Triggers panel + `/runs?trigger_id=` filter + run-card badge round out the operator surface. Trust-zone + capability gates unchanged: a triggered run flows through the same dispatch path as a Slack mention or widget chat.
 
 Backend at **1187 passing** (+73 across Phase 22; started at 1114). SDK at **164 passing** (+14 from 22.5). Dashboard's `/agents/[name]` grows the Triggers panel; `/runs` grows the trigger badge + filter. No new dashboard routes (this phase deepens existing surfaces rather than adding new ones).
 
@@ -1062,6 +1062,129 @@ Items deferred from 22 v1 that the design contemplated but didn't ship:
 - Friendly-cron in the inverse direction (operator pastes raw cron, dashboard renders "every other Tuesday at 3pm").
 - Webhook signing (HMAC body verification beyond the URL-token model).
 
+## Phase 23: Multiple workspaces per account
+
+Promoted from the parking lot 2026-05-24 after surfacing the gap by trying to test Lightsei on JYNI (a real second project) and not having a clean way to isolate it from the primary workspace. Today the data model is one user = one workspace; signing up for a fresh test workspace requires a new email + a new Stripe customer + re-pasting every secret. That's a friction tax on every new project, and it'll get worse as we onboard real customers who all juggle multiple projects.
+
+This phase keeps the one-workspace-per-account constraint relaxed only as far as Bailey actually needs today: one user can own multiple workspaces and switch between them. Multi-user-per-workspace (invites, roles, transfer-ownership) stays parked as Phase 23B — the per-customer surface still feels far enough away that the membership model would be over-designed for what we actually need.
+
+Rough shape (the three bullets that became the Phase 23 spec below):
+
+1. **Membership join + active pointer.** A `workspace_members` table replaces the implicit "user.workspace_id" association. `sessions.active_workspace_id` is the per-session active pointer; the dashboard's existing `get_workspace_id` dependency reads from it instead of from the calling user's only-workspace.
+2. **Create / switch / rename / delete from the header dropdown.** The dropdown shell already shipped on 2026-05-01 with placeholder entries for "switch workspace" + "+ new workspace". Wire them to real endpoints. "Switch" posts to the backend + reloads the page; "+ new workspace" opens a modal, asks for a name, creates + flips active in one go.
+3. **Each workspace is independently billed.** Stripe customer per workspace, not per user. Matches today's storage model (cost rollups, plan tier, secrets, agents) without any data migration headache. Account-level / enterprise billing parked to a later phase if a real customer asks.
+
+Demo (already what Bailey wants to do): from the header dropdown click "+ New workspace", name it "JYNI", click Create. Page reloads in the new workspace with empty `/agents`, empty `/runs`. Open `/account` → add `ANTHROPIC_API_KEY` as a secret. Drag JYNI's README onto `/agents/team-from-readme`. Plan a team. The runs that follow live in this workspace only. Flip back to the primary workspace via the dropdown — original bots are right where they were, JYNI bots are not visible. Delete the JYNI workspace later via its settings page if the test wraps without graduating to a real project.
+
+### Design choices locked 2026-05-24 (the answers that drove the sub-task breakdown below)
+
+- **One user can own many workspaces; one workspace stays one-user for v1.** The `workspace_members` table is shaped right for many-to-many (composite PK on `(user_id, workspace_id)` + a `role` column), but v1 only inserts one row per workspace at creation time (the creator gets `role='owner'`). Invite + accept flow + multi-member workspaces park to Phase 23B alongside roles.
+- **Per-session active workspace, not per-user.** `sessions.active_workspace_id` lets two browser tabs hold two different workspaces open at the same time without one stomping the other. The cost is that switch is per-session — opening a fresh tab starts in the user's primary (first-created) workspace. Acceptable.
+- **API keys stay workspace-scoped.** Today `api_keys.workspace_id` is set at key creation time; that doesn't change. A user with multiple workspaces has multiple key rosters, one per workspace. Bots authenticate to the workspace the key belongs to; there's no concept of an "active" workspace for API-key-auth requests.
+- **Stripe customer per workspace.** Subscription + plan tier + cost rollups all live on the workspace today. Keeping the customer there means zero data migration for billing. Multi-workspace-per-customer (enterprise) stays parked.
+- **Workspace deletion is hard delete with cascade.** Today there's no delete-workspace endpoint at all (you sign up = you have it forever). Real cleanup is what made this phase necessary; hard delete + confirm dialog + cascade FKs is the right v1. Soft delete + restore parks.
+- **Existing data migration: every user gets exactly one `workspace_members` row.** The alembic backfill inserts `(user_id, workspace_id, role='owner')` for every existing user whose workspace they currently own. Sessions get `active_workspace_id` set to that workspace. After the migration, every existing user can immediately create a second workspace via the dropdown. No flag day for users.
+- **Workspace-scoped endpoints don't change their auth shape.** `get_workspace_id` already returns a workspace id; the change is purely in *how* it resolves (session.active_workspace_id instead of session.user → user.workspace). Endpoint code doesn't move.
+
+### 23.1 — Schema: workspace_members + sessions.active_workspace_id
+
+One new table + one new column:
+
+- `workspace_members`: composite PK `(user_id, workspace_id)`. Columns: `user_id` (fk → users, cascade), `workspace_id` (fk → workspaces, cascade), `role` (varchar(16), server_default `'owner'` — `_VALID_WORKSPACE_MEMBER_ROLES = {'owner', 'member'}`; only `'owner'` ever inserted in v1), `joined_at` (timestamptz, defaults now()). Indexes: composite PK covers the per-user lookup; the per-workspace lookup (membership list for a workspace) gets `ix_workspace_members_workspace` on `(workspace_id, joined_at)` for chronological roster sort once roster pages exist.
+- `sessions.active_workspace_id`: nullable foreign key to workspaces, SET NULL on workspace delete. Nullable so the migration doesn't fight an existing-row backfill; immediately populated in the same migration via `UPDATE sessions SET active_workspace_id = (SELECT workspace_id FROM users WHERE users.id = sessions.user_id)` for every existing row. Future logins always set this.
+
+Backfill at migration time: for every `users` row, insert `(users.id, users.workspace_id, 'owner', now())` into `workspace_members`. Idempotent guard via `INSERT ... ON CONFLICT DO NOTHING`.
+
+Alembic migration `0040_workspace_members.py`. SQLAlchemy `WorkspaceMember` model + validation helper `is_valid_workspace_member_role` in `backend/models.py`. Schema tests under `backend/tests/test_workspace_members_schema.py`: roundtrip, FK cascade on user delete + on workspace delete, composite PK rejects duplicate insert, backfill applied every existing user.
+
+### 23.2 — Backend: workspace resolution from session.active_workspace_id
+
+Update `get_workspace_id` (and `get_workspace_id_for_session_only`, if separate) to read `session.active_workspace_id` on the session-auth path. The api-key-auth path (`api_key.workspace_id`) is unchanged.
+
+Add a defensive check: when reading the session's active workspace, verify the user is still a member of it (lookup `workspace_members` row) — if they were removed (future invite-flow concern) or the workspace was deleted, surface a clean 401 + force a re-pick on the next page load. The dashboard middleware reads `/me/workspaces/active` and redirects to the workspace picker when the response is 401.
+
+Tests: session-auth requests respect the session's active workspace; api-key-auth requests still pin to the key's workspace; a session whose active workspace was deleted returns 401 (not 500); a user removed from a workspace mid-session gets 401 on the next request.
+
+### 23.3 — Backend: workspace CRUD endpoints
+
+Five new endpoints:
+
+- `GET /me/workspaces` — list workspaces the calling user is a member of. Shape: `[{id, name, role, joined_at, is_active}]` where `is_active` is true for the session's currently-active workspace. Ordered by `joined_at` (oldest first; the user's original workspace is on top).
+- `POST /me/workspaces` — body `{name}`. Creates a fresh workspace, inserts the calling user as `owner` in `workspace_members`, sets the session's `active_workspace_id` to the new id in one transaction. Returns the new workspace row + `{is_active: true}`.
+- `POST /me/workspaces/{id}/switch` — sets the session's `active_workspace_id` to `id` if the user is a member, else 404 (don't leak existence). Returns the now-active workspace.
+- `PATCH /me/workspaces/{id}` — body `{name}`. Owner-only. Renames the workspace; updates `updated_at`. Validates name length (1-64 chars, not blank). Returns the updated row.
+- `DELETE /me/workspaces/{id}` — owner-only hard delete. Cascades via existing FKs on agents, runs, events, etc. (every workspace-scoped table already has `ON DELETE CASCADE` on workspace_id). Returns `{deleted: true}`. Refuses if it's the user's ONLY workspace (would leave them orphaned with no active workspace + no fallback). Validates by counting `workspace_members` rows for the user.
+
+Tests: list returns only the user's workspaces; create makes the new one active + adds the member row; switch refuses non-membership with 404; rename owner-only (member returns 403); delete owner-only + refuses last-workspace; deleted workspace cascades agents + runs.
+
+### 23.4 — Dashboard: header workspace dropdown
+
+The dropdown shell already exists on the header from the 2026-05-01 nav redesign (per the parking-lot entry). Today its "switch workspace" + "+ new workspace" entries are placeholders. Wire them:
+
+- Render workspace list from `GET /me/workspaces`. Active workspace gets a checkmark; others are clickable.
+- "Switch workspace" item shows the list with a click handler that calls `POST /me/workspaces/{id}/switch` + `router.refresh()` (Next.js App Router) to re-fetch every component bound to the workspace.
+- "+ New workspace" item opens a modal (same ModalShell helper from 22.7's TriggersPanel — duplicate it into a top-level `Modal.tsx` component this phase if it makes things cleaner).
+
+Spinner state during switch so the user doesn't double-click. Error toast on failure (e.g. the workspace was just deleted by another tab).
+
+### 23.5 — Dashboard: workspace settings page
+
+New route `dashboard/app/workspace-settings/page.tsx` (linked from the header dropdown's "Workspace settings" entry). Renders:
+
+- Workspace name (editable inline; owners only — members see read-only).
+- Workspace ID (read-only, copyable, useful for support).
+- Member list (today just the owner; the placeholder for Phase 23B's invite flow).
+- Danger zone: "Delete workspace" button (owner-only). Opens a confirmation modal that requires typing the workspace name to enable the delete button. On confirm, calls DELETE, redirects to `/me/workspaces` picker page (or to the user's first remaining workspace if any).
+
+`/account` page (already exists) gets a "Workspaces" section above the existing API-keys / sessions blocks: lists the user's workspaces + an "Open settings" link per workspace.
+
+### 23.6 — Dashboard: first-time workspace picker page
+
+For users who somehow end up with no active workspace (deleted theirs while another tab was open, etc.), or for the first signup flow after this lands (since the auto-created workspace is no longer the only option), add a minimal `/me/workspaces/pick` page. Renders:
+
+- "Pick a workspace to continue" header.
+- List of workspaces the user is a member of, each as a clickable card.
+- "+ Create new workspace" link at the bottom.
+
+The session middleware (or the layout's auth check) redirects here when the active workspace is unset OR the backend returns 401 on the membership-still-valid check.
+
+For brand-new signups, the existing "create your first workspace" flow stays — user signs up, gets a workspace auto-created, lands in dashboard. The pick page is the fallback when active state goes stale.
+
+### 23.7 — Stripe customer-per-workspace check
+
+Today every workspace has its own subscription if it's on a paid plan. Confirm that the create-workspace path doesn't accidentally create a customer-per-user. New workspaces start on `free` tier with no Stripe customer; the customer is created lazily on the first checkout (existing flow from Phase 17.4). Test: creating a new workspace doesn't touch Stripe at all; upgrading the new workspace creates a fresh customer scoped to that workspace.
+
+If today's signup flow auto-creates a Stripe customer at signup time, change it to lazy creation. Multi-workspace operators would otherwise rack up an empty customer per new workspace.
+
+### 23.8 — Existing-data migration verification
+
+Mostly a check rather than code: run alembic 0040 against a staging DB clone (or the prod DB if Bailey is comfortable). Verify:
+
+- Every existing `users` row has exactly one `workspace_members` row with `role='owner'`.
+- Every existing `sessions` row has `active_workspace_id` set to the user's original workspace.
+- A user's session can still hit any workspace-scoped endpoint and get back the same data they could before the migration.
+
+This sub-task exists because the migration is the riskiest part of Phase 23: it touches every active session and every existing user.
+
+### 23.9 — Test sweep + tsc + next build + prod deploy verification
+
+Full backend pytest. SDK pytest (no changes; should be a no-op pass). Dashboard tsc + next build. Prod deploy + post-deploy smoke: confirm existing session still works (Bailey logs into his primary workspace, sees his agents/runs unchanged), then create JYNI workspace from the dropdown, switch, confirm empty state, switch back, confirm primary unchanged.
+
+### 23.10 — JYNI test as the demo
+
+The actual demo for this phase is doing the thing that surfaced it. Bailey creates a JYNI workspace from the dropdown, drops JYNI's README into `/agents/team-from-readme`, plans a team, observes the planner's output cleanly isolated. No demo artifacts under `examples/` since this phase deepens existing surfaces rather than adding new ones (same shape as Phase 22.9's "no new dashboard routes"). The runbook is just: "go to /account, click + New workspace, name it, switch, plan a team, observe clean isolation."
+
+### Phase 23B (parked)
+
+Items deferred from 23 v1 that the design contemplated but didn't ship:
+
+- Invite + accept flow (other users can join a workspace).
+- Role expansion beyond `owner` (admin / member / viewer with capability differences).
+- Transfer ownership.
+- Soft-delete + restore for accidentally-deleted workspaces.
+- Account-level billing (one Stripe customer covers multiple workspaces; enterprise plans).
+- Workspace cloning / templating (create a new workspace pre-populated with the agents from another one).
+
 Phases 1-4 shipped 2026-04-25 (spine, cost-cap guardrail, Anthropic + streaming, hosted-readiness). Phase 5 shipped 2026-04-26 (PaaS-for-agents). Phase 6 shipped 2026-04-27 (Polaris orchestrator). Phase 7 shipped 2026-04-28 (output validation, advisory). Phase 8 shipped 2026-04-28 (blocking validators). Phase 9 shipped 2026-04-30 (notifications). Phase 10 shipped 2026-05-01 (GitHub integration: push-to-deploy + Polaris reads docs from the repo). Phase 11 starts the dispatch story: Polaris commands a team of executor agents instead of just emitting plans you read. Phase 11B turns the home page into a real command center while we're at it. Phase 12 is multi-provider so the team can pick the right model per task.
 
 Phases 1-4 shipped 2026-04-25. Production-readiness items (DB backups, tests + CI, rate limits + body cap, bot instance identity, secrets store) shipped 2026-04-26. See Done Log.
@@ -1474,7 +1597,7 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 
 - **Wire `lightsei-worker` Railway service to GitHub auto-deploy** (surfaced 2026-05-17). The worker was created via `railway add --service lightsei-worker` (empty service) and code pushed via `railway up --path-as-root worker --service lightsei-worker --ci`. Tried to use `railway add --repo bewallace01/lightsei` at creation time — kept returning "Unauthorized" even though `railway whoami` showed Bailey authenticated. Likely needs the GitHub OAuth flow that only runs through Railway's dashboard. Action: Railway dashboard → lightsei-worker service → Settings → Source → Connect Repo (`bewallace01/lightsei`, branch `main`, root directory `worker`). Once wired, `git push origin main` rebuilds the worker the same way it rebuilds backend + dashboard. Until then, every worker code change needs `cd worker && railway up --path-as-root . --service lightsei-worker --ci` from a shell with Railway CLI auth. ~5-10 minutes of dashboard clicks; not urgent because the worker is stable and rarely changes, but you'll forget the upload step the first time you tweak runner.py without this.
 - **Streaming progress on long generator endpoints**. `/workspaces/me/teams/plan` + `/workspaces/me/agents/generate` both hold a connection open for the full Opus call (60-120s, doubled when validation retry fires). Promoted to a punch-list item in 12C.6 because it's blocking the demo; revisit here if the same shape shows up on the next long-running endpoint we add. The general fix is the same: emit SSE chunks or periodic keepalive bytes from any endpoint whose median latency exceeds 30s.
-- **Multiple workspaces per account** (promoted from a 2026-05-01 nav-redesign conversation). Today the data model is one workspace per user — session, API keys, and every workspace-scoped row assumes it. Real multi-workspace requires a `workspace_members` join table (user ↔ workspace + role), an "active workspace" pointer on the session, list/create/switch endpoints, and a UI to drive them via the new header dropdown. The dropdown shell shipped on 2026-05-01 already has a place for "switch workspace" + "+ new workspace" entries. Worth careful design on invites, billing-per-workspace, and what happens to API keys at switch time before starting.
+- **Multiple workspaces per account** — promoted to **Phase 23** on 2026-05-24 after the JYNI test surfaced the gap. Spec locked same day. See the Phase 23 section above.
 - **In-browser zipping for /agents/new**. The drop zone shipped on 2026-05-04 only accepts `.zip` today — a non-engineer still has to right-click → Compress before they can deploy. Add JSZip (or an equivalent) so the page accepts a directory selection and zips client-side before posting. ~half day. Less critical than the .zip path was, but rounds out the "non-terminal user" UX.
 - **"Deploy from GitHub repo path" form on /agents/new**. Companion to the drop-zone path that landed 2026-05-04. Backend endpoint reusing Phase 10.3's `github_api.fetch_directory_zip`; UI form takes `repo + branch + folder` and posts. Lets users pick from repos they already have without zipping locally. ~half day.
 - **Backend cold-start fix for webhook delivery.** Surfaced during the Phase 10.6 demo on 2026-05-01: github.com's first push-webhook delivery after a period of inactivity timed out at GitHub's 10-second deadline because the Railway backend container had gone to sleep and the cold boot took ~9.6s. Once warm the same endpoint responded in 0.3s, so the code path is fine — the issue is operational. Three viable fixes, pick whichever fits the plan being run: (a) Railway service → Settings → set min instances ≥ 1 (or the equivalent "no sleep" toggle) so the backend stays warm. (b) Add a heartbeat ping from a cheap cron source (cron-job.org, GitHub Actions, even Polaris itself once it's ticking on schedule) hitting `/health` every minute or two — keeps the container warm without paying for an idle instance. (c) Pre-warm by hand before any expected webhook firing, which is the workaround we used during the demo (curl `/health` once, redeliver from github.com's UI). Until one of these lands, prod webhook delivery is timing-fragile: any push after a quiet stretch can silently drop on the floor with no retry.
