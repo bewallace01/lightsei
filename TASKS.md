@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 25 — 25.7 tests + sweep + memory. Backend pytest full sweep. SDK pytest full sweep. Dashboard tsc + next build (no UI surface yet in 25; the `/c` placeholder is one route in Phase 26). Save a memory documenting the end-user-vs-operator split. After 25.7 the Phase 25 demo runs and the phase closes. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 26 — 26.1 vendor slug schema + claim endpoint. alembic 0043 adds `workspaces.vendor_slug` (varchar(32) nullable, unique). Validator: 3-32 chars, lowercase, `[a-z0-9-]`. `POST /workspaces/me/vendor-slug` body `{slug}` claims it for the active workspace (409 if taken, 422 on invalid). `GET /workspaces/me` returns it. Schema test + endpoint tests. Phase 25 closed 2026-05-25 (end-user identity stack landed, cross-vendor isolation pinned, demo green). Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,39 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 25 closed: end-user identity stack + cross-vendor isolation + demo green
+
+Phase 25 wraps. All 7 sub-tasks shipped same-day against a spec promoted same-day. End-user identity is now a load-bearing parallel stack to the operator identity layer, with cross-vendor isolation enforced at every surface that touches `widget_conversations`. The widget surface optionally identifies end users via bearer; the SDK accessor exposes id/email/display_name with PII-zone email redaction. Demo runs green end-to-end.
+
+**What shipped across Phase 25**:
+
+- **25.1**: alembic 0042 + four models (`EndUser`, `EndUserSession`, `EndUserVendorLink`, `EndUserSigninToken`) + `widget_conversations.end_user_id` column. 22 schema tests.
+- **25.2**: `POST /auth/end-user/magic-link/{request,consume}` + `send_end_user_magic_link()` Resend helper + extracted shared `_send()` for live/capture/REQUIRE_LIVE infra. 17 tests, vendor_invite_code carry-through (Phase 27.2 will wire actual linking).
+- **25.3**: `backend/end_user_auth.py` with `get_end_user` dep + cross-token-type guard (operator session bearer used on end-user path 401s with distinctive detail). 9 tests.
+- **25.4**: widget endpoints accept optional Authorization bearer. New `resolve_end_user_optional` helper. Identity gate: `conv.end_user_id == current_end_user_id`. 11 tests.
+- **25.5**: `sdk/lightsei/_end_user.py` ContextVar accessor + bridge plumbing in `_chat.py`. PII-zone redaction. 11 SDK tests + 2 backend orchestrator tests.
+- **25.6**: 13 cross-vendor isolation tests pinning widget endpoint + operator inbox + take-over + resolve + orchestrator payload + message-table boundaries. One scenario fixture: 2 real vendor signups, Alice linked to both.
+- **25.7**: `/c` placeholder route (Phase 26 builds the real UI), full backend + SDK sweeps, dashboard tsc + next build, memory saved, **15-step demo script** in `backend/scripts/phase_25_demo.py` exercises the full curl-equivalent flow with one in-process TestClient + Postgres.
+
+**Demo verification** (`python3 scripts/phase_25_demo.py`): vendor A signup, vega bot wired in PII zone, Alice requests magic link, email captured (FAKE_CAPTURE mode), token extracted, Alice consumes → EndUser row created + session minted, operator links Alice to JYNI (Phase 27.2 will do via invite codes), Alice posts widget message identified → `end_user_id` stamped, Alice polls own conv (200), anonymous poll of identified conv (404), operator sees conv in /inbox, vendor B set up + Alice linked, same bearer + JYNI public_id + Halo conv_id = 404, JYNI operator's /inbox excludes Alice's Halo conv. All 15 steps green.
+
+**Test counts**: backend 1271 → **1323** (+52 across Phase 25). SDK 164 → **175** (+11). 1322 of 1323 backend tests pass in the full sweep; 1 failed = the documented `feedback_jobs_runner_test_race` pattern (`test_post_message_enqueues_widget_chat_job` asserting `status='pending'` while the conftest jobs runner promotes to 'running'). Passes in isolation; unrelated to Phase 25.
+
+**Spec deviations (carried-through to phase close)**:
+
+- 25.2: `end_user_signin_tokens` uses `email` (not `end_user_id` FK) because magic-link doubles as signup. Carries `vendor_invite_code` through the round-trip; Phase 27.2 creates the link when the codes table lands. Today the consume response just echoes `vendor_invite_code` back + returns `linked_vendors: []`.
+- 25.7: the spec'd UI demo isn't runnable until 26.2 ships the consume page. Did the curl-equivalent in `scripts/phase_25_demo.py` instead. Real UI demo deferred to Phase 26 close-out.
+
+**Pre-existing flake observed**: `test_post_message_enqueues_widget_chat_job` race documented in memory `feedback_jobs_runner_test_race`. Not caused by Phase 25; flagged as a follow-up.
+
+**Phase 25B parked**:
+- Password auth for end users (alongside magic link).
+- Sign in with Apple / Google OAuth for end users.
+- Self-service end-user account deletion + GDPR export.
+- Per-vendor display-name override.
+
+**What this enables**: Phase 26 builds the real `/c` UI on top of the auth + identity that's now load-bearing. Phase 27 picks up the parked `vendor_invite_codes` table + creates `end_user_vendor_links` on redemption. Phase 28 wires VAPID push notifications using end-user identity. Phase 29 brings the native iOS app, sharing the magic-link consume endpoint via universal links.
 
 ### 2026-05-25 — Phase 25.6: cross-vendor isolation security suite
 
