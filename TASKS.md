@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 26 — 26.4 PWA manifest + service worker. dashboard/app/manifest.ts (Next.js manifest route) returns Lightsei branding (icon, theme color, full-screen display). Service worker (dashboard/public/sw.js) caches /c shell for offline open; passes everything else through. Apple touch icon set + iOS splash screens (apple-touch-icon-*.png matrix). Phase 25 closed; 26.1 (vendor_slug), 26.2 (functional /c MVP), 26.3 (cookie helpers refactor) shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 26 — 26.5 install prompt + onboarding. Lightweight "Add to Home Screen" tooltip on /c for iOS Safari users who haven't installed yet (detected via standalone media query). After install, the tooltip stops showing. Phase 25 closed; 26.1 (vendor_slug), 26.2 (functional /c MVP), 26.3 (helpers refactor), 26.4 (PWA manifest + service worker + /c chrome) shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,41 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 26.4: PWA manifest + service worker + /c chrome
+
+`/c` is now an installable PWA on iOS 16.4+ + modern Android. Manifest + service worker land. Operator Header is suppressed on consumer routes per Phase 26 spec ("no header nav, no constellation map, just chat").
+
+**What shipped**:
+
+- **Icons** (`dashboard/public/`): generated via PIL in indigo-600 brand with a white "L". Five PNGs: `icon-192.png`, `icon-512.png` (any-purpose, manifest), `icon-192-maskable.png`, `icon-512-maskable.png` (Android adaptive icon clipping), `apple-touch-icon.png` at 180x180 (iOS home-screen). Bytes range 509-2301; tiny.
+- **`dashboard/app/manifest.ts`**: Next.js manifest route (served at `/manifest.webmanifest`). Lightsei branding, `start_url: "/c"` (home-screen launch goes straight to consumer chat), `scope: "/c"` (PWA boundary stays on the consumer surface), `display: "standalone"` (no browser chrome on iOS install), `theme_color: #6366f1` (indigo), `orientation: "portrait"`, all four icons listed.
+- **`dashboard/public/sw.js`**: ES5 service worker. On install: precaches `/c`, `/manifest.webmanifest`, all three icon files (atomic addAll → no half-warm cache). On fetch: cache-first for the precache list + `/c/auth/magic-link` shell; network-only for everything else (API calls + JS chunks + operator routes never get cached). On activate: prunes old `lightsei-*` cache versions. `CACHE_NAME = "lightsei-c-shell-v1"` — bump on incremental changes to force re-install.
+- **`dashboard/app/c/ServiceWorkerRegister.tsx`**: client component that calls `navigator.serviceWorker.register("/sw.js", { scope: "/c" })` on mount. Idempotent, soft-fails on unsupported browsers (very old iOS Safari).
+- **`dashboard/app/c/layout.tsx`**: wraps all `/c/*` routes. Sets `metadata` (manifest link, apple-touch-icon, apple-mobile-web-app-capable + title + status-bar-style, icons), `viewport` (theme-color matching the manifest, initial-scale lock so composer focus doesn't auto-zoom on iOS), mounts the ServiceWorkerRegister.
+- **`dashboard/app/Header.tsx`**: added `/c` + `/c/*` early-return suppression next to the existing `/login`, `/signup`, `/widget/*` rules. The /c surface is consumer-facing; the operator dashboard header has no business rendering there.
+
+**Spec deviations** (deferred to Phase 26B):
+
+- **iOS splash screens**: spec mentions "the painful apple-touch-icon-*.png matrix at every iPhone resolution." Shipped just the 180x180 apple-touch-icon. The per-device splash screens (11+ specific resolutions covering iPhone Mini → Pro Max generations) are a separate ~30-min asset-generation task that can land as a follow-up without blocking the install path. iOS 16.4+ falls back to a generic launch screen without these; the install still works.
+
+**Design notes**:
+- Service worker uses cache-first only for the shell + icons. API calls + JS chunks stay network-only so live data + new builds load correctly. Phase 28 (push) will add background-sync if a "send while offline" surface becomes useful; today an offline send just fails.
+- The /c layout deliberately doesn't render any nav of its own (the Logo + back-buttons live in the individual page chrome). Per spec: "Layout chrome distinct from operator dashboard." The layout's only visible job is the metadata + the service-worker mount.
+- Header early-return rule grouped with the existing `/login`, `/signup`, `/widget/*` exclusions. Placed AFTER all `useEffect` hooks per React's rules-of-hooks (early-returning before a hook would cause a rendering inconsistency).
+- `scope: "/c"` in both the manifest and the service worker means the PWA boundary stays on the consumer surface even though it lives at app.lightsei.com. If a user navigates from /c to /agents while the app is "installed", iOS treats it as leaving the PWA and reopens Safari.
+
+**Verification**:
+
+- tsc + next build clean. `/manifest.webmanifest` registered as a static route (0 B, dynamic JSON via the Next.js manifest convention).
+- `next start` + curl:
+  - `GET /manifest.webmanifest` returns the right JSON (verified all fields).
+  - `GET /sw.js` returns 200.
+  - `GET /apple-touch-icon.png` returns 200.
+  - `GET /c` HTML head contains `manifest`, `apple-touch-icon`, `apple-mobile-web-app-capable`, `theme-color` link/meta tags.
+- Header suppression confirmed via grep on rendered HTML: `/c` has 0 occurrences of the operator Header signature ("Go to dashboard home"); `/` still has 1.
+
+**What this enables**: 26.5 adds the "Add to Home Screen" tooltip on iOS Safari (detects via the standalone media query). 26.6 runs the full sweep + a real-device PWA install on Bailey's iPhone. 28.x can register push subscriptions against the same service worker by extending its event listeners.
 
 ### 2026-05-25 — Phase 26.3: end-user session helpers refactor
 

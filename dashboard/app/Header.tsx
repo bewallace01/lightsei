@@ -332,6 +332,13 @@ export default function Header() {
     return null;
   }
 
+  // Phase 26.4: the /c consumer chat surface has its own chrome
+  // (no operator nav, no constellation map — per Phase 26 spec).
+  // Suppress the dashboard header here too.
+  if (pathname === "/c" || (pathname ?? "").startsWith("/c/")) {
+    return null;
+  }
+
   const onLogout = async () => {
     try {
       await apiLogout();
