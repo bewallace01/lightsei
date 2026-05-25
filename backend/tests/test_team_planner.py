@@ -421,6 +421,79 @@ def test_submit_team_schema_requires_capabilities():
     assert "capabilities" in member_required
 
 
+def test_validate_team_plan_accepts_realistic_jyni_shaped_plan():
+    """Phase 24.4: lock the contract that a full JYNI-flavored plan
+    round-trips clean through validate_team. Mirrors the 5-bot team
+    the planner actually emitted for JYNI on 2026-05-24 (graded A+
+    on quality in the Phase 23.10 test):
+
+    - polaris (orchestrator, internal): daily tick coordinator, fans
+      out to argus + vela via send_command.
+    - argus (specialist, pii): org-isolation auditor + secret scanner;
+      touches API routes that handle customer data. dispatches to
+      hermes via send_command.
+    - vela (specialist, internal): deploy + cron health verifier;
+      system metadata only.
+    - vega (specialist, sensitive): structural PR reviewer; sees
+      diffs that may include sensitive (non-PII) code paths.
+    - hermes (messenger, internal): outbound Slack notifier; strict
+      leaf, slack:respond only.
+
+    Also exercises the JYNI-specific freeform-constraint case: a
+    `connector:jyni_crm` capability on a bot whose constraint came
+    from the operator's freeform input, not the README.
+    """
+    plan = {
+        "rationale": (
+            "Five-bot team for the JYNI CRM x Scraper monorepo. "
+            "Polaris orchestrates daily; argus + vela + vega each "
+            "specialize; hermes posts findings to Slack."
+        ),
+        "team": [
+            _team_member(
+                "polaris", role="orchestrator",
+                sensitivity_hint="internal",
+                command_kinds=["polaris.tick"],
+                dispatches_to=["argus", "vela"],
+                capabilities=["send_command"],
+            ),
+            _team_member(
+                "argus", role="specialist",
+                sensitivity_hint="pii",
+                command_kinds=["argus.scan"],
+                dispatches_to=["hermes"],
+                # Operator-side connector:jyni_crm illustrates the
+                # freeform-constraint case from 24.1's prompt
+                # ("bot Z can only read the CRM"). Forward-compat —
+                # the connector adapter itself ships in 24B.
+                capabilities=["send_command", "connector:jyni_crm"],
+            ),
+            _team_member(
+                "vela", role="specialist",
+                sensitivity_hint="internal",
+                command_kinds=["vela.verify"],
+                dispatches_to=["hermes"],
+                capabilities=["send_command"],
+            ),
+            _team_member(
+                "vega", role="specialist",
+                sensitivity_hint="sensitive",
+                command_kinds=["vega.review"],
+                dispatches_to=["hermes"],
+                capabilities=["send_command"],
+            ),
+            _team_member(
+                "hermes", role="messenger",
+                sensitivity_hint="internal",
+                command_kinds=["hermes.post"],
+                dispatches_to=[],
+                capabilities=["slack:respond"],
+            ),
+        ],
+    }
+    assert validate_team_plan(plan, reserved_names=set()) == []
+
+
 # ---------- Endpoint tests with stubbed Anthropic ---------- #
 
 
