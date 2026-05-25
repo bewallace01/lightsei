@@ -122,6 +122,13 @@ class Workspace(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
+    # Phase 23.3: bumped on rename (PATCH /me/workspaces/{id}).
+    # Nullable with server_default now() so the migration backfills
+    # existing rows non-disruptively.
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        server_default=text("now()"),
+    )
     # Phase 11B.1: workspace-level monthly spend cap. NULL = no cap.
     # When set and reached, runs in this workspace get denied with the same
     # UX path as Phase 2's per-agent daily cap.

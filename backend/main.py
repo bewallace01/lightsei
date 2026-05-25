@@ -1721,6 +1721,274 @@ def get_me(
     return _serialize_workspace(ws)
 
 
+# ---------- Phase 23.3: multi-workspace CRUD ---------- #
+
+
+class MyWorkspaceCreateIn(BaseModel):
+    """Body for POST /me/workspaces. Distinct from the
+    signup-time `WorkspaceCreateIn` (which carries an api_key_name)
+    + from the legacy PATCH `WorkspacePatchIn` (which carries
+    budget + auto-apply flags). Same module so the duplicate
+    bites loudly: Python would otherwise let a second class with
+    the same name silently shadow the first."""
+
+    name: str
+
+
+class MyWorkspacePatchIn(BaseModel):
+    """Body for PATCH /me/workspaces/{id}. All fields optional;
+    only fields provided are applied. See MyWorkspaceCreateIn for
+    why this name is distinct from the legacy `WorkspacePatchIn`."""
+
+    name: Optional[str] = None
+
+
+def _require_session_user(auth):
+    """Reject api-key auth from the workspace-CRUD surface. These
+    endpoints mutate the calling session's active workspace and
+    only make sense for the dashboard session user."""
+    if auth.user is None or auth.session is None:
+        raise HTTPException(
+            status_code=401,
+            detail="session required (api-key auth not accepted here)",
+        )
+
+
+def _check_owner(session: Session, user_id: str, workspace_id: str) -> WorkspaceMember:
+    """Look up the membership row + verify role='owner'. 404 if no
+    membership (don't leak existence to non-members), 403 if member
+    but not owner."""
+    row = session.get(WorkspaceMember, (user_id, workspace_id))
+    if row is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    if row.role != "owner":
+        raise HTTPException(
+            status_code=403, detail="only the workspace owner can do this",
+        )
+    return row
+
+
+def _validate_workspace_name(name: str) -> str:
+    """Normalize + length-check. 1-64 chars after strip; non-empty."""
+    trimmed = (name or "").strip()
+    if not trimmed:
+        raise HTTPException(
+            status_code=422, detail="workspace name is required",
+        )
+    if len(trimmed) > 64:
+        raise HTTPException(
+            status_code=422,
+            detail="workspace name must be 64 characters or fewer",
+        )
+    return trimmed
+
+
+def _serialize_membership(m: WorkspaceMember, ws: Workspace, is_active: bool) -> dict[str, Any]:
+    """Per-membership row in the GET /me/workspaces list. Combines
+    the workspace + the user's role + whether the calling session is
+    currently active in this workspace."""
+    return {
+        "id": ws.id,
+        "name": ws.name,
+        "role": m.role,
+        "joined_at": m.joined_at.isoformat(),
+        "is_active": is_active,
+        "plan_tier": ws.plan_tier,
+        "created_at": ws.created_at.isoformat(),
+    }
+
+
+@app.get("/me/workspaces")
+def list_my_workspaces(
+    auth=Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 23.3: list workspaces the calling user is a member of.
+
+    Ordered by joined_at ascending so the user's primary (original)
+    workspace stays at the top of the dropdown. Each row carries
+    `is_active=true` for the workspace the calling session is
+    currently pointed at — lets the dashboard render the checkmark
+    without a follow-up fetch.
+    """
+    _require_session_user(auth)
+    rows = session.execute(
+        select(WorkspaceMember, Workspace)
+        .join(Workspace, WorkspaceMember.workspace_id == Workspace.id)
+        .where(WorkspaceMember.user_id == auth.user.id)
+        .order_by(WorkspaceMember.joined_at)
+    ).all()
+    active = auth.session.active_workspace_id
+    return {
+        "workspaces": [
+            _serialize_membership(m, w, is_active=(w.id == active))
+            for m, w in rows
+        ],
+    }
+
+
+@app.post("/me/workspaces")
+def create_my_workspace(
+    body: MyWorkspaceCreateIn,
+    auth=Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 23.3: create a workspace + auto-switch to it.
+
+    Inserts the calling user as `owner` in workspace_members + flips
+    the session's active_workspace_id in one transaction. Next
+    page load lands in the new workspace.
+
+    No Stripe customer is created here; that happens lazily on first
+    Checkout (existing flow from Phase 17.4). New workspaces start
+    on `free` tier with $5 of credits.
+    """
+    _require_session_user(auth)
+    name = _validate_workspace_name(body.name)
+    now = utcnow()
+
+    ws = Workspace(
+        id=str(uuid.uuid4()),
+        name=name,
+        created_at=now,
+        plan_tier="free",
+        free_credits_remaining_usd=Decimal("5.00"),
+    )
+    session.add(ws)
+    session.flush()
+    seed_default_validators(session, ws.id, now)
+
+    session.add(WorkspaceMember(
+        user_id=auth.user.id, workspace_id=ws.id, role="owner",
+    ))
+    # Flip the session's active pointer so the next request lands
+    # in the new workspace. Caller's session row is the one auth
+    # resolved against; mutate it directly.
+    auth.session.active_workspace_id = ws.id
+    session.flush()
+
+    # Re-fetch the membership row so its server_defaulted joined_at
+    # is populated for the response.
+    member = session.get(WorkspaceMember, (auth.user.id, ws.id))
+    return _serialize_membership(member, ws, is_active=True)
+
+
+@app.post("/me/workspaces/{workspace_id}/switch")
+def switch_my_workspace(
+    workspace_id: str,
+    auth=Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 23.3: set the calling session's active_workspace_id.
+
+    404 on non-membership (don't leak existence). On success,
+    returns the now-active workspace; the dashboard router.refresh()
+    pulls fresh data for it.
+    """
+    _require_session_user(auth)
+    member = session.get(WorkspaceMember, (auth.user.id, workspace_id))
+    if member is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    ws = session.get(Workspace, workspace_id)
+    if ws is None:
+        # Inconsistent state (member row but no workspace); treat as 404.
+        raise HTTPException(status_code=404, detail="workspace not found")
+
+    auth.session.active_workspace_id = workspace_id
+    session.flush()
+    return _serialize_membership(member, ws, is_active=True)
+
+
+@app.patch("/me/workspaces/{workspace_id}")
+def patch_my_workspace(
+    workspace_id: str,
+    body: MyWorkspacePatchIn,
+    auth=Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 23.3: rename a workspace. Owner-only.
+
+    Members (Phase 23B) can read the workspace name via the list
+    endpoint but can't change it. Today only owners exist in
+    workspace_members rows; the gate ships now so 23B doesn't
+    re-litigate.
+    """
+    _require_session_user(auth)
+    member = _check_owner(session, auth.user.id, workspace_id)
+    ws = session.get(Workspace, workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+
+    changed = False
+    if body.name is not None:
+        new_name = _validate_workspace_name(body.name)
+        if new_name != ws.name:
+            ws.name = new_name
+            changed = True
+    if changed:
+        ws.updated_at = utcnow()
+        session.flush()
+
+    is_active = auth.session.active_workspace_id == workspace_id
+    return _serialize_membership(member, ws, is_active=is_active)
+
+
+@app.delete("/me/workspaces/{workspace_id}")
+def delete_my_workspace(
+    workspace_id: str,
+    auth=Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 23.3: hard-delete a workspace. Owner-only.
+
+    Refuses if it's the user's only workspace (would leave them
+    orphaned with no active pointer + no fallback). If the deleted
+    workspace was the session's active one, auto-switch to whichever
+    other workspace the user joined earliest — saves the operator
+    from a bounce through the picker page (23.6) for the common
+    "delete a side project" flow.
+
+    Cascade via existing FKs handles every workspace-scoped table
+    (agents, runs, events, triggers, etc.).
+    """
+    _require_session_user(auth)
+    _check_owner(session, auth.user.id, workspace_id)
+    ws = session.get(Workspace, workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+
+    # Refuse-last check: count member rows for this user.
+    other_memberships = session.execute(
+        select(WorkspaceMember)
+        .where(WorkspaceMember.user_id == auth.user.id)
+        .where(WorkspaceMember.workspace_id != workspace_id)
+        .order_by(WorkspaceMember.joined_at)
+    ).scalars().all()
+    if not other_memberships:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "can't delete your last workspace; create another one "
+                "first or contact support to delete the account"
+            ),
+        )
+
+    # Auto-switch if the deleted workspace is the active one. Pick
+    # the user's oldest other membership as the new active workspace.
+    switched_to: Optional[str] = None
+    if auth.session.active_workspace_id == workspace_id:
+        auth.session.active_workspace_id = other_memberships[0].workspace_id
+        switched_to = other_memberships[0].workspace_id
+
+    session.delete(ws)  # cascades agents / runs / events / etc.
+    session.flush()
+    return {
+        "deleted": True,
+        "workspace_id": workspace_id,
+        "switched_to": switched_to,
+    }
+
+
 @app.get("/workspaces/me/cost")
 def get_workspace_cost(
     session: Session = Depends(get_session),
