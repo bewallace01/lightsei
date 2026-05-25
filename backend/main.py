@@ -19,6 +19,7 @@ import limits
 import policies
 import secrets_crypto
 from auth import AuthResult, get_authenticated, get_workspace_id
+from end_user_auth import EndUserAuthResult, get_end_user
 from cost import (
     add_run_cost_from_event,
     agent_cost_since,
@@ -4892,6 +4893,147 @@ def consume_end_user_magic_link(
         # list keeps the response shape stable for the dashboard
         # to consume now.
         "linked_vendors": [],
+    }
+
+
+# ---------- Phase 26.2: end-user vendor + conversation endpoints ---------- #
+
+
+# Conversation-list cap. Larger than Phase 21.8's operator-side cap
+# because end users typically have FEWER active threads with a vendor
+# (one consumer-side conversation tends to span weeks/months) so even
+# the heaviest user is unlikely to exceed 50. Pagination parks to
+# Phase 26B if usage proves otherwise.
+END_USER_CONVERSATION_LIST_LIMIT = 50
+
+
+def _serialize_vendor_for_end_user(w: Workspace) -> dict[str, Any]:
+    """Trimmed vendor projection for the consumer surface. Returns
+    only fields the end user has any business seeing — no internal
+    workspace settings, no billing surface, no plan tier."""
+    return {
+        "id": w.id,
+        "name": w.name,
+        "vendor_slug": w.vendor_slug,
+        # widget_public_id is the handle the existing POST /widget/...
+        # endpoints already accept, so the dashboard can call those
+        # directly without an extra slug-to-public-id lookup hop on
+        # every send/poll.
+        "widget_public_id": w.widget_public_id,
+        # customer_facing_agent_name tells the dashboard which bot
+        # the conversations are with (rendered as "Chat with vega"
+        # in the per-vendor header).
+        "customer_facing_agent_name": w.customer_facing_agent_name,
+    }
+
+
+@app.get("/me/end-user")
+def me_end_user(
+    auth: EndUserAuthResult = Depends(get_end_user),
+) -> dict[str, Any]:
+    """Phase 26.2: who-am-I for the consumer surface.
+
+    Returns the signed-in EndUser + the vendors they're actively
+    subscribed to (`end_user_vendor_links.removed_at IS NULL`).
+    `/c` calls this on load to render the vendor cards; `/c/{slug}`
+    calls it on load to identify the user + verify they're linked
+    to the slug they're trying to chat with.
+    """
+    return {
+        "end_user": _serialize_end_user(auth.end_user),
+        "linked_vendors": [
+            _serialize_vendor_for_end_user(w)
+            for w in auth.linked_workspaces
+        ],
+    }
+
+
+@app.get("/me/end-user/vendors/{slug}")
+def me_end_user_vendor(
+    slug: str,
+    auth: EndUserAuthResult = Depends(get_end_user),
+) -> dict[str, Any]:
+    """Phase 26.2: resolve a vendor by its `vendor_slug` for the
+    consumer chat surface.
+
+    404 if no vendor has this slug OR the end user isn't linked to
+    it. Same 404 shape for both so the response doesn't leak which
+    slugs exist on Lightsei to a curious authenticated user.
+    """
+    for w in auth.linked_workspaces:
+        if w.vendor_slug == slug:
+            return _serialize_vendor_for_end_user(w)
+    raise HTTPException(
+        status_code=404,
+        detail={
+            "error": "vendor_not_found",
+            "message": (
+                f"no vendor with slug {slug!r} is linked to your account"
+            ),
+        },
+    )
+
+
+@app.get("/me/end-user/vendors/{slug}/conversations")
+def me_end_user_vendor_conversations(
+    slug: str,
+    auth: EndUserAuthResult = Depends(get_end_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 26.2: list the end user's widget conversations with one
+    vendor.
+
+    Same 404 contract as the vendor-resolve endpoint: not linked OR
+    no such slug → 404 (no probing). Conversations are filtered by
+    `widget_conversations.end_user_id == auth.end_user.id` AND
+    `workspace_id == vendor.id` so a leaked conversation id from
+    another vendor can't be polled here.
+
+    Sorted by `last_message_at desc`, capped at
+    `END_USER_CONVERSATION_LIST_LIMIT`. Pagination + per-conversation
+    last-message preview park to Phase 26B if needed.
+    """
+    vendor: Optional[Workspace] = None
+    for w in auth.linked_workspaces:
+        if w.vendor_slug == slug:
+            vendor = w
+            break
+    if vendor is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "vendor_not_found",
+                "message": (
+                    f"no vendor with slug {slug!r} is linked to your account"
+                ),
+            },
+        )
+
+    rows = session.execute(
+        select(WidgetConversation)
+        .where(
+            WidgetConversation.workspace_id == vendor.id,
+            WidgetConversation.end_user_id == auth.end_user.id,
+        )
+        .order_by(WidgetConversation.last_message_at.desc())
+        .limit(END_USER_CONVERSATION_LIST_LIMIT)
+    ).scalars().all()
+
+    return {
+        "vendor": _serialize_vendor_for_end_user(vendor),
+        "conversations": [
+            {
+                "id": c.id,
+                "status": c.status,
+                "customer_facing_agent_name": c.customer_facing_agent_name,
+                "started_at": c.started_at.isoformat(),
+                "last_message_at": c.last_message_at.isoformat(),
+                "resolved_at": (
+                    c.resolved_at.isoformat() if c.resolved_at else None
+                ),
+            }
+            for c in rows
+        ],
     }
 
 

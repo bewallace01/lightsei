@@ -2417,3 +2417,246 @@ export async function deleteMyWorkspace(
     { method: "DELETE" },
   )) as { deleted: boolean; workspace_id: string; switched_to: string | null };
 }
+
+// ----- Phase 25.2 + 26.2: end-user consumer surface -----
+
+export type EndUser = {
+  id: string;
+  email: string;
+  display_name: string | null;
+  email_verified: boolean;
+  auth_provider: string;
+  created_at: string;
+};
+
+export type EndUserVendor = {
+  id: string;
+  name: string;
+  vendor_slug: string | null;
+  widget_public_id: string | null;
+  customer_facing_agent_name: string | null;
+};
+
+export type EndUserMeResponse = {
+  end_user: EndUser;
+  linked_vendors: EndUserVendor[];
+};
+
+export type EndUserVendorConversation = {
+  id: string;
+  status: string;
+  customer_facing_agent_name: string | null;
+  started_at: string;
+  last_message_at: string;
+  resolved_at: string | null;
+};
+
+export type WidgetMessage = {
+  id: number;
+  role: "user" | "bot" | "operator" | "system";
+  text: string;
+  sent_at: string;
+};
+
+export type WidgetThread = {
+  conversation_id: string;
+  status: string;
+  messages: WidgetMessage[];
+};
+
+export type EndUserAuthSuccess = {
+  end_user: EndUser;
+  session_token: string;
+  session_expires_at: string;
+  is_new_end_user: boolean;
+  vendor_invite_code: string | null;
+  linked_vendors: EndUserVendor[];
+};
+
+// Distinct from the operator UnauthorizedError so a /c page can
+// react differently (e.g., kick to /c/auth/magic-link instead of
+// /login). The handleAuthError helper still routes to /login by
+// default; consumer-surface pages handle this class themselves.
+export class EndUserUnauthorizedError extends Error {
+  constructor(message = "end-user unauthorized") {
+    super(message);
+    this.name = "EndUserUnauthorizedError";
+  }
+}
+
+// Phase 26.2: shared fetch helper that attaches the end-user bearer
+// from localStorage (via endUserSession.ts). Phase 26.3 will swap
+// the token source to a cookie without changing this signature.
+async function endUserAuthedJson(
+  path: string,
+  init?: RequestInit,
+): Promise<unknown> {
+  // Lazy import to avoid pulling endUserSession into operator pages
+  // that don't need it.
+  const { getEndUserToken, clearEndUserToken } = await import(
+    "./endUserSession"
+  );
+  const token = getEndUserToken();
+  const headers = new Headers(init?.headers);
+  if (token) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+  const r = await fetch(`${API_URL}${path}`, {
+    ...(init ?? {}),
+    headers,
+    cache: "no-store",
+  });
+  if (r.status === 401) {
+    // Stale / missing token. Clear so the next page load doesn't
+    // re-attempt with the same dead bearer.
+    clearEndUserToken();
+    throw new EndUserUnauthorizedError();
+  }
+  if (!r.ok) {
+    const body = (await r.json().catch(() => ({}))) as {
+      detail?: unknown;
+    };
+    const detail = body.detail;
+    if (detail && typeof detail === "object" && "message" in detail) {
+      throw new Error(String((detail as { message: string }).message));
+    }
+    throw new Error(
+      typeof detail === "string" ? detail : `request failed (${r.status})`,
+    );
+  }
+  return await r.json();
+}
+
+export async function requestEndUserMagicLink(
+  email: string,
+  opts?: { vendor_invite_code?: string },
+): Promise<void> {
+  const r = await fetch(`${API_URL}/auth/end-user/magic-link/request`, {
+    method: "POST",
+    cache: "no-store",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      email,
+      ...(opts?.vendor_invite_code
+        ? { vendor_invite_code: opts.vendor_invite_code }
+        : {}),
+    }),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(body.detail || `magic-link request failed (${r.status})`);
+  }
+}
+
+export async function consumeEndUserMagicLink(
+  token: string,
+  opts?: { vendor_invite_code?: string },
+): Promise<EndUserAuthSuccess> {
+  const r = await fetch(`${API_URL}/auth/end-user/magic-link/consume`, {
+    method: "POST",
+    cache: "no-store",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      token,
+      ...(opts?.vendor_invite_code
+        ? { vendor_invite_code: opts.vendor_invite_code }
+        : {}),
+    }),
+  });
+  if (!r.ok) {
+    const body = await r.json().catch(() => ({}));
+    throw new Error(
+      typeof body.detail === "string"
+        ? body.detail
+        : `magic-link consume failed (${r.status})`,
+    );
+  }
+  return (await r.json()) as EndUserAuthSuccess;
+}
+
+export async function fetchEndUserMe(): Promise<EndUserMeResponse> {
+  return (await endUserAuthedJson("/me/end-user")) as EndUserMeResponse;
+}
+
+export async function fetchEndUserVendor(slug: string): Promise<EndUserVendor> {
+  return (await endUserAuthedJson(
+    `/me/end-user/vendors/${encodeURIComponent(slug)}`,
+  )) as EndUserVendor;
+}
+
+export async function fetchEndUserVendorConversations(
+  slug: string,
+): Promise<{ vendor: EndUserVendor; conversations: EndUserVendorConversation[] }> {
+  return (await endUserAuthedJson(
+    `/me/end-user/vendors/${encodeURIComponent(slug)}/conversations`,
+  )) as { vendor: EndUserVendor; conversations: EndUserVendorConversation[] };
+}
+
+// Widget endpoints. Posting/polling re-uses the Phase 25.4 widget
+// endpoints (keyed off widget_public_id) so the consumer surface
+// shares the orchestrator with the iframe widget. The end-user
+// bearer is attached so widget_conversations.end_user_id gets
+// stamped per Phase 25.4.
+export async function postWidgetMessageAsEndUser(
+  publicId: string,
+  body: { text: string; conversation_id?: string },
+): Promise<{ conversation_id: string; message_id: number; job_id: string | null }> {
+  const { getEndUserToken } = await import("./endUserSession");
+  const token = getEndUserToken();
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    // The widget POST endpoint requires Origin to be allowlisted.
+    // The /c surface runs on app.lightsei.com which the operator
+    // must add to the vendor's allowed_widget_origins. (Defaults
+    // are documented for prod; local dev needs the operator to
+    // add localhost manually.)
+  };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const r = await fetch(
+    `${API_URL}/widget/${encodeURIComponent(publicId)}/messages`,
+    {
+      method: "POST",
+      cache: "no-store",
+      credentials: "omit",
+      headers,
+      body: JSON.stringify(body),
+    },
+  );
+  if (!r.ok) {
+    const detail = (await r.json().catch(() => ({}))) as { detail?: unknown };
+    throw new Error(
+      typeof detail.detail === "string"
+        ? detail.detail
+        : `send failed (${r.status})`,
+    );
+  }
+  return (await r.json()) as {
+    conversation_id: string;
+    message_id: number;
+    job_id: string | null;
+  };
+}
+
+export async function fetchWidgetThreadAsEndUser(
+  publicId: string,
+  conversationId: string,
+  since?: number,
+): Promise<WidgetThread> {
+  const { getEndUserToken } = await import("./endUserSession");
+  const token = getEndUserToken();
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const url = new URL(
+    `${API_URL}/widget/${encodeURIComponent(publicId)}/conversations/${encodeURIComponent(conversationId)}`,
+  );
+  if (since !== undefined) url.searchParams.set("since", String(since));
+  const r = await fetch(url.toString(), {
+    cache: "no-store",
+    credentials: "omit",
+    headers,
+  });
+  if (!r.ok) {
+    throw new Error(`thread fetch failed (${r.status})`);
+  }
+  return (await r.json()) as WidgetThread;
+}

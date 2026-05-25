@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 26 — 26.2 `/c` standalone routes (end-user-authed). Three new dashboard routes: `/c` (vendor list, one card per linked vendor with "Open chat" button), `/c/{slug}` (vendor chat: conversation list + thread view side-by-side on desktop, drill-in on mobile), `/c/auth/magic-link` (end-user magic-link consume page mirroring the operator one). Use end-user auth (Phase 25.3), not operator auth. Distinct cookie chrome from operator dashboard. Phase 25 closed 2026-05-25; 26.1 shipped vendor_slug schema + claim. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 26 — 26.3 end-user session cookie + dashboard infrastructure. Add `lightsei.end_user_session` cookie handling parallel to operator session. New helpers in dashboard/app/api.ts: getEndUserSessionToken, setEndUserSession, clearEndUserSession (replacing 26.2's localStorage-backed endUserSession.ts). New endUserAuthedJson helper (already in 26.2 in lazy-import form; promote to top-level). Auth fallback chain: end-user token if on /c routes, operator token otherwise. Phase 25 closed 2026-05-25; 26.1 + 26.2 shipped (vendor_slug schema + claim, /me/end-user endpoints, /c + /c/{slug} + /c/auth/magic-link pages working end-to-end via localStorage). Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,45 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 26.2: `/c` standalone routes + end-user vendor endpoints
+
+Functional MVP shipped. Three new dashboard routes work end-to-end against three new backend endpoints, all wired via end-user auth from Phase 25.3. localStorage-backed for now (26.3 swaps to cookies).
+
+**What shipped**:
+
+- **Backend (3 new endpoints in `backend/main.py`)**, all using the `get_end_user` dep from Phase 25.3:
+  - `GET /me/end-user`: returns the signed-in EndUser + `linked_vendors` (trimmed to id/name/vendor_slug/widget_public_id/customer_facing_agent_name — no plan_tier, no billing, no internal settings).
+  - `GET /me/end-user/vendors/{slug}`: resolve a vendor by slug. 404 if not linked OR no such slug (same shape so existence isn't leakable).
+  - `GET /me/end-user/vendors/{slug}/conversations`: end-user's WidgetConversations for this vendor (scoped on `end_user_id == auth.end_user.id` AND `workspace_id == vendor.id`), ordered by `last_message_at desc`, capped at 50. Anonymous threads excluded.
+  - Helper `_serialize_vendor_for_end_user` so the projection is consistent across the three endpoints.
+- **Backend tests** (`backend/tests/test_end_user_vendor_endpoints.py`): 14 tests. 401 unauthed on all three, `linked_vendors` omits unlinked workspaces, vendor slug 404 paths (unlinked + nonexistent), conversation list scopes to (end_user, vendor) with cross-vendor isolation, ordering by `last_message_at desc`, anonymous threads excluded, requires auth on all.
+- **Dashboard helpers**:
+  - `dashboard/app/endUserSession.ts`: localStorage-backed `getEndUserToken` / `setEndUserToken` / `clearEndUserToken` with SSR guards. Distinct key from operator `lightsei.session_token` so the two never collide.
+  - `dashboard/app/api.ts`: types (`EndUser`, `EndUserVendor`, `EndUserMeResponse`, `EndUserVendorConversation`, `WidgetMessage`, `WidgetThread`, `EndUserAuthSuccess`, `EndUserUnauthorizedError`), `endUserAuthedJson` private helper, `requestEndUserMagicLink` + `consumeEndUserMagicLink` + `fetchEndUserMe` + `fetchEndUserVendor` + `fetchEndUserVendorConversations` + `postWidgetMessageAsEndUser` + `fetchWidgetThreadAsEndUser`.
+- **Dashboard pages**:
+  - `dashboard/app/c/auth/magic-link/page.tsx`: reads `?token=` (+ optional `?vendor_invite_code=`), calls consume, stores session token via `setEndUserToken`, redirects to `/c`. Suspense boundary around `useSearchParams` per Next.js requirement. Error states for missing/invalid/expired token with consumer-friendly copy.
+  - `dashboard/app/c/page.tsx`: replaces 25.7 placeholder with real vendor list. Reads `fetchEndUserMe`, renders vendor cards with "Open chat →" links. Empty state for users with no linked vendors. "Sign out" button clears the token. EndUserUnauthorizedError → "you're signed out" message (no operator-side /login redirect).
+  - `dashboard/app/c/[slug]/page.tsx`: two-pane chat surface. Left: conversation list (with "+ New conversation" + per-conv last_message_at). Right: thread view + composer. Thread polls `fetchWidgetThreadAsEndUser` every 3s (delta-since cursor on message id), auto-scroll, optimistic-append user's own message before next poll. Send goes through `postWidgetMessageAsEndUser` (existing Phase 25.4 widget endpoint). 404 / not-linked / unauthorized states all distinct.
+
+**Spec deviations (carry-through to 26.3)**:
+
+- Spec said 26.2's pages use "end-user auth" but the cookie helpers spec'd for that auth land in 26.3. Per Bailey's "Functional MVP" choice, 26.2 ships everything working via localStorage (a `dashboard/app/endUserSession.ts` helper module); 26.3 will refactor that to cookies + extract the spec'd `getEndUserSessionToken` / `setEndUserSession` / `clearEndUserSession` helper names + promote `endUserAuthedJson` to a top-level api.ts export. The dashboard call sites won't need to change.
+- Spec said "/c/auth/magic-link" mirrors operator `/auth/magic-link`. Operator's page is at `/auth/magic-link` not `/auth/magic-link/page.tsx` — same shape here at `/c/auth/magic-link/page.tsx`. Done as spec'd.
+
+**Design notes**:
+
+- The `customer_facing_agent_name` field on EndUserVendor is rendered as "Chat with vega" in cards + as the per-vendor header subtitle. End users get to see the bot's NAME but no internal config (sensitivity_level, capabilities, system_prompt all withheld).
+- The `widget_public_id` is included on the vendor projection so the dashboard can post/poll via the existing Phase 25.4 widget endpoints directly without a slug→public_id hop on every send. Phase 26B can switch to slug-based widget endpoints if URL aesthetics matter.
+- Optimistic message append shows the user's send instantly before the next 3s poll tick. The `id: res.message_id` from the backend POST response is the real id; subsequent polls dedupe by `id > highestSeen`.
+- Cross-vendor isolation from Phase 25.6 holds: Alice on vendor A's chat surface posting to vendor A's widget can't reach vendor B's conversations even if she's linked to both.
+- The `/c` routes have NO operator Header + nav. Layout chrome is distinct per spec; the operator dashboard layout is unaffected.
+
+**End-to-end smoke**: operator signup → vendor_slug claim → widget public_id wired → end-user magic-link request + consume → operator links end-user → `GET /me/end-user` returns linked Acme vendor → `GET /me/end-user/vendors/acme/conversations` returns empty → `POST /widget/wid_acme_demo/messages` with end-user bearer + allowlisted Origin → conversation row with `end_user_id` stamped → conversation list now shows it → `GET /widget/wid_acme_demo/conversations/{id}` returns the user message. All steps 200/202.
+
+**Test counts**: backend 1366 → **1380** (+14). Dashboard tsc clean. `next build` clean; new routes: `/c` (2.41 kB), `/c/[slug]` (3.36 kB), `/c/auth/magic-link` (2.02 kB).
+
+**What this enables**: 26.3 swaps localStorage to cookies + extracts the helper module per spec. 26.4 adds the PWA manifest + service worker so `/c` is installable to iOS home screen. 27.x uses `/me/end-user/vendors` + `/me/end-user/vendors/{slug}/conversations` as foundations for invite-code redemption + per-vendor settings.
 
 ### 2026-05-25 — Phase 26.1: vendor slug schema + claim endpoint
 
