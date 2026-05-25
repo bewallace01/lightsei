@@ -7,7 +7,11 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 23 — 23.1 schema (workspace_members + sessions.active_workspace_id + alembic 0040 + per-existing-user backfill). Phase 23 spec locked 2026-05-24. Theme: multiple workspaces per account. Promoted from the parking lot today; surfaced by trying to test Lightsei against JYNI (a real second project) and hitting the one-workspace-per-account wall.**
+> **Phase 23 complete 2026-05-25. NOW pointer is open. Three follow-ups filed (stale header chip after switch + planner zone/capability gap + global redirect-to-pick on NoActiveWorkspaceError).**
+
+Phase 23 (multiple workspaces per account) complete: 10 sub-tasks shipped. Schema (alembic 0040 + 0041) added `workspace_members` join + `sessions.active_workspace_id` + `workspaces.updated_at`, backfilled every existing user with a member row + every existing session with the legacy workspace as its active pointer. Backend session-auth resolver now reads from the active pointer with a defensive membership check; api-key auth path unchanged. Five new CRUD endpoints (list / create / switch / patch / delete) + new dashboard surfaces: `WorkspaceSwitcher` mounted in the Header dropdown, dedicated `/workspace-settings` page, `/me/workspaces/pick` fallback for stale-active edge cases. JYNI test passed (workspace creation flow + clean isolation demoed end-to-end; team-from-readme planner output graded A+ for JYNI-specificity).
+
+Backend at **1238 passing** (+51 across Phase 23; started at 1187). SDK unchanged at **164**. Dashboard adds two new routes (`/workspace-settings`, `/me/workspaces/pick`) + the in-header `WorkspaceSwitcher`. Three known follow-ups: stale Header workspace chip after switch (#218), team-from-readme planner doesn't surface sensitivity_level + capabilities (#219), global redirect-to-pick on NoActiveWorkspaceError (#227).
 
 Phase 22 (scheduled bots + webhook triggers) complete 2026-05-24: 10 sub-tasks shipped + 22.10 demo artifacts under `examples/p22-demo/`. Bots can fire on a cron schedule or via a token-authed POST. `@lightsei.on_trigger` + `lightsei.trigger` (kind / scheduled_at / webhook_payload / name) round out the SDK; the dashboard's per-agent Triggers panel + `/runs?trigger_id=` filter + run-card badge round out the operator surface. Trust-zone + capability gates unchanged: a triggered run flows through the same dispatch path as a Slack mention or widget chat.
 
@@ -1086,7 +1090,7 @@ Demo (already what Bailey wants to do): from the header dropdown click "+ New wo
 - **Existing data migration: every user gets exactly one `workspace_members` row.** The alembic backfill inserts `(user_id, workspace_id, role='owner')` for every existing user whose workspace they currently own. Sessions get `active_workspace_id` set to that workspace. After the migration, every existing user can immediately create a second workspace via the dropdown. No flag day for users.
 - **Workspace-scoped endpoints don't change their auth shape.** `get_workspace_id` already returns a workspace id; the change is purely in *how* it resolves (session.active_workspace_id instead of session.user → user.workspace). Endpoint code doesn't move.
 
-### 23.1 — Schema: workspace_members + sessions.active_workspace_id
+### 23.1 — Schema: workspace_members + sessions.active_workspace_id ✅ shipped 2026-05-24
 
 One new table + one new column:
 
@@ -1097,7 +1101,7 @@ Backfill at migration time: for every `users` row, insert `(users.id, users.work
 
 Alembic migration `0040_workspace_members.py`. SQLAlchemy `WorkspaceMember` model + validation helper `is_valid_workspace_member_role` in `backend/models.py`. Schema tests under `backend/tests/test_workspace_members_schema.py`: roundtrip, FK cascade on user delete + on workspace delete, composite PK rejects duplicate insert, backfill applied every existing user.
 
-### 23.2 — Backend: workspace resolution from session.active_workspace_id
+### 23.2 — Backend: workspace resolution from session.active_workspace_id ✅ shipped 2026-05-24
 
 Update `get_workspace_id` (and `get_workspace_id_for_session_only`, if separate) to read `session.active_workspace_id` on the session-auth path. The api-key-auth path (`api_key.workspace_id`) is unchanged.
 
@@ -1105,7 +1109,7 @@ Add a defensive check: when reading the session's active workspace, verify the u
 
 Tests: session-auth requests respect the session's active workspace; api-key-auth requests still pin to the key's workspace; a session whose active workspace was deleted returns 401 (not 500); a user removed from a workspace mid-session gets 401 on the next request.
 
-### 23.3 — Backend: workspace CRUD endpoints
+### 23.3 — Backend: workspace CRUD endpoints ✅ shipped 2026-05-24
 
 Five new endpoints:
 
@@ -1117,7 +1121,7 @@ Five new endpoints:
 
 Tests: list returns only the user's workspaces; create makes the new one active + adds the member row; switch refuses non-membership with 404; rename owner-only (member returns 403); delete owner-only + refuses last-workspace; deleted workspace cascades agents + runs.
 
-### 23.4 — Dashboard: header workspace dropdown
+### 23.4 — Dashboard: header workspace dropdown ✅ shipped 2026-05-24
 
 The dropdown shell already exists on the header from the 2026-05-01 nav redesign (per the parking-lot entry). Today its "switch workspace" + "+ new workspace" entries are placeholders. Wire them:
 
@@ -1127,7 +1131,7 @@ The dropdown shell already exists on the header from the 2026-05-01 nav redesign
 
 Spinner state during switch so the user doesn't double-click. Error toast on failure (e.g. the workspace was just deleted by another tab).
 
-### 23.5 — Dashboard: workspace settings page
+### 23.5 — Dashboard: workspace settings page ✅ shipped 2026-05-24
 
 New route `dashboard/app/workspace-settings/page.tsx` (linked from the header dropdown's "Workspace settings" entry). Renders:
 
@@ -1138,7 +1142,7 @@ New route `dashboard/app/workspace-settings/page.tsx` (linked from the header dr
 
 `/account` page (already exists) gets a "Workspaces" section above the existing API-keys / sessions blocks: lists the user's workspaces + an "Open settings" link per workspace.
 
-### 23.6 — Dashboard: first-time workspace picker page
+### 23.6 — Dashboard: first-time workspace picker page ✅ shipped 2026-05-24
 
 For users who somehow end up with no active workspace (deleted theirs while another tab was open, etc.), or for the first signup flow after this lands (since the auto-created workspace is no longer the only option), add a minimal `/me/workspaces/pick` page. Renders:
 
@@ -1150,13 +1154,13 @@ The session middleware (or the layout's auth check) redirects here when the acti
 
 For brand-new signups, the existing "create your first workspace" flow stays — user signs up, gets a workspace auto-created, lands in dashboard. The pick page is the fallback when active state goes stale.
 
-### 23.7 — Stripe customer-per-workspace check
+### 23.7 — Stripe customer-per-workspace check ✅ shipped 2026-05-25
 
 Today every workspace has its own subscription if it's on a paid plan. Confirm that the create-workspace path doesn't accidentally create a customer-per-user. New workspaces start on `free` tier with no Stripe customer; the customer is created lazily on the first checkout (existing flow from Phase 17.4). Test: creating a new workspace doesn't touch Stripe at all; upgrading the new workspace creates a fresh customer scoped to that workspace.
 
 If today's signup flow auto-creates a Stripe customer at signup time, change it to lazy creation. Multi-workspace operators would otherwise rack up an empty customer per new workspace.
 
-### 23.8 — Existing-data migration verification
+### 23.8 — Existing-data migration verification ✅ shipped 2026-05-25
 
 Mostly a check rather than code: run alembic 0040 against a staging DB clone (or the prod DB if Bailey is comfortable). Verify:
 
@@ -1166,11 +1170,11 @@ Mostly a check rather than code: run alembic 0040 against a staging DB clone (or
 
 This sub-task exists because the migration is the riskiest part of Phase 23: it touches every active session and every existing user.
 
-### 23.9 — Test sweep + tsc + next build + prod deploy verification
+### 23.9 — Test sweep + tsc + next build + prod deploy verification ✅ shipped 2026-05-25
 
 Full backend pytest. SDK pytest (no changes; should be a no-op pass). Dashboard tsc + next build. Prod deploy + post-deploy smoke: confirm existing session still works (Bailey logs into his primary workspace, sees his agents/runs unchanged), then create JYNI workspace from the dropdown, switch, confirm empty state, switch back, confirm primary unchanged.
 
-### 23.10 — JYNI test as the demo
+### 23.10 — JYNI test as the demo ✅ shipped 2026-05-24
 
 The actual demo for this phase is doing the thing that surfaced it. Bailey creates a JYNI workspace from the dropdown, drops JYNI's README into `/agents/team-from-readme`, plans a team, observes the planner's output cleanly isolated. No demo artifacts under `examples/` since this phase deepens existing surfaces rather than adding new ones (same shape as Phase 22.9's "no new dashboard routes"). The runbook is just: "go to /account, click + New workspace, name it, switch, plan a team, observe clean isolation."
 
@@ -1624,6 +1628,36 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 23 code-complete: multiple workspaces per account
+
+Phase 23 (multiple workspaces per account) wraps over 2026-05-24/25. 10 sub-tasks all shipped against a spec promoted same-day after the JYNI test surfaced the gap (one workspace per account makes every new project a fresh signup + Stripe customer + secrets paste).
+
+**What shipped**:
+
+- **23.1**: alembic 0040 adds `workspace_members` (composite PK on `(user_id, workspace_id)`, role server_default `'owner'`, joined_at) + `sessions.active_workspace_id` (nullable FK, SET NULL on workspace delete). Idempotent backfill in the same migration: every existing user gets one member row, every existing session gets active_workspace_id set to the user's legacy workspace_id. `WorkspaceMember` model + `_VALID_WORKSPACE_MEMBER_ROLES` + helper. 15 schema tests including the cross-workspace delete-non-primary case for the FK SET NULL behavior.
+- **23.2**: `backend/auth.py` `_resolve` session-token path now reads from `sess.active_workspace_id` (not `user.workspace_id`) and validates membership via a `WorkspaceMember` lookup. Two distinctive 401 details (`"no active workspace"`, `"not a member of active workspace"`) for the dashboard to branch on. API-key path untouched. `_create_session` sets active_workspace_id at session-create time; all three signup sites (apikey, magic-link, oauth) insert a `WorkspaceMember` row alongside the new User. 9 tests; **zero regressions across 1187 existing session-authed tests** because every fixture flows through `_create_session` + signup which now wire both pieces transparently.
+- **23.3**: alembic 0041 adds `workspaces.updated_at`. Five new session-auth-only endpoints under `/me/workspaces`: GET (list with `is_active` flag), POST (create + auto-switch), `{id}/switch`, PATCH (owner-only rename), DELETE (owner-only + refuse-last + auto-switch-on-delete-active). Same 404 for non-membership across the board (don't leak existence). 26 tests + one bug caught mid-sweep (my body classes shadowed the existing `WorkspacePatchIn` — renamed to `MyWorkspacePatchIn`).
+- **23.4**: `dashboard/app/WorkspaceSwitcher.tsx` mounted in the existing header dropdown. Lists workspaces with a checkmark on the active one, switch via `POST /me/workspaces/{id}/switch` + `router.refresh()`, inline modal for "+ New workspace" that calls create + lands in the new workspace via backend auto-switch.
+- **23.5**: new `/workspace-settings` route (editable name owner-only, read-only workspace ID, plan tier chip, members section as 23B placeholder, danger-zone delete with type-to-confirm modal). `/account` grows a Workspaces section above Billing.
+- **23.6**: new `/me/workspaces/pick` fallback route + `NoActiveWorkspaceError` subclass thrown by `authedJson` when the backend returns one of the two distinctive 401 details. Doesn't yet wire the global redirect-to-pick interception (filed as #227); picker works via direct navigation today.
+- **23.7**: confirmed (+ test) that `create_my_workspace` doesn't touch Stripe. New workspaces start `free` with NULL `stripe_customer_id` + $5 starter credits; Stripe customer is minted lazily on first Checkout. Matters for multi-workspace operators who would otherwise rack up an empty customer per side-project.
+- **23.8**: prod migration backfill verified live via psycopg query against the Railway-proxy URL. 5 users / 6 member rows (+1 = the JYNI workspace I created via the UI during the test) / 0 orphan users / 13 active sessions / 0 with NULL active_workspace_id.
+- **23.9**: backend pytest 1238 passed (+51 across Phase 23), SDK pytest 164 passed, dashboard tsc + next build clean.
+- **23.10**: JYNI test (run mid-phase 2026-05-24). Operator-driven path: create workspace from dropdown → drop README → plan a team. Planner returned a 5-bot team (polaris/argus/vela/vega/hermes) with stunning JYNI-specificity ("311 API routes," `npm run audit:org`, the exact protected-files list, "lively-happiness" Railway service, the 11 every-5-min cron job names, `CRM_CRON_SECRET` header pattern). Phase 22 wedge used naturally without prompting (three of five bots are cron + webhook triggered). Topology canonical (orchestrator → specialists → messenger leaf). Graded **A+ on planner quality, B+ on completeness** because of a planner-side gap filed as #219 (sensitivity_level + capabilities not surfaced as structured fields, only encoded in prose).
+
+**Test counts**: backend 1187 → **1238** (+51 across Phase 23). SDK unchanged at **164**. Dashboard adds two routes (`/workspace-settings`, `/me/workspaces/pick`) + the in-header WorkspaceSwitcher.
+
+**Three follow-ups filed** (worth doing but not blocking):
+- #218: Header workspace chip + dropdown title read from localStorage; stale after switch/create until page reload.
+- #219: team-from-readme planner doesn't surface sensitivity_level + capabilities (surfaced by JYNI test).
+- #227: route `NoActiveWorkspaceError` to `/me/workspaces/pick` from every page's existing UnauthorizedError catch (today only the picker page itself handles it correctly).
+
+**Spec deviations** (all minor):
+- 23.5: kept `users.workspace_id` legacy column (didn't drop it). A later cleanup can; nothing reads it on the session-auth path anymore but Stripe + a few admin tools still do.
+- 23.6: the global redirect-to-pick interception wasn't built (filed as #227). Picker page works via direct navigation.
+
+**What this enables**: testing JYNI today (and any future project) in clean isolation without a second account. Unlocks the natural "configure-your-team for non-technical users" flow — each project they bring gets its own workspace, its own bots, its own cost tracking. Multi-user-per-workspace (invites, roles, transfer-ownership) stays parked as Phase 23B; the foundation is built so that's a small additive surface when it arrives.
 
 ### 2026-05-24 — Phase 22 code-complete: scheduled bots + webhook triggers
 

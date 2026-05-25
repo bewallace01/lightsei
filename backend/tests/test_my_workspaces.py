@@ -127,6 +127,27 @@ def test_create_flips_session_active_workspace(client, alice):
     assert r2.json()["id"] == new_id
 
 
+def test_create_does_not_touch_stripe(client, alice):
+    """Phase 23.7: newly-created workspaces start on `free` tier
+    with no stripe_customer_id. Customer creation is lazy — happens
+    on first Checkout, not at workspace-create time. Matters for
+    multi-workspace operators who would otherwise rack up an empty
+    Stripe customer per side-project workspace."""
+    r = client.post(
+        "/me/workspaces", headers=_S(alice), json={"name": "fresh"},
+    )
+    new_id = r.json()["id"]
+
+    with session_scope() as s:
+        ws = s.get(Workspace, new_id)
+        assert ws is not None
+        assert ws.plan_tier == "free"
+        assert ws.stripe_customer_id is None
+        assert ws.stripe_subscription_id is None
+        # $5 of starter credits, matching the existing signup flow.
+        assert float(ws.free_credits_remaining_usd) == 5.00
+
+
 def test_create_rejects_blank_name(client, alice):
     r = client.post(
         "/me/workspaces", headers=_S(alice), json={"name": "   "},
