@@ -141,6 +141,28 @@ def is_valid_end_user_vendor_link_via(linked_via: object) -> bool:
     )
 
 
+# Phase 26.1: vendor_slug format. Lives in user-facing URLs
+# (`/c/{vendor_slug}`) so it has to be lowercase + URL-safe.
+# 3-32 chars, [a-z0-9-], no leading or trailing dash. The
+# leading/trailing-dash rule keeps URLs legible
+# (`/c/-acme` looks broken) and prevents the empty-but-not-empty
+# shape `/c/-`.
+import re as _re
+
+_VENDOR_SLUG_RE = _re.compile(r"^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])?$")
+
+
+def is_valid_vendor_slug(slug: object) -> bool:
+    """3-32 chars, lowercase alphanumeric + dashes, no leading or
+    trailing dash. Endpoint code uses this to validate the operator's
+    proposed slug before hitting the unique constraint."""
+    if not isinstance(slug, str):
+        return False
+    if len(slug) < 3 or len(slug) > 32:
+        return False
+    return _VENDOR_SLUG_RE.match(slug) is not None
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -206,6 +228,16 @@ class Workspace(Base):
     # internal-id-stability promise. Unique across workspaces;
     # nullable because pre-21 rows don't have one yet.
     widget_public_id: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, unique=True,
+    )
+    # Phase 26.1: human-readable URL handle for the consumer chat
+    # surface at /c/{vendor_slug}. Operator-claimed via
+    # POST /workspaces/me/vendor-slug. Validated against
+    # `is_valid_vendor_slug` (lowercase, 3-32, [a-z0-9-], no
+    # leading/trailing dash). Unique across workspaces because the
+    # slug appears in user-facing URLs and a collision would route
+    # consumer traffic to the wrong vendor.
+    vendor_slug: Mapped[Optional[str]] = mapped_column(
         String(32), nullable=True, unique=True,
     )
     # Phase 21.1: HTTPS origins the widget POST endpoint will accept

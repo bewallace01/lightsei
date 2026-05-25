@@ -81,6 +81,7 @@ from models import (
     WorkspaceMember,
     WorkspaceSecret,
     is_valid_trigger_kind,
+    is_valid_vendor_slug,
 )
 import github_api
 import notifications
@@ -200,6 +201,13 @@ class WorkspacePatchIn(BaseModel):
     # to the customer-facing bot's system_prompt without operator
     # review. Off by default; flipping requires explicit consent.
     polaris_auto_apply_widget_fixes: Optional[bool] = None
+
+
+# Phase 26.1: vendor-slug claim body. Slug format is re-validated
+# server-side via models.is_valid_vendor_slug; the pydantic field
+# length cap is the cheap pre-filter.
+class VendorSlugIn(BaseModel):
+    slug: str = Field(min_length=3, max_length=32)
 
 
 class ApiKeyCreateIn(BaseModel):
@@ -572,6 +580,10 @@ def _serialize_workspace(w: Workspace) -> dict[str, Any]:
         "polaris_auto_apply_widget_fixes": bool(
             getattr(w, "polaris_auto_apply_widget_fixes", False)
         ),
+        # Phase 26.1: operator-claimed consumer-chat URL handle.
+        # NULL until the operator claims one via
+        # POST /workspaces/me/vendor-slug.
+        "vendor_slug": getattr(w, "vendor_slug", None),
     }
 
 
@@ -2483,6 +2495,81 @@ def patch_me(
         # Phase 21.9: opt in / out of auto-applying suggested fixes.
         ws.polaris_auto_apply_widget_fixes = bool(body.polaris_auto_apply_widget_fixes)
     session.flush()
+    return _serialize_workspace(ws)
+
+
+@app.post("/workspaces/me/vendor-slug")
+def claim_vendor_slug(
+    body: VendorSlugIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 26.1: claim a URL-safe vendor handle for this workspace.
+
+    422 on invalid format (the regex + length check in
+    `is_valid_vendor_slug`); 409 if another workspace already holds
+    this slug. On success, persists the slug and returns the full
+    serialized workspace so the dashboard can refresh its
+    `vendor_slug` field in one round-trip.
+
+    Re-claiming the SAME slug for the same workspace is a no-op
+    (returns 200). Re-claiming a DIFFERENT slug overwrites the old
+    one. v1 has no separate "release the slug" path; PATCH the
+    workspace to a different one or wait for Phase 26B.
+    """
+    proposed = body.slug.strip()
+    if not is_valid_vendor_slug(proposed):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "invalid_vendor_slug",
+                "message": (
+                    "vendor slug must be 3-32 chars, lowercase, "
+                    "letters / digits / dashes, no leading or "
+                    "trailing dash"
+                ),
+            },
+        )
+
+    ws = session.get(Workspace, workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+
+    # No-op when the workspace already holds the proposed slug.
+    if ws.vendor_slug == proposed:
+        return _serialize_workspace(ws)
+
+    # Pre-check the unique constraint with a SELECT so we can
+    # return 409 cleanly instead of a 500 from the IntegrityError.
+    # Race window: a concurrent claim could still race past this
+    # check; the IntegrityError catch below covers that.
+    holder = session.execute(
+        select(Workspace).where(Workspace.vendor_slug == proposed)
+    ).scalar_one_or_none()
+    if holder is not None and holder.id != workspace_id:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "vendor_slug_taken",
+                "message": f"vendor slug {proposed!r} is already in use",
+            },
+        )
+
+    ws.vendor_slug = proposed
+    try:
+        session.flush()
+    except Exception:
+        # IntegrityError from the unique constraint if a parallel
+        # claim sneaked in between the select above and the flush.
+        # Surface as 409 so the client gets the same error shape.
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "vendor_slug_taken",
+                "message": f"vendor slug {proposed!r} is already in use",
+            },
+        )
     return _serialize_workspace(ws)
 
 

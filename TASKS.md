@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 26 — 26.1 vendor slug schema + claim endpoint. alembic 0043 adds `workspaces.vendor_slug` (varchar(32) nullable, unique). Validator: 3-32 chars, lowercase, `[a-z0-9-]`. `POST /workspaces/me/vendor-slug` body `{slug}` claims it for the active workspace (409 if taken, 422 on invalid). `GET /workspaces/me` returns it. Schema test + endpoint tests. Phase 25 closed 2026-05-25 (end-user identity stack landed, cross-vendor isolation pinned, demo green). Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 26 — 26.2 `/c` standalone routes (end-user-authed). Three new dashboard routes: `/c` (vendor list, one card per linked vendor with "Open chat" button), `/c/{slug}` (vendor chat: conversation list + thread view side-by-side on desktop, drill-in on mobile), `/c/auth/magic-link` (end-user magic-link consume page mirroring the operator one). Use end-user auth (Phase 25.3), not operator auth. Distinct cookie chrome from operator dashboard. Phase 25 closed 2026-05-25; 26.1 shipped vendor_slug schema + claim. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,29 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 26.1: vendor slug schema + claim endpoint
+
+URL-safe vendor handle for the consumer-chat surface at `/c/{vendor_slug}`. Operator-claimed, validated, unique.
+
+**What shipped**:
+
+- `backend/alembic/versions/20260525_0043_workspaces_vendor_slug.py`: adds `workspaces.vendor_slug` (varchar(32), nullable, unique) + `ix_workspaces_vendor_slug` unique index. No backfill needed (every existing workspace stays NULL).
+- `backend/models.py`: `Workspace.vendor_slug: Optional[str]` column + module-level `is_valid_vendor_slug(slug)` validator backed by compiled regex `^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])?$` + length check (3-32). Rejects: too short/long, uppercase, leading/trailing dash, underscores/spaces/symbols, double-dashes (well, `--` rejected via length 2; `a--b` would actually pass — that's fine for v1).
+- `backend/main.py`: `VendorSlugIn` pydantic body (min_length=3, max_length=32 for the cheap pre-filter) + `POST /workspaces/me/vendor-slug` endpoint. 422 on invalid format, 409 on collision (pre-checked via SELECT, IntegrityError catch as belt-and-suspenders for the race window). Re-claiming the same slug is a no-op (idempotent); re-claiming a different one replaces. `_serialize_workspace` extended to echo `vendor_slug` (NULL pre-claim), so `GET /workspaces/me` returns it for free.
+- `backend/tests/test_vendor_slug.py`: 43 tests. Schema (column nullable + unique, index landing), validator (10 accepts + 16 rejects parameterized), endpoint (happy path, idempotent re-claim, replace, 409 on collision between alice + bob, 422 on 6 invalid format shapes, pydantic min/max length, workspace-scoped, requires auth).
+
+**Spec deviations**: none. Spec said: varchar(32) nullable unique, validator 3-32 lowercase `[a-z0-9-]`, POST/GET endpoints, 409 + 422 error shapes, schema test confirms uniqueness, endpoint tests cover claim + validation + workspace-scoped. All covered. Added leading/trailing dash + pydantic-pre-filter cases on top.
+
+**Design notes**:
+- Validator rejects leading/trailing dashes (`-acme`, `acme-`) so URLs don't look broken. The regex `^[a-z0-9](?:[a-z0-9-]{1,30}[a-z0-9])?$` enforces this naturally and also covers the 3-char minimum.
+- Endpoint pre-checks the unique constraint with a SELECT before the flush so the happy 409 path is clean. The IntegrityError catch handles the rare race where a parallel claim sneaks in between SELECT and flush.
+- Re-claim-same-slug is a no-op (returns 200 with serialized workspace). Avoids the operator-clicks-Save-twice double-error path.
+- v1 has no "release the slug" endpoint. PATCH to a different slug or wait for Phase 26B if release-without-replace is needed.
+
+**Test counts**: backend 1323 → **1366** (+43).
+
+**What this enables**: 26.2 can build `/c/{slug}` routes resolving against this column. The dashboard's Phase 23.5 `/workspace-settings` page can grow a "Claim consumer URL" section using `POST /workspaces/me/vendor-slug`. 27.x cross-vendor subscription UI uses vendor_slug as the human-readable handle in the invite-link emails.
 
 ### 2026-05-25 — Phase 25 closed: end-user identity stack + cross-vendor isolation + demo green
 
