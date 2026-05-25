@@ -50,6 +50,9 @@ from models import (
     DeploymentBlob,
     DeploymentLog,
     EmailSigninToken,
+    EndUser,
+    EndUserSession,
+    EndUserSigninToken,
     Event,
     EventValidation,
     GenerationJob,
@@ -221,6 +224,34 @@ class MagicLinkRequestIn(BaseModel):
 
 class MagicLinkConsumeIn(BaseModel):
     token: str = Field(min_length=8, max_length=256)
+
+
+# Phase 25.2: end-user magic-link auth. Distinct from the operator
+# pair above because end users have a separate identity surface
+# (end_users vs users) + the request body optionally carries a
+# vendor_invite_code through the email round trip.
+class EndUserMagicLinkRequestIn(BaseModel):
+    email: EmailStr
+    # Optional invite code the end user typed during signup. Stored
+    # on the signin token row in 25.1's schema; Phase 27.2 consumes
+    # it to link end_user → workspace after vendor_invite_codes
+    # lands. Carried through unchanged in 25.2.
+    vendor_invite_code: Optional[str] = Field(
+        default=None, min_length=1, max_length=64,
+    )
+
+
+class EndUserMagicLinkConsumeIn(BaseModel):
+    token: str = Field(min_length=8, max_length=256)
+    # Optional invite code the end user typed AFTER landing on the
+    # consume page (if they didn't include one in the original
+    # request). Lets the dashboard surface "I have an invite code"
+    # at consume time too. Phase 27.2 uses this same field; today
+    # it's accepted, carried back on the response, but not acted
+    # on.
+    vendor_invite_code: Optional[str] = Field(
+        default=None, min_length=1, max_length=64,
+    )
 
 
 class CommandEnqueueIn(BaseModel):
@@ -4584,6 +4615,196 @@ def consume_magic_link(
         "session_token": sess_plain,
         "session_expires_at": sess_row.expires_at.isoformat(),
         "is_new_user": is_new_user,
+    }
+
+
+# ---------- Phase 25.2: end-user magic-link auth ---------- #
+
+
+# Same caps + TTL as the operator flow. Reusing the constants would
+# couple the two flows in a way that makes future tuning awkward
+# (consumer signup might want a different rate ceiling than operator
+# signin), so they're spelled separately on purpose.
+END_USER_MAGIC_LINK_MAX_PER_HOUR = 5
+END_USER_MAGIC_LINK_TTL = timedelta(minutes=15)
+# End-user sessions live the same 30 days as operator sessions. Long
+# enough that a returning visitor isn't constantly re-authing; short
+# enough that a stale device gets cycled out within a reasonable
+# window.
+END_USER_SESSION_TTL = timedelta(days=30)
+
+
+def _serialize_end_user(eu: EndUser) -> dict[str, Any]:
+    return {
+        "id": eu.id,
+        "email": eu.email,
+        "display_name": eu.display_name,
+        "email_verified": eu.email_verified,
+        "auth_provider": eu.auth_provider,
+        "created_at": eu.created_at.isoformat(),
+    }
+
+
+def _create_end_user_session(
+    session: Session, end_user: EndUser,
+) -> tuple[EndUserSession, str]:
+    """Parallel to `_create_session` for operators but keyed off
+    EndUser. Returns (row, plaintext) — caller serializes plaintext
+    into the response; the DB only ever sees the hash."""
+    plaintext = generate_session_token()
+    now = utcnow()
+    row = EndUserSession(
+        id=str(uuid.uuid4()),
+        end_user_id=end_user.id,
+        token_hash=hash_token(plaintext),
+        created_at=now,
+        expires_at=now + END_USER_SESSION_TTL,
+    )
+    session.add(row)
+    session.flush()
+    return row, plaintext
+
+
+@app.post("/auth/end-user/magic-link/request")
+def request_end_user_magic_link(
+    body: EndUserMagicLinkRequestIn,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 25.2: kick off an end-user magic-link sign-in / signup.
+
+    Mirrors the operator `/auth/magic-link/request` no-leak contract:
+    always 200, per-email rate-limited (5/hour) so a malicious sender
+    can't spam a single inbox via rotating IPs, per-IP limited via
+    `limit_signup_attempt`. Stores the token hash on
+    `end_user_signin_tokens` with a 15-minute TTL; sends the unhashed
+    token in a Resend magic URL pointing at the end-user landing page.
+
+    `vendor_invite_code` carries through to consume side (Phase 27.2
+    is where the link actually gets created); today we just persist
+    it on the token row so the round-trip preserves it.
+    """
+    import email_provider as _email_mod
+
+    limit_signup_attempt(request)
+    email_addr = body.email.lower()
+    now = utcnow()
+
+    # Per-email rate-limit, same shape as operator flow.
+    cutoff = now - timedelta(hours=1)
+    recent_count = session.execute(
+        select(func.count(EndUserSigninToken.token_hash)).where(
+            EndUserSigninToken.email == email_addr,
+            EndUserSigninToken.created_at >= cutoff,
+        )
+    ).scalar_one()
+    if recent_count >= END_USER_MAGIC_LINK_MAX_PER_HOUR:
+        return {"status": "ok"}
+
+    plaintext = _stdlib_secrets.token_urlsafe(32)
+    token_hash = _hash_magic_token(plaintext)
+    session.add(EndUserSigninToken(
+        token_hash=token_hash,
+        email=email_addr,
+        created_at=now,
+        expires_at=now + END_USER_MAGIC_LINK_TTL,
+        vendor_invite_code=body.vendor_invite_code,
+    ))
+    session.flush()
+
+    try:
+        _email_mod.send_end_user_magic_link(
+            email=email_addr,
+            token=plaintext,
+            dashboard_url=_dashboard_base_url(),
+        )
+    except Exception:
+        import logging as _logging
+        _logging.getLogger("lightsei.auth").warning(
+            "end-user magic-link request: send failed for %s, "
+            "token still valid via direct backend POST",
+            email_addr,
+        )
+    return {"status": "ok"}
+
+
+@app.post("/auth/end-user/magic-link/consume")
+def consume_end_user_magic_link(
+    body: EndUserMagicLinkConsumeIn,
+    request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 25.2: consume an end-user magic-link token. Sign in
+    the matching end_user, or create a fresh end_user row on first
+    use (signup-via-magic-link).
+
+    422 covers invalid / expired / consumed, single-line message so
+    the client can't probe token validity by reading detail strings.
+    On success, mints an `end_user_sessions` row + returns the
+    plaintext bearer token.
+
+    `vendor_invite_code` on the response carries whatever code was
+    attached to the original request OR the override sent on this
+    consume call (the consume body wins if both are set). Today the
+    code is just echoed back, not acted on; Phase 27.2 reads it and
+    inserts an `end_user_vendor_links` row in the same transaction.
+    """
+    limit_login_attempt(request)
+    token_hash = _hash_magic_token(body.token)
+    now = utcnow()
+
+    row = session.get(EndUserSigninToken, token_hash)
+    if row is None or row.consumed_at is not None or row.expires_at <= now:
+        raise HTTPException(
+            status_code=422,
+            detail="magic-link token is invalid or expired, request a new one",
+        )
+
+    # Mark consumed before doing the find-or-create so a parallel
+    # POST with the same token loses the race + 422s.
+    row.consumed_at = now
+    session.flush()
+
+    email_addr = row.email
+    end_user = session.execute(
+        select(EndUser).where(EndUser.email == email_addr)
+    ).scalar_one_or_none()
+    is_new_end_user = end_user is None
+
+    if end_user is None:
+        end_user = EndUser(
+            id=str(uuid.uuid4()),
+            email=email_addr,
+            email_verified=True,
+            auth_provider="magic_link",
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(end_user)
+        session.flush()
+    else:
+        if not end_user.email_verified:
+            end_user.email_verified = True
+            end_user.updated_at = now
+
+    sess_row, sess_plain = _create_end_user_session(session, end_user)
+
+    # The body's vendor_invite_code wins over the request-side one
+    # so a user who skipped the field at request time can supply it
+    # at consume time without re-issuing the magic link.
+    invite_code = body.vendor_invite_code or row.vendor_invite_code
+
+    return {
+        "end_user": _serialize_end_user(end_user),
+        "session_token": sess_plain,
+        "session_expires_at": sess_row.expires_at.isoformat(),
+        "is_new_end_user": is_new_end_user,
+        "vendor_invite_code": invite_code,
+        # Phase 27.2 will replace this stub with the real linked
+        # workspaces list once the invite-code table lands. Empty
+        # list keeps the response shape stable for the dashboard
+        # to consume now.
+        "linked_vendors": [],
     }
 
 

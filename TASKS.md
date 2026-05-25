@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 25 — 25.2 end-user magic-link auth flow (`POST /auth/end-user/magic-link/{request,consume}`), Resend email template, no-leak contract + rate limiting + vendor-invite-code carry-through, sign-up-via-magic-link find-or-create on consume. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 25 — 25.3 backend/end_user_auth.py with get_end_user dep that resolves an EndUserSession from a bearer token and returns the linked EndUser + linked workspaces. Distinct from backend/auth.py so the two token types never confuse signatures. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,27 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 25.2: end-user magic-link auth flow
+
+End-user signup + signin via magic link, paralleling the operator flow from Phase 17.2. Distinct identity surface (EndUser, not User), distinct email copy, distinct landing-page path.
+
+**What shipped**:
+
+- `backend/email_provider.py`: new `send_end_user_magic_link(email, token, dashboard_url)` with consumer-friendly subject ("Sign in to your account") + body copy. Shared the FAKE_CAPTURE + REQUIRE_LIVE infrastructure by extracting a new `_send()` helper that both `send_magic_link` and `send_end_user_magic_link` call. URL path is `/auth/end-user/magic-link?token=...` so the operator and end-user landing pages stay separate.
+- `backend/main.py`: `EndUserMagicLinkRequestIn` + `EndUserMagicLinkConsumeIn` pydantic models (both with optional `vendor_invite_code`), `POST /auth/end-user/magic-link/request` (always-200 no-leak contract, per-email 5/hour rate limit, per-IP `limit_signup_attempt` throttle, persists invite code on `end_user_signin_tokens.vendor_invite_code`), `POST /auth/end-user/magic-link/consume` (422 on invalid/expired/used token with single-line detail to block probing, find-or-create EndUser in same transaction as marking token consumed, mints EndUserSession via new `_create_end_user_session` helper, returns `{end_user, session_token, session_expires_at, is_new_end_user, vendor_invite_code, linked_vendors: []}`). Body's invite code wins over request-side so the user can fix typos at consume time.
+- `backend/tests/test_end_user_magic_link.py`: 17 tests covering the email_provider distinct-subject + URL-path contract, request-side happy path + lowercase normalization + invite-code persistence + always-200 no-leak + per-email rate limit + EmailStr 422, consume-side new-end-user creation + returning-user signin (no duplicate row) + invite-code carry-through + body-override + fallback + single-use + unknown-token 422 + expired-token 422 + unverified-promote.
+
+**Spec deviations** (carry-through, not linking):
+
+- 25.2 spec says "If `vendor_invite_code` is set, the magic link's consumption side will also create an `end_user_vendor_links` row." But the `vendor_invite_codes` table (the lookup target) doesn't land until Phase 27.1. Confirmed with the operator before starting (carry-through option chosen): for 25.2 v1, the invite code rides through the email round-trip and lands on the consume response, but no link row is created. Phase 27.2 picks up where 25.2 left off and inserts the link once the codes table exists. `linked_vendors: []` is returned today so the response shape is stable for the dashboard.
+- End-user response uses `is_new_end_user` (not `is_new_user`) since the entity is distinct. Avoids confusion if the same email exists as both an operator and an end user.
+- The 17.2 operator flow auto-creates a User + Workspace pair on signup. The 25.2 end-user flow ONLY creates an EndUser row — no workspace creation. End users don't own workspaces; they get linked to vendor workspaces via invite codes (Phase 27.2).
+- The 17.2 operator flow has a `password_hash="magic-link-only:no-password"` placeholder because the User table has a NOT NULL password column. EndUser has no password column at all (magic-link only in v1 per Phase 25.1 spec), so no placeholder needed.
+
+**Test counts**: backend 1271 → **1288** (+17).
+
+**What this enables**: 25.3 can write `backend/end_user_auth.py` with `get_end_user(authorization)` against EndUserSession rows that this flow mints. 25.4 can extend widget endpoints to accept end-user bearer tokens from these sessions. 27.2 picks up the invite-code carry-through and creates the link.
 
 ### 2026-05-25 — Phase 25.1: end-user identity schema (alembic 0042)
 

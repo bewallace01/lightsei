@@ -147,6 +147,87 @@ def send_magic_link(
         "text": text,
         "html": html,
     }
+    _send(payload, email=email, magic_url=magic_url)
+
+
+def _render_end_user_magic_link_body(magic_url: str) -> tuple[str, str]:
+    """Phase 25.2: distinct copy for end-user magic links so the
+    consumer-facing surface reads like a consumer product, not the
+    operator's developer tool. Same 15-minute TTL + single-use rules.
+    """
+    text = (
+        "Sign in to your account\n\n"
+        "Tap the link below to sign in. It works once and expires in "
+        "15 minutes.\n\n"
+        f"{magic_url}\n\n"
+        "If you didn't request this, you can safely ignore this email."
+    )
+    html = f"""\
+<!doctype html>
+<html>
+  <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1f2937; padding: 24px;">
+    <h2 style="margin: 0 0 16px; font-weight: 600;">Sign in to your account</h2>
+    <p style="margin: 0 0 16px;">
+      Tap the button below to sign in. It works once and expires in
+      15 minutes.
+    </p>
+    <p style="margin: 0 0 24px;">
+      <a href="{magic_url}"
+         style="display: inline-block; padding: 10px 18px;
+                background: #6366f1; color: #ffffff; border-radius: 6px;
+                text-decoration: none; font-weight: 500;">
+        Sign in
+      </a>
+    </p>
+    <p style="margin: 0; color: #6b7280; font-size: 13px;">
+      Or paste this URL into your browser:<br>
+      <span style="font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all;">{magic_url}</span>
+    </p>
+    <p style="margin: 24px 0 0; color: #6b7280; font-size: 13px;">
+      If you didn't request this, you can safely ignore this email.
+    </p>
+  </body>
+</html>"""
+    return html, text
+
+
+def send_end_user_magic_link(
+    email: str, token: str, dashboard_url: str,
+) -> None:
+    """Phase 25.2: send an end-user magic-link email. Same live /
+    capture / REQUIRE_LIVE machinery as `send_magic_link` but with
+    consumer-friendly copy and the end-user landing-page URL.
+
+    `dashboard_url` is the base of the dashboard host
+    (`https://app.lightsei.com`); the token lands on
+    `/auth/end-user/magic-link?token=...` which the Phase 26.2
+    end-user consume page POSTs back to the backend.
+    """
+    magic_url = (
+        f"{dashboard_url.rstrip('/')}"
+        f"/auth/end-user/magic-link?token={token}"
+    )
+    html, text = _render_end_user_magic_link_body(magic_url)
+    payload = {
+        "from": _from_address(),
+        "to": [email],
+        "subject": "Sign in to your account",
+        "text": text,
+        "html": html,
+    }
+    _send(payload, email=email, magic_url=magic_url)
+
+
+def _send(
+    payload: dict[str, Any], *, email: str, magic_url: str,
+) -> None:
+    """Shared live-vs-capture dispatch for transactional emails.
+
+    Lifted out of `send_magic_link` in Phase 25.2 so the new end-user
+    send shares the FAKE_CAPTURE + REQUIRE_LIVE rules without duplicating
+    them. Captured rows preserve `_magic_url` for tests that simulate
+    the user clicking the link.
+    """
 
     if not _is_live():
         # FAKE_CAPTURE wins unconditionally: tests + local dev rely on
