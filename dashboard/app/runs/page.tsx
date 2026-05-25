@@ -1,8 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useEffect, useState } from "react";
 import { fetchRunSummaries, RunSummary, UnauthorizedError } from "../api";
 import EmptyState from "../EmptyState";
 
@@ -14,8 +14,26 @@ function fmtTime(iso: string): string {
   }
 }
 
+function triggerBadgeClass(kind: string): string {
+  return kind === "webhook"
+    ? "bg-sky-50 text-sky-700 ring-sky-600/20"
+    : "bg-violet-50 text-violet-700 ring-violet-600/20";
+}
+
 export default function RunsPage() {
+  // useSearchParams forces client-side bailout; Next requires it
+  // to live inside a Suspense boundary at build time.
+  return (
+    <Suspense fallback={<main className="px-8 py-10 text-gray-400 text-sm">loading…</main>}>
+      <RunsPageInner />
+    </Suspense>
+  );
+}
+
+function RunsPageInner() {
   const router = useRouter();
+  const params = useSearchParams();
+  const triggerId = params.get("trigger_id") || undefined;
   const [rows, setRows] = useState<RunSummary[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -24,7 +42,7 @@ export default function RunsPage() {
     let alive = true;
     const tick = async () => {
       try {
-        const data = await fetchRunSummaries();
+        const data = await fetchRunSummaries({ triggerId });
         if (!alive) return;
         setRows(data);
         setError(null);
@@ -45,7 +63,13 @@ export default function RunsPage() {
       alive = false;
       clearInterval(id);
     };
-  }, [router]);
+  }, [router, triggerId]);
+
+  // When a trigger filter is active, surface the trigger name from
+  // the first row (every row in the filtered set belongs to the same
+  // trigger) so the filter banner is human-readable.
+  const filterName =
+    triggerId && rows.length > 0 ? (rows[0].trigger_name ?? null) : null;
 
   return (
     <main className="px-8 py-10 max-w-6xl mx-auto">
@@ -58,6 +82,23 @@ export default function RunsPage() {
         </div>
         <span className="text-xs text-gray-400">refreshes every 2s</span>
       </div>
+
+      {triggerId && (
+        <div className="mb-6 flex items-center justify-between text-sm bg-indigo-50 ring-1 ring-indigo-200 text-indigo-900 rounded px-3 py-2">
+          <div>
+            Filtered to trigger:{" "}
+            <span className="font-medium">
+              {filterName ?? <span className="font-mono text-xs">{triggerId}</span>}
+            </span>
+          </div>
+          <Link
+            href="/runs"
+            className="text-indigo-700 hover:text-indigo-900 text-xs"
+          >
+            Clear filter
+          </Link>
+        </div>
+      )}
 
       {error && (
         <div className="mb-6 p-3 border border-red-200 bg-red-50 text-red-700 text-sm rounded-md">
@@ -120,6 +161,23 @@ export default function RunsPage() {
                     >
                       {r.agent_name}
                     </Link>
+                    {r.trigger_kind && (
+                      <div className="mt-1">
+                        <span
+                          className={
+                            "inline-block text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded ring-1 " +
+                            triggerBadgeClass(r.trigger_kind)
+                          }
+                          title={
+                            r.trigger_name
+                              ? `Triggered by ${r.trigger_kind}: ${r.trigger_name}`
+                              : `Triggered by ${r.trigger_kind} (trigger deleted)`
+                          }
+                        >
+                          {r.trigger_kind}
+                        </span>
+                      </div>
+                    )}
                   </td>
                   <td className="px-4 py-3 font-mono text-xs text-gray-600">
                     {r.model ?? "—"}

@@ -80,6 +80,11 @@ export type Run = {
   agent_name: string;
   started_at: string;
   ended_at: string | null;
+  // Phase 22.8: trigger link. Null on manual runs. `trigger_kind` is
+  // a snapshot so a deleted trigger still surfaces the badge.
+  triggered_by_trigger_id?: string | null;
+  trigger_kind?: string | null;
+  trigger_name?: string | null;
 };
 
 export type Event = {
@@ -109,8 +114,13 @@ export type RunSummary = Run & {
   denial?: Denial;
 };
 
-export async function fetchRuns(): Promise<Run[]> {
-  const r = await fetch(`${API_URL}/runs`, {
+export async function fetchRuns(
+  options?: { triggerId?: string },
+): Promise<Run[]> {
+  const qs = new URLSearchParams();
+  if (options?.triggerId) qs.set("trigger_id", options.triggerId);
+  const suffix = qs.toString() ? `?${qs.toString()}` : "";
+  const r = await fetch(`${API_URL}/runs${suffix}`, {
     cache: "no-store",
     headers: authHeaders(),
   });
@@ -175,8 +185,10 @@ export function summarize(run: Run, events: Event[]): RunSummary {
   };
 }
 
-export async function fetchRunSummaries(): Promise<RunSummary[]> {
-  const runs = await fetchRuns();
+export async function fetchRunSummaries(
+  options?: { triggerId?: string },
+): Promise<RunSummary[]> {
+  const runs = await fetchRuns(options);
   return Promise.all(
     runs.map(async (r) => {
       try {

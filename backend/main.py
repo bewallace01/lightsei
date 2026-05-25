@@ -820,16 +820,31 @@ def post_policy_check(
 @app.get("/runs")
 def get_runs(
     limit: int = 50,
+    trigger_id: Optional[str] = None,
     session: Session = Depends(get_session),
     workspace_id: str = Depends(get_workspace_id),
 ) -> dict[str, Any]:
+    """List runs for the workspace, newest first.
+
+    Phase 22.8 adds the `trigger_id` filter for the per-trigger
+    history view + a left-outer-joined `trigger_name` in each row
+    so the /runs page can render a "Triggered by: cron (name)"
+    badge without a follow-up fetch. The badge for runs whose
+    trigger has since been deleted falls back to the snapshotted
+    `trigger_kind` with no name.
+    """
     limit = max(1, min(limit, 500))
-    rows = session.execute(
-        select(Run)
+    q = (
+        select(Run, Trigger.name)
+        .outerjoin(Trigger, Run.triggered_by_trigger_id == Trigger.id)
         .where(Run.workspace_id == workspace_id)
         .order_by(desc(Run.started_at))
         .limit(limit)
-    ).scalars().all()
+    )
+    if trigger_id is not None:
+        q = q.where(Run.triggered_by_trigger_id == trigger_id)
+
+    rows = session.execute(q).all()
     return {
         "runs": [
             {
@@ -837,8 +852,11 @@ def get_runs(
                 "agent_name": r.agent_name,
                 "started_at": r.started_at.isoformat(),
                 "ended_at": r.ended_at.isoformat() if r.ended_at else None,
+                "triggered_by_trigger_id": r.triggered_by_trigger_id,
+                "trigger_kind": r.trigger_kind,
+                "trigger_name": trig_name,
             }
-            for r in rows
+            for r, trig_name in rows
         ]
     }
 
