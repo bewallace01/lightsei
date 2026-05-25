@@ -110,6 +110,37 @@ def is_valid_workspace_member_role(role: object) -> bool:
     return isinstance(role, str) and role in _VALID_WORKSPACE_MEMBER_ROLES
 
 
+# Phase 25.1: end-user auth providers. Magic link only in v1; Apple /
+# Google OAuth deferred to 25B. Distinct from `_VALID_AUTH_PROVIDERS`
+# (operator) because the two surfaces have different supported flows
+# and the 'apikey' value never applies to end users.
+_VALID_END_USER_AUTH_PROVIDERS: frozenset[str] = frozenset({"magic_link"})
+DEFAULT_END_USER_AUTH_PROVIDER = "magic_link"
+
+
+def is_valid_end_user_auth_provider(provider: object) -> bool:
+    return (
+        isinstance(provider, str)
+        and provider in _VALID_END_USER_AUTH_PROVIDERS
+    )
+
+
+# Phase 25.1: how an end user got linked to a vendor (workspace). v1
+# is invite-code only; 'direct_invite' (vendor types end-user email
+# and Lightsei mails the link) and 'public_discovery' park to 27B.
+_VALID_END_USER_VENDOR_LINK_VIA: frozenset[str] = frozenset(
+    {"invite_code", "direct_invite", "public_discovery"}
+)
+DEFAULT_END_USER_VENDOR_LINK_VIA = "invite_code"
+
+
+def is_valid_end_user_vendor_link_via(linked_via: object) -> bool:
+    return (
+        isinstance(linked_via, str)
+        and linked_via in _VALID_END_USER_VENDOR_LINK_VIA
+    )
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -1648,6 +1679,18 @@ class WidgetConversation(Base):
     anon_user_id: Mapped[Optional[str]] = mapped_column(
         String(64), nullable=True,
     )
+    # Phase 25.1: identified end-user pointer. NULL = anonymous
+    # (legacy / opt-out path; `anon_user_id` carries the identity).
+    # Non-NULL = the widget request authed as this end user; 25.4
+    # filters conversation queries by this column when set. SET NULL
+    # on end_user delete so the conversation history sticks around
+    # for the vendor's audit purposes even if the end user account
+    # is removed.
+    end_user_id: Mapped[Optional[str]] = mapped_column(
+        String,
+        ForeignKey("end_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False,
     )
@@ -1673,6 +1716,14 @@ class WidgetConversation(Base):
             "ix_widget_conversations_workspace_anon_user",
             "workspace_id", "anon_user_id",
             postgresql_where=text("anon_user_id IS NOT NULL"),
+        ),
+        # Phase 25.1: identified-end-user lookup. Same partial-index
+        # pattern as the anon-user lookup above; most v1 conversations
+        # are still anonymous, so the partial keeps the index small.
+        Index(
+            "ix_widget_conversations_workspace_end_user",
+            "workspace_id", "end_user_id",
+            postgresql_where=text("end_user_id IS NOT NULL"),
         ),
     )
 
@@ -1862,5 +1913,191 @@ class Trigger(Base):
             "webhook_token_hash",
             unique=True,
             postgresql_where=text("webhook_token_hash IS NOT NULL"),
+        ),
+    )
+
+
+class EndUser(Base):
+    """Phase 25.1: a person who buys from a Lightsei-using business.
+
+    Distinct from `User` (the operator entity). Operators configure
+    bots and view runs; end users chat with bots through `/c` (Phase
+    26) and the identified widget path (Phase 25.4). The two share
+    no rows: an operator who is also a customer of another vendor
+    on Lightsei would have one `User` row and one `EndUser` row,
+    keyed by separate emails or even the same email.
+
+    `auth_provider` is `magic_link` in v1; Apple / Google OAuth are
+    parked to 25B. `email_verified` flips to True after the magic
+    link round-trip; signups without a verified address are not
+    minted (the consume path verifies before insert).
+    """
+
+    __tablename__ = "end_users"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    display_name: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True,
+    )
+    email_verified: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        server_default=text("false"),
+        default=False,
+    )
+    auth_provider: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        server_default=text("'magic_link'"),
+        default=DEFAULT_END_USER_AUTH_PROVIDER,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+
+class EndUserSession(Base):
+    """Phase 25.1: bearer-token session for an end user.
+
+    Parallel to the operator `Session` table but keyed off `EndUser`.
+    Resolved by `backend/end_user_auth.py` (Phase 25.3); the token
+    plaintext is what the `/c` cookie + the identified widget bearer
+    header carry, the DB only ever sees the sha256 in `token_hash`.
+
+    CASCADE on end_user delete: when an end user account goes away
+    (25B self-service deletion or admin removal), every active
+    session goes with it.
+    """
+
+    __tablename__ = "end_user_sessions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    end_user_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("end_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    token_hash: Mapped[str] = mapped_column(
+        String, unique=True, nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+
+    __table_args__ = (
+        Index("ix_end_user_sessions_end_user", "end_user_id"),
+    )
+
+
+class EndUserVendorLink(Base):
+    """Phase 25.1: a "customer of" relationship between an end user
+    and a workspace (vendor).
+
+    Composite PK on (end_user_id, workspace_id) so the same end user
+    can be linked to many vendors and the same vendor can have many
+    linked end users. v1 only inserts via invite-code redemption
+    (25.2 + 27.2). `removed_at` is a soft-revoke pointer: past
+    conversations stay readable to the end user, but no new messages
+    can be sent on a removed link.
+
+    Both FKs CASCADE. Deleting the workspace removes the relationship
+    cleanly; deleting the end user removes all their subscriptions.
+    """
+
+    __tablename__ = "end_user_vendor_links"
+
+    end_user_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("end_users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    linked_via: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        server_default=text("'invite_code'"),
+        default=DEFAULT_END_USER_VENDOR_LINK_VIA,
+    )
+    linked_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+    removed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+
+    __table_args__ = (
+        # Per-workspace roster: "show me every end user linked to
+        # this vendor, oldest first." The PK already covers per-end-
+        # user lookup.
+        Index(
+            "ix_end_user_vendor_links_workspace",
+            "workspace_id", "linked_at",
+        ),
+    )
+
+
+class EndUserSigninToken(Base):
+    """Phase 25.1: single-use magic-link token for end-user signup
+    + signin.
+
+    Same shape as the operator `EmailSigninToken` from Phase 17: the
+    plaintext goes in the magic-link URL, the DB only stores the
+    sha256 hash, an audit-trail `consumed_at` marks use instead of
+    deletion.
+
+    The request side stores `email` (not `end_user_id`) because the
+    request path is also signup: at request time there is not
+    necessarily an `EndUser` row yet. The consume path either
+    matches an existing end_user by email or creates one in the
+    same transaction.
+
+    `vendor_invite_code` carries an optional invite code through
+    the email round-trip so the consume path can link the freshly-
+    minted end_user to a vendor without a second hop.
+    """
+
+    __tablename__ = "end_user_signin_tokens"
+
+    token_hash: Mapped[str] = mapped_column(String(128), primary_key=True)
+    email: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+    consumed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    vendor_invite_code: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True,
+    )
+
+    __table_args__ = (
+        # Rate-limit + active-token probe, same shape as the operator
+        # email_signin_tokens index.
+        Index(
+            "ix_end_user_signin_tokens_email_created",
+            "email", text("created_at DESC"),
         ),
     )

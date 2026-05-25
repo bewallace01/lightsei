@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 25 — 25.1 schema: end_users + end_user_sessions + end_user_vendor_links (alembic 0042) + magic-link auth table for end users. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 25 — 25.2 end-user magic-link auth flow (`POST /auth/end-user/magic-link/{request,consume}`), Resend email template, no-leak contract + rate limiting + vendor-invite-code carry-through, sign-up-via-magic-link find-or-create on consume. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,23 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 25.1: end-user identity schema (alembic 0042)
+
+Foundation for the Phase 25-29 consumer-facing arc. Four new tables + a new column on widget_conversations, all driven by a single alembic migration with no backfill (no pre-existing end-user data to convert).
+
+**What shipped**:
+
+- `backend/alembic/versions/20260525_0042_end_user_identity.py`: creates `end_users`, `end_user_sessions`, `end_user_vendor_links`, `end_user_signin_tokens`, adds `widget_conversations.end_user_id` (nullable FK with SET NULL on end_user delete so audit trails survive), and four indexes (per-end-user session lookup, per-workspace vendor-link roster, signin-token rate-limit scan, identified widget-conversation lookup as a partial index since most v1 conversations are still anonymous).
+- `backend/models.py`: `EndUser`, `EndUserSession`, `EndUserVendorLink`, `EndUserSigninToken` model classes plus extended `WidgetConversation.end_user_id` column. Two new validator helpers + frozensets + defaults: `is_valid_end_user_auth_provider` (`{"magic_link"}` for v1; Apple/Google parked to 25B) and `is_valid_end_user_vendor_link_via` (`{"invite_code", "direct_invite", "public_discovery"}` — only the first inserted in v1, the others reserved for 27B). Same dict-and-helper pattern as the existing trust-zone / plan-tier / widget-status vocabularies.
+- `backend/tests/test_end_user_schema.py`: 22 tests covering roundtrips for all four tables, email uniqueness on `end_users`, token_hash uniqueness on `end_user_sessions`, composite-PK rejection on duplicate vendor links, FK cascade on end_user delete for sessions/links/tokens, FK cascade on workspace delete for vendor links, SET NULL behavior on `widget_conversations.end_user_id` when the end_user is deleted, server-default coverage, index landings via `pg_indexes`, and the two validator helpers. All 22 pass against a fresh Postgres on first run; no regression on `test_workspace_members_schema.py` or `test_widget_schema.py`.
+
+**Spec deviations** (one):
+- `end_user_signin_tokens` uses `email` (not `end_user_id fk`) as its identity column. The Phase 25 spec listed both shapes contradictorily ("`token_hash pk, end_user_id fk, ...`" AND "same shape as operator `email_signin_tokens` from Phase 17"). Picked the operator-mirroring shape since magic-link doubles as signup: at request time there is not necessarily an `end_user` row yet, and forcing one to be inserted pre-verification would mint unverified accounts on every signup-attempt typo. Added `vendor_invite_code` column so the optional invite code carries through the email round-trip; 25.2's consume side reads it to insert the `end_user_vendor_links` row in the same transaction as the find-or-create.
+
+**Test counts**: backend 1249 → **1271** (+22).
+
+**What this enables**: 25.2 can now write the magic-link request + consume endpoints against a known schema; 25.4 can extend `widget_conversations` queries to filter on `end_user_id` for identified users.
 
 ### 2026-05-25 — Phase 24 code-complete: planner emits structured zone + capabilities
 
