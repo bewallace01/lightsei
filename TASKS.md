@@ -7,9 +7,9 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 23 complete 2026-05-25. NOW pointer is open. Three follow-ups filed (stale header chip after switch + planner zone/capability gap + global redirect-to-pick on NoActiveWorkspaceError).**
+> **Phase 24 — 24.1 add `capabilities` field + tighten `sensitivity_hint` instructions in the team-planner tool schema. Phase 24 spec locked 2026-05-25. Theme: planner emits structured zone + capability allow-list per bot, surfaces them as editable chips on the Proposed-team page, threads freeform constraints from the operator into the LLM prompt. Promoted from #219 after the JYNI test showed the planner reasons about zones in prose but doesn't emit them structured.**
 
-Phase 23 (multiple workspaces per account) complete: 10 sub-tasks shipped. Schema (alembic 0040 + 0041) added `workspace_members` join + `sessions.active_workspace_id` + `workspaces.updated_at`, backfilled every existing user with a member row + every existing session with the legacy workspace as its active pointer. Backend session-auth resolver now reads from the active pointer with a defensive membership check; api-key auth path unchanged. Five new CRUD endpoints (list / create / switch / patch / delete) + new dashboard surfaces: `WorkspaceSwitcher` mounted in the Header dropdown, dedicated `/workspace-settings` page, `/me/workspaces/pick` fallback for stale-active edge cases. JYNI test passed (workspace creation flow + clean isolation demoed end-to-end; team-from-readme planner output graded A+ for JYNI-specificity).
+Phase 23 (multiple workspaces per account) complete 2026-05-25: 10 sub-tasks shipped. Schema (alembic 0040 + 0041) added `workspace_members` join + `sessions.active_workspace_id` + `workspaces.updated_at`, backfilled every existing user with a member row + every existing session with the legacy workspace as its active pointer. Backend session-auth resolver now reads from the active pointer with a defensive membership check; api-key auth path unchanged. Five new CRUD endpoints (list / create / switch / patch / delete) + new dashboard surfaces: `WorkspaceSwitcher` mounted in the Header dropdown, dedicated `/workspace-settings` page, `/me/workspaces/pick` fallback for stale-active edge cases. JYNI test passed (workspace creation flow + clean isolation demoed end-to-end; team-from-readme planner output graded A+ for JYNI-specificity).
 
 Backend at **1238 passing** (+51 across Phase 23; started at 1187). SDK unchanged at **164**. Dashboard adds two new routes (`/workspace-settings`, `/me/workspaces/pick`) + the in-header `WorkspaceSwitcher`. Three known follow-ups: stale Header workspace chip after switch (#218), team-from-readme planner doesn't surface sensitivity_level + capabilities (#219), global redirect-to-pick on NoActiveWorkspaceError (#227).
 
@@ -1188,6 +1188,83 @@ Items deferred from 23 v1 that the design contemplated but didn't ship:
 - Soft-delete + restore for accidentally-deleted workspaces.
 - Account-level billing (one Stripe customer covers multiple workspaces; enterprise plans).
 - Workspace cloning / templating (create a new workspace pre-populated with the agents from another one).
+
+## Phase 24: Planner emits structured zone + capabilities
+
+Promoted from #219 on 2026-05-25 after the JYNI test surfaced the gap. The team-from-readme planner already reads zone + capability context cleanly (the JYNI plan included hermes saying "must never receive customer PII; upstream agents are responsible for keeping payloads to operational metadata only" — but that lived in prose, not in the bot's `sensitivity_level` + `capabilities` columns). Generated bots ship zone-unconfigured (server_default `internal` + empty caps list) and the operator has to either remember to apply the Compliance preset OR manually configure zones per-bot after deploy. Phase 16's wedge isn't enforced from team-from-readme output unless this gets wired in.
+
+The Phase 24 fix: planner emits zone + capability allow-list per bot as structured fields the dashboard renders + deploy carries through. Bailey can also nudge per-bot constraints via the existing freeform input ("the CRM bot is read-only by default; the operator picks per-bot whether it can write" → planner produces a `connector:jyni_crm:read` allow-list with a docstring hint).
+
+Rough shape (the three bullets that became the Phase 24 spec below):
+
+1. **Planner tool-schema + prompt update.** Add a required `capabilities` field per bot (array of strings from `KNOWN_CAPABILITIES` + the `connector:*` prefix family); tighten the `sensitivity_hint` instructions so the planner reasons about it as a structured assignment, not just prose context. Update the system prompt with the capability vocabulary + the "narrow allow-list" guidance + the "use freeform constraints" hint.
+2. **Dashboard surfaces structured fields.** The Proposed-team sidebar gains a Zone chip + a Capabilities list per bot, both editable inline. Operator can override the planner before clicking Generate code.
+3. **Generated code carries it through.** Per-bot deploy sets `sensitivity_level` + `capabilities` from the planner output instead of falling back to server defaults. The Compliance preset becomes an optional override, not a required first step.
+
+Demo: drop JYNI README + type "Add a CRM-bound bot that lives only in the JYNI CRM and is read-only by default. Add a web research bot with internet access that cannot touch the CRM." Plan a team. The proposed bots show structured Zone + Capabilities chips that reflect the constraint: the CRM bot has `connector:jyni_crm:read` only (no `internet`, no other connectors); the research bot has `internet` only (no `connector:jyni_crm`). Operator can tweak the chips before Generate code. Deploy. The agent rows on prod carry the structured zone + capabilities, so Phase 16's SDK gate enforces from the first invocation.
+
+### Design choices locked 2026-05-25
+
+- **`capabilities` is required on every planner-emitted bot, even if empty array.** The planner must consciously decide what each bot can do. An empty array means "operator-only — bot has no outbound powers yet"; the operator opens the agent detail page to grant capabilities after deploy. Reduces "I deployed but nothing works" surprises by making the absence explicit in the proposal step.
+- **Capability vocabulary comes from `backend/capabilities.py` `KNOWN_CAPABILITIES` + the `connector:*` prefix family.** Validated server-side in the planner output validator (same shape as `validate_capability_list`). Unknown capabilities = validation error + retry, not silent acceptance.
+- **Zone chips + capability lists are editable on the Proposed-team page.** Operator can override the planner's call (raise a bot from `internal` to `pii`, narrow an allow-list, etc.) before clicking Generate code. After deploy the existing agent-detail-page editors still work — this surface is the "first guess, easy to tweak" pre-deploy step.
+- **Freeform constraints route through the existing freeform input.** No new field. The planner prompt explicitly mentions: "If the operator wrote per-bot constraints in the freeform context, honor them. 'Bot X is read-only' → narrow capabilities; 'Bot Y has internet access' → include `internet`; 'Bot Z can only read the CRM' → empty `dispatches_to` + minimal capability set + matching zone."
+- **No new database columns.** Zones + capabilities already live on `agents.sensitivity_level` + `agents.capabilities` (Phase 16). Phase 24 wires the planner output into those existing columns at deploy time.
+- **No "lives only in X" denylist primitive.** The capability list IS the allow-list — if a capability isn't in the list, the SDK gate refuses. "Lives only in the CRM" is expressed as `capabilities: ['connector:jyni_crm:read']`. The planner just needs to be told to think in those narrow terms.
+
+### 24.1 — Planner tool-schema + system prompt
+
+Edit `backend/team_planner.py`:
+
+- Add `capabilities` (required, array of strings) to the per-bot schema. `description` lists the well-known shape (`KNOWN_CAPABILITIES` vocabulary + `connector:<name>` family) and the "narrow allow-list" guidance.
+- Tighten the `sensitivity_hint` description so the planner treats it as the authoritative zone assignment, not a hint the dashboard ignores.
+- Update `_TEAM_DESIGN_GUIDANCE` system prompt to:
+  - Add a capability vocabulary table (matches `KNOWN_CAPABILITIES`).
+  - Document the "freeform overrides README" rule for per-bot constraints.
+  - Add 2-3 worked examples (CRM-bound read-only bot, internet research bot, Slack-only messenger) so the LLM has a template.
+- Extend the validator (`validate_team`) to reject capability lists with unknown entries (call into `capabilities.validate_capability_list`) — surfaces planner mistakes loudly instead of letting them ship.
+
+### 24.2 — Dashboard Proposed-team page: zone chip + capability list per bot, editable
+
+Edit `dashboard/app/agents/team-from-readme/page.tsx`:
+
+- Per-bot sidebar grows two new sections: **Zone** (chip + dropdown to override; uses `SENSITIVITY_LEVELS` from existing api types) and **Capabilities** (editable list with add/remove + a typeahead against the workspace's `KNOWN_CAPABILITIES`).
+- Edits stay client-side until Generate code (existing flow). The eventual deploy POST carries the resolved values.
+- Empty capability list shows an explainer chip — "operator-only; grant capabilities to enable bot work." Prevents the "deployed but nothing works" surprise.
+
+### 24.3 — Per-bot generator + deploy: carry zone + capabilities through
+
+Edit `backend/agent_generator.py` + the deploy path (`/workspaces/me/agents/generate` or wherever the per-bot Agent row is inserted):
+
+- Read `sensitivity_hint` + `capabilities` from the planner output payload + write them onto `agents.sensitivity_level` + `agents.capabilities` at insert time.
+- Server-side validate both fields one more time (planner could in theory emit invalid values on a malformed retry).
+- Existing PATCH endpoints continue to allow post-deploy editing.
+
+### 24.4 — Tests
+
+- `backend/tests/test_team_planner.py`: capabilities required + validated against vocabulary; sensitivity_hint required + validated against the four-level ladder; planner output round-trips through the validator with realistic JYNI-shaped inputs.
+- `backend/tests/test_agent_generator.py` (or wherever the deploy path tests live): a planner payload with `sensitivity_hint: 'pii'` + `capabilities: ['connector:gmail']` results in an `Agent` row with those exact values, not the server defaults.
+- Dashboard: tsc + next build smoke. No new test framework on the dashboard for this surface.
+
+### 24.5 — JYNI re-test as the demo
+
+Re-run the JYNI test from Phase 23.10 with the freeform input set to the "CRM-bound read-only bot + web research bot" constraint. Verify:
+- The proposed team includes those two bots (in addition to whatever the planner picks from the README itself).
+- The CRM bot has `sensitivity_hint: 'sensitive'` or `'pii'` (CRM data) + a narrow capability list with no `internet`.
+- The web research bot has `sensitivity_hint: 'public'` + `internet` capability + no CRM access.
+- Zone chips + capability lists render correctly in the Proposed-team sidebar.
+- After Generate code + Deploy, the resulting Agent rows on prod have the structured fields set.
+
+No `examples/p24-demo/` since this phase is a planner-quality improvement, not a new product surface. The demo IS re-running JYNI with structured output.
+
+### Phase 24B (parked)
+
+Items the design considered but didn't ship:
+
+- Customer-facing capability config UI (logged-in end customer toggles per-capability switches on the chat widget — what Bailey's JYNI example asked for in the "customer chooses whether bot can make changes" line). Requires Phase 21B's signed-token identity as a prereq. Real surface; ~1 week.
+- Voice/meeting-room widget surface (the "meeting room" half of the JYNI example). Vapi or Daily.co integration; ~1-2 weeks.
+- Custom-app connector primitive ("JYNI is a Lightsei connector" adapter so bots can authenticate to JYNI's API with operator-configurable read vs write actions). Generalizes the connector pattern beyond Google. ~3-4 days.
+- Planner-side "narrow vs broad" capability templates the operator can prefer (Compliance, Builder, Research-only) before planning, so the LLM has a stronger prior.
 
 Phases 1-4 shipped 2026-04-25 (spine, cost-cap guardrail, Anthropic + streaming, hosted-readiness). Phase 5 shipped 2026-04-26 (PaaS-for-agents). Phase 6 shipped 2026-04-27 (Polaris orchestrator). Phase 7 shipped 2026-04-28 (output validation, advisory). Phase 8 shipped 2026-04-28 (blocking validators). Phase 9 shipped 2026-04-30 (notifications). Phase 10 shipped 2026-05-01 (GitHub integration: push-to-deploy + Polaris reads docs from the repo). Phase 11 starts the dispatch story: Polaris commands a team of executor agents instead of just emitting plans you read. Phase 11B turns the home page into a real command center while we're at it. Phase 12 is multi-provider so the team can pick the right model per task.
 
