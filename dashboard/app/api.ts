@@ -1569,8 +1569,50 @@ export type TeamMember = {
   command_kinds: string[];
   dispatches_to: string[];
   needs_workspace_secrets: string[];
+  // Phase 24.1: required per-bot capability allow-list emitted by the
+  // planner. Empty array = operator-only (bot has no outbound powers
+  // until granted). 24.3 wires this into the deploy path so the Agent
+  // row's capabilities column is populated from this value instead of
+  // the server default.
+  capabilities: string[];
   draft_description: string;
 };
+
+// Phase 24.2: client-side mirror of backend/capabilities.py's
+// KNOWN_CAPABILITIES vocabulary. Powers the MemberPanel's capability
+// editor typeahead. The connector:<name> prefix family is accepted at
+// the validator (isValidCapabilityFormat), even when the name isn't in
+// this list — same forward-compat shape the backend uses.
+export const KNOWN_CAPABILITIES: readonly string[] = [
+  "internet",
+  "send_command",
+  "slack:respond",
+  "widget:respond",
+  "widget:escalate",
+  // Connector-shaped capabilities the planner is likely to propose,
+  // surfaced as suggestions in the typeahead. Custom connector:<name>
+  // strings (e.g. connector:jyni_crm) also pass validation.
+  "connector:gmail",
+  "connector:google_calendar",
+  "connector:google_drive",
+];
+
+const _CONNECTOR_PREFIX = "connector:";
+const _MAX_CAPABILITY_LEN = 64;
+
+export function isValidCapabilityFormat(name: string): boolean {
+  if (!name || name.length > _MAX_CAPABILITY_LEN) return false;
+  if (KNOWN_CAPABILITIES.includes(name)) return true;
+  if (!name.startsWith(_CONNECTOR_PREFIX)) return false;
+  const suffix = name.slice(_CONNECTOR_PREFIX.length);
+  // Match the backend: non-empty, no leading/trailing whitespace,
+  // alphanumeric + dash + underscore only.
+  return (
+    suffix.length > 0
+    && suffix.trim() === suffix
+    && /^[A-Za-z0-9_-]+$/.test(suffix)
+  );
+}
 
 export type TeamPlan = {
   rationale: string;

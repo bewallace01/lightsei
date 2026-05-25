@@ -7,6 +7,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Agent,
   AgentGenerateOutput,
+  KNOWN_CAPABILITIES,
+  SENSITIVITY_LEVELS,
+  SensitivityHint,
   TeamMember,
   TeamMemberRole,
   TeamPlan,
@@ -17,6 +20,7 @@ import {
   fetchTeamPlan,
   fetchZonePresets,
   generateAgent,
+  isValidCapabilityFormat,
   patchAgent,
   patchAgentCapabilities,
   uploadDeploymentBundle,
@@ -264,6 +268,10 @@ export default function TeamFromReadmePage() {
       command_kinds: [],
       dispatches_to: [],
       needs_workspace_secrets: [],
+      // Phase 24.2: empty capability list = operator-only bot. The
+      // explainer chip in the panel tells the operator to grant
+      // capabilities before deploy.
+      capabilities: [],
       draft_description: `A new specialist named ${free.name}. Edit this description before generating.`,
     };
     setTeam((cur) => [...cur, nm]);
@@ -1044,6 +1052,125 @@ function TeamConstellation({
 
 // ---------- Member detail / edit panel ---------- //
 
+// Phase 24.2: editable capability allow-list. Chips with × to remove
+// + an add-row with a suggestion typeahead (known vocabulary first,
+// connector:<name> custom strings accepted). Empty list shows the
+// "operator-only" explainer so the operator notices and grants caps
+// before deploy.
+function CapabilitiesEditor({
+  capabilities,
+  onChange,
+}: {
+  capabilities: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const [draft, setDraft] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  const onAdd = () => {
+    const candidate = draft.trim();
+    if (!candidate) return;
+    if (capabilities.includes(candidate)) {
+      setError(`${candidate} is already in the list.`);
+      return;
+    }
+    if (!isValidCapabilityFormat(candidate)) {
+      setError(
+        `${candidate} isn't a known capability or a valid connector:<name>.`,
+      );
+      return;
+    }
+    onChange([...capabilities, candidate]);
+    setDraft("");
+    setError(null);
+  };
+
+  const onRemove = (cap: string) => {
+    onChange(capabilities.filter((c) => c !== cap));
+  };
+
+  // Suggestions for the typeahead: known vocab not already in the
+  // list, sorted with connector:* at the bottom so the most common
+  // top-level capabilities are first.
+  const suggestions = KNOWN_CAPABILITIES.filter(
+    (c) => !capabilities.includes(c),
+  );
+
+  return (
+    <div>
+      <label className="block text-[11px] uppercase tracking-wider text-gray-500 mb-1">
+        Capabilities (allow-list)
+      </label>
+      {capabilities.length === 0 ? (
+        <div className="text-[11px] text-amber-800 bg-amber-50 ring-1 ring-amber-200 rounded px-2 py-1.5 mb-2">
+          Operator-only — this bot has no outbound powers. Grant
+          capabilities below to enable bot work (or leave empty if
+          the operator should configure post-deploy).
+        </div>
+      ) : (
+        <div className="flex flex-wrap gap-1 mb-2">
+          {capabilities.map((c) => (
+            <span
+              key={c}
+              className="inline-flex items-center gap-1 font-mono text-[11px] bg-indigo-50 text-indigo-800 ring-1 ring-indigo-200 px-1.5 py-0.5 rounded"
+            >
+              {c}
+              <button
+                type="button"
+                onClick={() => onRemove(c)}
+                aria-label={`remove ${c}`}
+                className="text-indigo-500 hover:text-indigo-900 leading-none"
+              >
+                ×
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={draft}
+          list="cap-suggestions"
+          onChange={(e) => {
+            setDraft(e.target.value);
+            if (error) setError(null);
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              onAdd();
+            }
+          }}
+          placeholder="internet, connector:jyni_crm, …"
+          className="flex-1 font-mono text-xs border border-gray-300 rounded px-2 py-1"
+        />
+        <datalist id="cap-suggestions">
+          {suggestions.map((s) => (
+            <option key={s} value={s} />
+          ))}
+        </datalist>
+        <button
+          type="button"
+          onClick={onAdd}
+          disabled={!draft.trim()}
+          className="text-xs px-2 py-1 rounded bg-accent-600 text-white hover:bg-accent-700 disabled:opacity-50"
+        >
+          add
+        </button>
+      </div>
+      {error && (
+        <p className="text-[11px] text-red-600 mt-1">{error}</p>
+      )}
+      <p className="text-[11px] text-gray-500 mt-1">
+        Narrow lists are the wedge — list only what this bot needs.
+        Custom <code>connector:&lt;name&gt;</code> entries accepted.
+      </p>
+    </div>
+  );
+}
+
+
 function MemberPanel({
   member,
   reservedNames,
@@ -1158,6 +1285,44 @@ function MemberPanel({
           <option value="messenger">messenger</option>
         </select>
       </div>
+
+      {/* Phase 24.2: Zone editor */}
+      <div>
+        <label className="block text-[11px] uppercase tracking-wider text-gray-500 mb-1">
+          Zone (trust level)
+        </label>
+        <div className="flex items-center gap-2">
+          <SensitivityChip level={member.sensitivity_hint} />
+          <select
+            value={member.sensitivity_hint}
+            onChange={(e) =>
+              onUpdate(member.name, {
+                sensitivity_hint: e.target.value as SensitivityHint,
+              })
+            }
+            className="text-sm border border-gray-300 rounded px-2 py-1"
+          >
+            {SENSITIVITY_LEVELS.map((lvl) => (
+              <option key={lvl} value={lvl}>
+                {lvl}
+              </option>
+            ))}
+          </select>
+        </div>
+        <p className="text-[11px] text-gray-500 mt-1">
+          Stricter zones (sensitive / pii) lock outbound capabilities
+          by default. Operator picks the right level for what data
+          this bot touches.
+        </p>
+      </div>
+
+      {/* Phase 24.2: Capabilities editor */}
+      <CapabilitiesEditor
+        capabilities={member.capabilities}
+        onChange={(next) =>
+          onUpdate(member.name, { capabilities: next })
+        }
+      />
 
       {/* Summary */}
       <div>
