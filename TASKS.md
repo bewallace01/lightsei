@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 25 — 25.3 backend/end_user_auth.py with get_end_user dep that resolves an EndUserSession from a bearer token and returns the linked EndUser + linked workspaces. Distinct from backend/auth.py so the two token types never confuse signatures. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 25 — 25.4 widget endpoints accept end-user identity: extend POST /widget/{public_id}/messages + GET /widget/{public_id}/conversations/{id} to accept optional Authorization: Bearer <end_user_session_token>, scope widget_conversations.end_user_id when present + linked to workspace, fall back to anonymous behavior otherwise. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,26 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 25.3: end-user session auth resolver
+
+New `backend/end_user_auth.py` module paralleling `backend/auth.py`. Single dep `get_end_user(authorization, session)` for endpoints that accept end-user bearer tokens.
+
+**What shipped**:
+
+- `backend/end_user_auth.py`: `EndUserAuthResult` dataclass (end_user + session + linked_workspaces), `_parse_bearer` helper, `_resolve` core, `get_end_user` FastAPI dep. Resolution path: parse bearer → sha256 → look up `EndUserSession` → 401 on missing/revoked/expired → fetch `EndUser` → query active `EndUserVendorLink`s (filtered `removed_at IS NULL`) → return.
+- **Cross-token-type guard**: if the bearer hash doesn't resolve in `end_user_sessions` but DOES resolve in operator `sessions`, return a distinctive 401 detail ("operator session token not valid for end-user auth") so a misrouted dep surfaces in tests + logs rather than silently 401ing as "invalid session". End-user + operator session tokens share the `bks_` prefix + sha256 shape (both go through `keys.generate_session_token`), so the resolution table is the only thing keeping them apart.
+- `backend/tests/test_end_user_auth.py`: 9 tests. Happy path (token resolves to right end_user + session), active-only `linked_workspaces` (soft-revoked links excluded), missing-bearer 401, malformed-bearer 401 (Basic / empty / no-prefix), unknown-token 401, revoked-session 401, expired-session 401, cross-type operator-token 401, FastAPI dep signature smoke.
+
+**Spec deviations**: none. Spec said "valid token resolves, expired 401, revoked 401, token matching an operator session 401". Added unknown-token + malformed-bearer + missing-bearer + linked-workspaces-filter coverage on top.
+
+**Design notes**:
+- Kept `_parse_bearer` duplicated rather than imported from `backend/auth.py`. Keeps the two modules independent so a future refactor of one doesn't accidentally couple the other. 7-line function; the duplication cost is trivial.
+- Dropped a "dangling session whose end_user was deleted" test. FK CASCADE makes the state unreachable in practice; reproducing it would have required dropping + restoring a constraint mid-test (risky for parallel runs). The `if end_user is None` branch is correctness padding; covering the happy path is enough.
+
+**Test counts**: backend 1288 → **1297** (+9).
+
+**What this enables**: 25.4 can wire the widget endpoints to optionally accept end-user auth via this dep. 26.2 + 26.3 can build the `/c` route's session-cookie helpers against the same `EndUserSession` rows. 27.x uses `linked_workspaces` to scope multi-vendor visibility.
 
 ### 2026-05-25 — Phase 25.2: end-user magic-link auth flow
 
