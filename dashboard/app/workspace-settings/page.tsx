@@ -4,11 +4,12 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import {
-  deleteMyWorkspace,
-  listMyWorkspaces,
-  patchMyWorkspace,
   UnauthorizedError,
   WorkspaceMembership,
+  deleteMyWorkspace,
+  handleAuthError,
+  listMyWorkspaces,
+  patchMyWorkspace,
 } from "../api";
 
 export default function WorkspaceSettingsPage() {
@@ -33,10 +34,7 @@ export default function WorkspaceSettingsPage() {
       setActive(a);
       if (a) setNameDraft(a.name);
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError((e as Error).message);
     }
   }

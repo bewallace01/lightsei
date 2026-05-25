@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Event, fetchRunEvents, Run, UnauthorizedError } from "../../api";
+import { Event, Run, UnauthorizedError, fetchRunEvents, handleAuthError } from "../../api";
 
 function fmtTime(iso: string): string {
   try {
@@ -105,10 +105,7 @@ export default function RunDetail({ params }: { params: { id: string } }) {
         setError(null);
       } catch (e) {
         if (!alive) return;
-        if (e instanceof UnauthorizedError) {
-          router.replace("/login");
-          return;
-        }
+        if (handleAuthError(e, router)) return;
         setError(String(e));
       } finally {
         if (alive) setLoading(false);

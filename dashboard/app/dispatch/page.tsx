@@ -16,6 +16,7 @@ import {
   fetchAutoApprovalRules,
   fetchDispatchChain,
   fetchDispatchChains,
+  handleAuthError,
   rejectCommand,
   upsertAutoApprovalRule,
 } from "../api";
@@ -83,10 +84,7 @@ export default function DispatchPage() {
       setChains(data);
       setError(null);
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError(String(e));
     } finally {
       setLoading(false);

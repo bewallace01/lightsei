@@ -12,6 +12,7 @@ import {
   deleteNotificationChannel,
   fetchNotificationChannels,
   fetchNotificationDeliveries,
+  handleAuthError,
   patchNotificationChannel,
   testNotificationChannel,
 } from "../api";
@@ -670,10 +671,7 @@ export default function NotificationsPage() {
       setChannels(list);
       setError(null);
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError(String(e));
     } finally {
       setLoading(false);

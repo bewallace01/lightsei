@@ -4,13 +4,14 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  fetchEventValidations,
-  fetchPolarisPlans,
   PolarisPlan,
   PolarisValidation,
   PolarisViolation,
   UnauthorizedError,
   ValidationStatus,
+  fetchEventValidations,
+  fetchPolarisPlans,
+  handleAuthError,
   worstValidationStatus,
 } from "../api";
 import PolarisCostAnalysisPanel from "../PolarisCostAnalysisPanel";
@@ -530,10 +531,7 @@ export default function PolarisPage() {
         setError(null);
       } catch (e) {
         if (!alive) return;
-        if (e instanceof UnauthorizedError) {
-          router.replace("/login");
-          return;
-        }
+        if (handleAuthError(e, router)) return;
         setError(String(e));
       } finally {
         if (alive) setLoading(false);
@@ -577,7 +575,7 @@ export default function PolarisPage() {
         });
       })
       .catch((e) => {
-        if (e instanceof UnauthorizedError) router.replace("/login");
+        handleAuthError(e, router);
         // Other errors: leave summaries showing, no detail panel; the
         // chip on the sidebar still tells the user something failed.
       })

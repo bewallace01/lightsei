@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
-import { fetchRunSummaries, RunSummary, UnauthorizedError } from "../api";
+import { RunSummary, UnauthorizedError, fetchRunSummaries, handleAuthError } from "../api";
 import EmptyState from "../EmptyState";
 
 function fmtTime(iso: string): string {
@@ -48,10 +48,7 @@ function RunsPageInner() {
         setError(null);
       } catch (e) {
         if (!alive) return;
-        if (e instanceof UnauthorizedError) {
-          router.replace("/login");
-          return;
-        }
+        if (handleAuthError(e, router)) return;
         setError(String(e));
       } finally {
         if (alive) setLoading(false);

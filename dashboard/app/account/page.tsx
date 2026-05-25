@@ -6,6 +6,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ApiKeySummary,
   BillingNotConfiguredError,
+  SessionSummary,
+  SessionUser,
+  SessionWorkspace,
+  UnauthorizedError,
+  WorkspaceMembership,
+  WorkspaceSecretMeta,
   createApiKey,
   createBillingCheckout,
   createBillingPortal,
@@ -16,19 +22,14 @@ import {
   fetchWorkspace,
   getStoredUser,
   getStoredWorkspace,
+  handleAuthError,
   listMyWorkspaces,
   renameWorkspace,
   revokeApiKey,
   revokeSession,
-  SessionSummary,
-  SessionUser,
-  SessionWorkspace,
   setSecret,
   setSession,
   switchMyWorkspace,
-  UnauthorizedError,
-  WorkspaceMembership,
-  WorkspaceSecretMeta,
 } from "../api";
 import {
   SUGGESTED_SECRET_ORDER,
@@ -97,10 +98,7 @@ export default function AccountPage() {
       setMemberships(wsList);
       setError(null);
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError(String(e));
     }
   };

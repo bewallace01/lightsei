@@ -18,6 +18,7 @@ import {
   UnauthorizedError,
   fetchSlackChannels,
   fetchSlackWorkspaces,
+  handleAuthError,
   patchSlackChannel,
   revokeSlackWorkspace,
   startSlackOAuth,
@@ -54,10 +55,7 @@ export default function SlackIntegrationPage(): JSX.Element {
       setChannels(chList);
       setError(null);
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError(String(e));
     }
   };

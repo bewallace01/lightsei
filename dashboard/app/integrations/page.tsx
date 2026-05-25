@@ -24,6 +24,7 @@ import {
   disconnectConnector,
   fetchConnectors,
   fetchSlackWorkspaces,
+  handleAuthError,
   revokeSlackWorkspace,
   startConnectorOAuth,
   startSlackOAuth,
@@ -84,10 +85,7 @@ function IntegrationsIndexInner(): JSX.Element {
       setSlackWorkspaces(ws);
       setError(null);
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError(e instanceof Error ? e.message : String(e));
     }
   };
@@ -113,10 +111,7 @@ function IntegrationsIndexInner(): JSX.Element {
       });
       window.location.href = authorization_url;
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setBusy(null);
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -129,10 +124,7 @@ function IntegrationsIndexInner(): JSX.Element {
       const { authorization_url } = await startSlackOAuth();
       window.location.href = authorization_url;
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setBusy(null);
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -149,10 +141,7 @@ function IntegrationsIndexInner(): JSX.Element {
       setFlash(`Disconnected ${connectorType}.`);
       await loadAll();
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);
@@ -168,10 +157,7 @@ function IntegrationsIndexInner(): JSX.Element {
       setFlash(`Disconnected Slack workspace ${teamName}.`);
       await loadAll();
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setBusy(null);

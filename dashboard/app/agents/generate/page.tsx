@@ -10,6 +10,7 @@ import {
   UnauthorizedError,
   fetchAgents,
   generateAgent,
+  handleAuthError,
   patchAgent,
   uploadDeploymentBundle,
 } from "../../api";
@@ -50,7 +51,7 @@ export default function GenerateAgentPage() {
         if (alive) setAgents(a);
       })
       .catch((e) => {
-        if (e instanceof UnauthorizedError) router.replace("/login");
+        handleAuthError(e, router);
       });
     return () => {
       alive = false;
@@ -80,10 +81,7 @@ export default function GenerateAgentPage() {
       });
       setOutput(result);
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError(String(e instanceof Error ? e.message : e));
     } finally {
       setGenerating(false);
@@ -106,10 +104,7 @@ export default function GenerateAgentPage() {
       setOutput(result);
       setTweakRequest("");
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError(String(e instanceof Error ? e.message : e));
     } finally {
       setGenerating(false);
@@ -143,10 +138,7 @@ export default function GenerateAgentPage() {
       }
       router.push(`/deployments/${dep.id}`);
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError(String(e instanceof Error ? e.message : e));
       setDeploying(false);
     }

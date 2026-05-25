@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
 import {
   UnauthorizedError,
+  handleAuthError,
   uploadDeploymentBundle,
 } from "../../api";
 
@@ -64,10 +65,7 @@ export default function NewAgentDeployPage() {
       // logs streaming in real time.
       router.push(`/deployments/${dep.id}`);
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError(String(e instanceof Error ? e.message : e));
       setUploading(false);
     }

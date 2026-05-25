@@ -25,6 +25,7 @@ import {
   UnauthorizedError,
   WidgetSettings,
   fetchWidgetSettings,
+  handleAuthError,
   patchWidgetSettings,
 } from "../api";
 import { SensitivityChip } from "../sensitivity";
@@ -57,10 +58,7 @@ export default function WidgetSettingsPage(): JSX.Element {
       setOriginsText((s.allowed_widget_origins || []).join("\n"));
       setError(null);
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
@@ -91,10 +89,7 @@ export default function WidgetSettingsPage(): JSX.Element {
           : "Cleared the customer-facing bot.",
       );
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setSavingBot(false);
@@ -117,10 +112,7 @@ export default function WidgetSettingsPage(): JSX.Element {
       setOriginsText((next.allowed_widget_origins || []).join("\n"));
       flashTimeout("Origins saved.");
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       // 422 with per-entry error list surfaces as inline annotations.
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.includes("invalid_widget_origins")) {

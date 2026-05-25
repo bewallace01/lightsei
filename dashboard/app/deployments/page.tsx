@@ -7,6 +7,7 @@ import {
   Deployment,
   UnauthorizedError,
   fetchDeployments,
+  handleAuthError,
 } from "../api";
 
 function fmtRelative(iso: string | null): string {
@@ -50,10 +51,7 @@ export default function DeploymentsPage() {
         setError(null);
       } catch (e) {
         if (!alive) return;
-        if (e instanceof UnauthorizedError) {
-          router.replace("/login");
-          return;
-        }
+        if (handleAuthError(e, router)) return;
         setError(String(e));
       } finally {
         if (alive) setLoading(false);

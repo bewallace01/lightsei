@@ -29,6 +29,30 @@ export class NoActiveWorkspaceError extends UnauthorizedError {
   }
 }
 
+// Phase 23.x (#227): shared auth-error router so every page's catch
+// block routes the same way without re-implementing the
+// NoActiveWorkspaceError-before-UnauthorizedError check. Returns
+// true if it handled the error (caller should bail out); false
+// otherwise so the caller can fall through to whatever else it
+// does (setError, log, etc).
+//
+// Accepts a structurally-typed `router` (just needs .replace) so
+// api.ts stays free of next/navigation imports.
+export function handleAuthError(
+  e: unknown,
+  router: { replace: (path: string) => void },
+): boolean {
+  if (e instanceof NoActiveWorkspaceError) {
+    router.replace("/me/workspaces/pick");
+    return true;
+  }
+  if (e instanceof UnauthorizedError) {
+    router.replace("/login");
+    return true;
+  }
+  return false;
+}
+
 // Detail strings the backend's auth.py (Phase 23.2) returns when the
 // session is valid but the workspace context isn't. Keep these in
 // sync with the backend's literal HTTPException details.

@@ -15,6 +15,7 @@ import {
   fetchAgents,
   fetchDeployments,
   fetchGitHubIntegration,
+  handleAuthError,
   listGitHubAgentPaths,
   putGitHubAgentPath,
   putGitHubIntegration,
@@ -637,10 +638,7 @@ export default function GitHubPage() {
         setPaths([]);
       }
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.push("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError(String(e));
     } finally {
       setLoading(false);

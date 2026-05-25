@@ -4,12 +4,13 @@ import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
 import {
-  createMyWorkspace,
-  listMyWorkspaces,
   NoActiveWorkspaceError,
-  switchMyWorkspace,
   UnauthorizedError,
   WorkspaceMembership,
+  createMyWorkspace,
+  handleAuthError,
+  listMyWorkspaces,
+  switchMyWorkspace,
 } from "../../../api";
 
 /**
@@ -55,10 +56,7 @@ export default function PickWorkspacePage() {
           router.replace("/login");
           return;
         }
-        if (e instanceof UnauthorizedError) {
-          router.replace("/login");
-          return;
-        }
+        if (handleAuthError(e, router)) return;
         if (alive) setError((e as Error).message);
       }
     })();

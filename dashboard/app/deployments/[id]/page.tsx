@@ -6,11 +6,12 @@ import { useEffect, useRef, useState } from "react";
 import {
   Deployment,
   DeploymentLogLine,
+  UnauthorizedError,
   fetchDeployment,
   fetchDeploymentLogs,
+  handleAuthError,
   redeployDeployment,
   stopDeployment,
-  UnauthorizedError,
 } from "../../api";
 
 function fmt(iso: string | null): string {
@@ -87,10 +88,7 @@ export default function DeploymentDetailPage({
         setError(null);
       } catch (e) {
         if (cancelled) return;
-        if (e instanceof UnauthorizedError) {
-          router.replace("/login");
-          return;
-        }
+        if (handleAuthError(e, router)) return;
         setError(String(e));
       }
     };

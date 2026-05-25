@@ -23,6 +23,7 @@ import {
   SensitivityLevel,
   UnauthorizedError,
   fetchAgents,
+  handleAuthError,
 } from "../api";
 import EmptyState from "../EmptyState";
 import HelpTip from "../HelpTip";
@@ -59,10 +60,7 @@ export default function ZonesPage(): JSX.Element {
           })),
         );
       } catch (e) {
-        if (e instanceof UnauthorizedError) {
-          router.replace("/login");
-          return;
-        }
+        if (handleAuthError(e, router)) return;
         if (alive) setError(String(e instanceof Error ? e.message : e));
       }
     };

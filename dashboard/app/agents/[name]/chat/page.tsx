@@ -4,14 +4,15 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 import {
-  createThread,
-  deleteThread,
-  getThread,
-  listThreads,
-  postThreadMessage,
   Thread,
   ThreadMessage,
   UnauthorizedError,
+  createThread,
+  deleteThread,
+  getThread,
+  handleAuthError,
+  listThreads,
+  postThreadMessage,
 } from "../../../api";
 
 function fmtTime(iso: string): string {
@@ -56,10 +57,7 @@ export default function ChatPage({ params }: { params: { name: string } }) {
       }
       setError(null);
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError(String(e));
     }
   };
@@ -71,10 +69,7 @@ export default function ChatPage({ params }: { params: { name: string } }) {
       const data = await getThread(activeThreadId);
       setMessages(data.messages);
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError(String(e));
     }
   };

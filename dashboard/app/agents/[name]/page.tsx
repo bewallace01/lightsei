@@ -10,11 +10,12 @@ import {
   AgentManifest,
   AgentProvider,
   AgentQuality,
-  cancelCommand,
   Command,
   Deployment,
   SENSITIVITY_LEVELS,
   SensitivityLevel,
+  UnauthorizedError,
+  cancelCommand,
   enqueueCommand,
   fetchAgent,
   fetchAgentInstances,
@@ -22,11 +23,11 @@ import {
   fetchAgentQuality,
   fetchCommands,
   fetchDeployments,
+  handleAuthError,
   patchAgent,
   patchAgentCapabilities,
   redeployDeployment,
   stopDeployment,
-  UnauthorizedError,
 } from "../../api";
 import { SensitivityChip } from "../../sensitivity";
 import TriggersPanel from "./TriggersPanel";
@@ -99,10 +100,7 @@ export default function AgentPage({ params }: { params: { name: string } }) {
       }
       setError(null);
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError(String(e));
     }
   };

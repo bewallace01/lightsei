@@ -16,6 +16,7 @@ import {
   fetchAgents,
   fetchConstellation,
   fetchWorkspaceQuality,
+  handleAuthError,
   patchAgent,
 } from "../api";
 import EmptyState from "../EmptyState";
@@ -238,10 +239,7 @@ export default function AgentsPage() {
       setRows(all);
       setError(null);
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError(String(e));
     } finally {
       setLoading(false);

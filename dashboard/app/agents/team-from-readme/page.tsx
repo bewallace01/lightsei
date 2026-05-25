@@ -20,6 +20,7 @@ import {
   fetchTeamPlan,
   fetchZonePresets,
   generateAgent,
+  handleAuthError,
   isValidCapabilityFormat,
   patchAgent,
   patchAgentCapabilities,
@@ -180,7 +181,7 @@ export default function TeamFromReadmePage() {
         );
       })
       .catch((e) => {
-        if (e instanceof UnauthorizedError) router.replace("/login");
+        handleAuthError(e, router);
       });
     return () => {
       alive = false;
@@ -210,10 +211,7 @@ export default function TeamFromReadmePage() {
       setTeam(got.team);
       setSelectedName(got.team[0]?.name ?? null);
     } catch (e) {
-      if (e instanceof UnauthorizedError) {
-        router.replace("/login");
-        return;
-      }
+      if (handleAuthError(e, router)) return;
       setError(String(e instanceof Error ? e.message : e));
     } finally {
       setSubmitting(false);
@@ -533,10 +531,7 @@ export default function TeamFromReadmePage() {
             }).catch(() => undefined);
           }
         } catch (e) {
-          if (e instanceof UnauthorizedError) {
-            router.replace("/login");
-            return;
-          }
+          if (handleAuthError(e, router)) return;
           setDeployResults((cur) => ({
             ...cur,
             [m.name]: {

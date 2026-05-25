@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { fetchRunSummaries, RunSummary, UnauthorizedError } from "./api";
+import { RunSummary, UnauthorizedError, fetchRunSummaries, handleAuthError } from "./api";
 import Constellation from "./Constellation";
 import CostPanel from "./CostPanel";
 import EmptyState from "./EmptyState";
@@ -35,10 +35,7 @@ export default function Home() {
         setError(null);
       } catch (e) {
         if (!alive) return;
-        if (e instanceof UnauthorizedError) {
-          router.replace("/login");
-          return;
-        }
+        if (handleAuthError(e, router)) return;
         setError(String(e));
       } finally {
         if (alive) setLoading(false);
