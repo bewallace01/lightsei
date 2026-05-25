@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 25 — 25.6 cross-vendor isolation tests: the load-bearing security test for Phase 25. End user Alice linked to vendor A AND vendor B with conversations on both. Verify Alice's session resolves only her vendor-A conversations on vendor A's widget and only her vendor-B conversations on vendor B's widget. Vendor A's PII bot cannot read vendor B's data. Vendor A operator cannot see Alice's vendor-B threads from the inbox even though it's the same end_user_id. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 25 — 25.7 tests + sweep + memory. Backend pytest full sweep. SDK pytest full sweep. Dashboard tsc + next build (no UI surface yet in 25; the `/c` placeholder is one route in Phase 26). Save a memory documenting the end-user-vs-operator split. After 25.7 the Phase 25 demo runs and the phase closes. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,33 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 25.6: cross-vendor isolation security suite
+
+The load-bearing security test for Phase 25. End user Alice linked to vendor A AND vendor B with conversations on both. 13 tests pin every cross-vendor leak path closed.
+
+**What shipped**:
+
+- `backend/tests/test_cross_vendor_isolation.py`: 13 tests, one shared `scenario` fixture that spins up two real vendor workspaces (each with its own operator signing up via `/auth/signup` to get a real session token + WorkspaceMember row), wires a widget public_id + customer-facing bot for each, creates Alice as an EndUser linked to BOTH workspaces, and starts a conversation on each vendor's widget using Alice's bearer.
+
+**Test coverage** (mapped to the 4 spec bullets):
+
+1. **Widget endpoint scoping** (5 tests): Alice's GET on vendor A's public_id with vendor A's conv_id = 200 (sanity), Alice 404s on vendor A's public_id with vendor B's conv_id (and vice versa), Alice can't POST to vendor B's conv via vendor A's public_id, conversations are confirmed as separate `WidgetConversation` rows with same `end_user_id` but different `workspace_id`.
+2. **Operator inbox scoping** (5 tests): Operator A's `/workspaces/me/inbox` lists conv_a only (not conv_b); Operator B's lists conv_b only (not conv_a); Operator A hitting Alice's conv_b via thread-view returns 404; same for take-over endpoint; same for resolve endpoint. The `workspace_id` boundary on `widget_conversations` is the gate.
+3. **Orchestrator payload scoping** (2 tests): drive `run_widget_chat_job` for vendor A's conversation, assert the command payload's `conversation_history` contains vendor-A's messages only (no vendor-B bleed), command bound to vendor A's workspace + vega bot, `end_user.sensitivity_hint='pii'` (matches vega's zone). Mirror test for vendor B: `sensitivity_hint='public'` (matches atlas's zone) so the SDK email-redaction kicks in correctly per zone.
+4. **Cross-vendor message-table isolation** (1 test): Alice posts a follow-up on vendor A's conv, assert it lands ONLY in vendor A's message rows; vendor B's message table is unchanged.
+
+**Spec deviations**: none. Spec called for 4 isolation guarantees; all 4 are covered with multiple tests each. Added the "atlas in public zone gets `sensitivity_hint='public'` on the payload" test on top to lock in the cross-zone wire contract that 25.5's SDK redaction depends on.
+
+**Design notes**:
+
+- Scenario fixture uses real operator signup (`signup()` helper) rather than direct DB inserts, so the WorkspaceMember + Session rows are populated through the real code path. Catches any future regression in `_create_session` or membership wiring that DB-only fixtures would miss.
+- All 13 tests reuse the single `scenario` fixture. Each test exercises ONE leak path so a failure pinpoints the exact broken surface.
+- The orchestrator-payload tests drive `run_widget_chat_job` directly (not through the jobs runner thread) to avoid the documented `feedback_jobs_runner_test_race` pattern from memory. Synchronous + deterministic.
+
+**Test counts**: backend 1310 → **1323** (+13). 198 tests across widget + 25.x + magic-link all green with no regressions.
+
+**What this enables**: Phase 25.7 can run the full sweep + close Phase 25. 26.x consumer chat surface, 27.x cross-vendor subscriptions, 28.x push notifications all depend on the isolation guarantee being load-bearing rather than incidental. If anything in 25.6 starts failing, halt Phase 26+ until it's fixed.
 
 ### 2026-05-25 — Phase 25.5: SDK lightsei.end_user accessor + PII-zone redaction
 
