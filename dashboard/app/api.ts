@@ -2241,3 +2241,64 @@ export async function previewSchedule(
   })) as { next_runs: string[] };
   return body.next_runs;
 }
+
+// ---------- Phase 23.3-23.5: multi-workspace helpers ---------- //
+
+export type WorkspaceMembership = {
+  id: string;
+  name: string;
+  role: "owner" | "member";
+  joined_at: string;
+  is_active: boolean;
+  plan_tier: string;
+  created_at: string;
+};
+
+export async function listMyWorkspaces(): Promise<WorkspaceMembership[]> {
+  const body = (await authedJson(`/me/workspaces`)) as {
+    workspaces: WorkspaceMembership[];
+  };
+  return body.workspaces;
+}
+
+export async function createMyWorkspace(
+  name: string,
+): Promise<WorkspaceMembership> {
+  return (await authedJson(`/me/workspaces`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ name }),
+  })) as WorkspaceMembership;
+}
+
+export async function switchMyWorkspace(
+  workspaceId: string,
+): Promise<WorkspaceMembership> {
+  return (await authedJson(
+    `/me/workspaces/${encodeURIComponent(workspaceId)}/switch`,
+    { method: "POST" },
+  )) as WorkspaceMembership;
+}
+
+export async function patchMyWorkspace(
+  workspaceId: string,
+  patch: { name?: string },
+): Promise<WorkspaceMembership> {
+  return (await authedJson(
+    `/me/workspaces/${encodeURIComponent(workspaceId)}`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  )) as WorkspaceMembership;
+}
+
+export async function deleteMyWorkspace(
+  workspaceId: string,
+): Promise<{ deleted: boolean; workspace_id: string; switched_to: string | null }> {
+  return (await authedJson(
+    `/me/workspaces/${encodeURIComponent(workspaceId)}`,
+    { method: "DELETE" },
+  )) as { deleted: boolean; workspace_id: string; switched_to: string | null };
+}

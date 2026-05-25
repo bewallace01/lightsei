@@ -12,6 +12,7 @@ import {
   SessionWorkspace,
 } from "./api";
 import Logo from "./Logo";
+import WorkspaceSwitcher from "./WorkspaceSwitcher";
 
 // Top-level nav items. Either a single `href` link or a `children` dropdown
 // group. Order matters — left-to-right rendering.
@@ -428,7 +429,9 @@ export default function Header() {
                       {user.email}
                     </div>
                   </div>
-                  <div className="py-1">
+                  {/* Phase 23.4: list + switch + create workspaces. */}
+                  <WorkspaceSwitcher onClose={() => setMenuOpen(false)} />
+                  <div className="py-1 border-t border-gray-100">
                     <Link
                       href="/account"
                       role="menuitem"
