@@ -501,28 +501,36 @@ export default function TeamFromReadmePage() {
               () => undefined,
             );
           }
-          // Phase 16.7 + P16.x: apply the user-selected trust-zone
-          // preset. Prefers the planner's sensitivity_hint when the
-          // preset has a hint-aware mapping (Compliance), so a research
-          // bot tagged 'public' gets internet even when the planner
-          // labeled it role='specialist'. Falls back to role-based
-          // mapping otherwise (Open / Standard, or older planner
-          // outputs without a hint). Best-effort — a 4xx here shouldn't
-          // roll back the deploy.
+          // Phase 24.3: the planner's structured values are the
+          // authoritative source for the bot's zone + capability
+          // allow-list — both editable in the Proposed-team sidebar
+          // (24.2) before reaching this step. Send them directly via
+          // the existing PATCH endpoints so the freshly-created Agent
+          // row carries the right config from the first invocation.
+          // Best-effort: a 4xx here shouldn't roll back the deploy
+          // (the bot is up; operator can fix via /agents/{name}).
+          patchAgent(m.name, {
+            sensitivity_level: m.sensitivity_hint,
+          }).catch(() => undefined);
+          patchAgentCapabilities(m.name, m.capabilities).catch(
+            () => undefined,
+          );
+          // The trust-zone preset still contributes
+          // dispatches_cross_zone (whether this bot is permitted to
+          // dispatch across zones), since that's not a planner-emitted
+          // field. Hint-aware presets like Compliance still win for
+          // that knob.
           const preset = zonePresets.find((p) => p.name === selectedPreset);
           const hintCfg = m.sensitivity_hint
             ? preset?.by_hint?.[m.sensitivity_hint]
             : undefined;
-          const roleCfg = preset?.by_role[m.role] ?? preset?.by_role["specialist"];
+          const roleCfg =
+            preset?.by_role[m.role] ?? preset?.by_role["specialist"];
           const cfg = hintCfg ?? roleCfg;
-          if (cfg) {
+          if (cfg && cfg.dispatches_cross_zone !== undefined) {
             patchAgent(m.name, {
-              sensitivity_level: cfg.sensitivity_level,
               dispatches_cross_zone: cfg.dispatches_cross_zone,
             }).catch(() => undefined);
-            patchAgentCapabilities(m.name, cfg.capabilities).catch(
-              () => undefined,
-            );
           }
         } catch (e) {
           if (e instanceof UnauthorizedError) {
