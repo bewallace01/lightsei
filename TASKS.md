@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 26 — 26.6 tests + tsc + next build smoke (last sub-task of Phase 26). Backend tests for vendor-slug endpoint (already shipped in 26.1, run as part of sweep). Dashboard tsc + next build. Live smoke: install the PWA on a real iPhone, open it, verify a conversation works end-to-end. After 26.6 the Phase 26 demo runs and the phase closes. Phase 25 closed; 26.1 (vendor_slug), 26.2 (functional /c MVP), 26.3 (helpers refactor), 26.4 (PWA manifest + service worker + /c chrome), 26.5 (install prompt) shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 26 close gate — iPhone install verification on Bailey's phone. Phase 26 is code-complete: 1380 backend tests pass, 175 SDK tests pass, dashboard tsc + next build clean, all 13 automated demo steps pass (vendor signup, slug claim, magic-link, /c data flow, conversation post + poll, PWA assets present). Pending: open /c in Safari on iPhone, "Add to Home Screen", verify full-screen launch + persistent conversation per the checklist printed at the end of `python3 backend/scripts/phase_26_demo.py`. On PASS: Phase 26 closes + NOW advances to 27.1. On FAIL: a "Fix Phase 26 install: <issue>" sub-task gets spawned. Phase 25 closed 2026-05-25; 26.1-26.5 shipped same-day. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,44 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 26.6 + Phase 26 code-complete (install verification pending Bailey)
+
+All 6 sub-tasks shipped same-day. Backend + SDK sweeps clean. Dashboard tsc + next build clean. 13-step scripted demo green end-to-end. Physical iPhone install is the one verification gate I can't run myself — left as `Phase 26 close gate` task #288 for Bailey.
+
+**What shipped across Phase 26**:
+
+- **26.1**: alembic 0043 + `workspaces.vendor_slug` (varchar(32) unique nullable) + `is_valid_vendor_slug` regex + `POST /workspaces/me/vendor-slug` claim endpoint + GET serializer extension. 43 tests.
+- **26.2**: 3 backend endpoints (`GET /me/end-user`, `GET /me/end-user/vendors/{slug}`, `GET /me/end-user/vendors/{slug}/conversations`) + 14 tests + dashboard /c (vendor list) + /c/[slug] (two-pane chat with 3s polling) + /c/auth/magic-link (consume + persist + redirect) + endUserSession.ts (localStorage helpers) + 8 api.ts functions.
+- **26.3**: helper rename (`getEndUserSessionToken` / `setEndUserSession` / `clearEndUserSession`) + `endUserAuthedJson` promoted to top-level export + static imports + auth fallback chain documented. Bundle drop: /c 2.41 → 2.29 kB.
+- **26.4**: 5 PIL-generated PNG icons + `app/manifest.ts` (Next.js manifest at `/manifest.webmanifest`) + `public/sw.js` (atomic precache + cache-first shell, network-only API) + `app/c/ServiceWorkerRegister.tsx` + `app/c/layout.tsx` (PWA metadata + viewport) + Header suppression on /c routes. iOS splash-screen matrix deferred to 26B.
+- **26.5**: `app/c/InstallPrompt.tsx` (iOS Safari UA filter excluding CriOS/FxiOS/EdgiOS/FBAN/Instagram, standalone-mode detection + legacy fallback, localStorage dismissal, auto-hide on standalone-mode flip).
+- **26.6**: full sweeps (1380 backend / 175 SDK / dashboard tsc + build all green), `backend/scripts/phase_26_demo.py` (13-step automated demo with printed iPhone-install checklist).
+
+**26.6 verification**:
+- Backend: **1380 passed** in 250s (no flake this run, including `feedback_jobs_runner_test_race`).
+- SDK: **175 passed** in 40s.
+- Dashboard: tsc clean, next build clean. `/c` route chunks: `/c` 2.29 kB, `/c/[slug]` 3.36 kB, `/c/auth/magic-link` 1.91 kB. All under the spec'd 5 kB budget.
+- Scripted demo: 13/13 steps green (operator signup → slug claim → vega in PII zone wired → magic-link sent + captured + consumed → end-user signed in → operator linked → `/me/end-user` returns linked vendor → `/me/end-user/vendors/jyni/conversations` empty → widget POST + poll succeed → conversation persists in list → PWA assets all present).
+
+**Pending Bailey-side**: iPhone install (Phase 26 close gate task #288). The printed checklist at the end of `python3 backend/scripts/phase_26_demo.py` walks through: open `/c` in Safari → verify Install Lightsei banner shows → tap share → Add to Home Screen → confirm full-screen launch from home screen → verify conversation persists.
+
+**Spec deviations carried through**:
+
+- 26.2: localStorage-backed end-user session (spec said "cookie" but operator side uses localStorage too; parity reading chosen). Phase 26.3 codified the helper names.
+- 26.4: iOS splash-screen-per-resolution matrix deferred to 26B. iOS 16.4+ install works without them via the generic launch screen.
+- 26.5: dismissal is local-only (no backend round trip). Acceptable for a one-time onboarding nudge.
+
+**Test counts**: Phase 26 added **+57 backend tests** (1323 → 1380). SDK unchanged at 175 (no SDK code changes in Phase 26).
+
+**Phase 26B parked** (per the 25.x spec arc):
+- iOS splash-screen matrix (11+ specific resolutions).
+- Per-vendor PWAs (each vendor's chat installs as its own app with its own icon + name). Requires per-vendor manifests served from per-vendor paths.
+- Custom vendor domain hosting (`chat.jyni.com` instead of `app.lightsei.com/c/jyni`). Cloudflare-for-SaaS-style infra.
+- Multi-bot-per-vendor consumer chat (vendor exposes multiple bots, end user picks).
+- Subdomain rebrand if Lightsei brand fades behind vendor brand long-term.
+
+**What this enables**: 27.x consumer subscriptions can build on the live `/c` + `/c/{slug}` + magic-link surfaces. 28.x web push uses the same service worker as 26.4 by extending its event listeners. 29.x native iOS will share the magic-link consume endpoint via universal links (the URL format `/auth/end-user/magic-link?token=...` is already in production from 25.2).
 
 ### 2026-05-25 — Phase 26.5: iOS Safari "Add to Home Screen" prompt
 
