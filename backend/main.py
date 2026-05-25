@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Optional
 
-from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, Response, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
@@ -7029,26 +7029,39 @@ def widget_post_message(
     public_id: str,
     body: WidgetMessageIn,
     request: Request,
+    authorization: Optional[str] = Header(default=None),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    """Phase 21.2: the only unauthenticated endpoint in Phase 21.
+    """Phase 21.2 + Phase 25.4: widget chat ingress.
 
-    Public + idempotency-free + rate-limited. The end user's iframe
-    POSTs here on every message they type. The endpoint:
+    Anonymous by default — the iframe POSTs without an Authorization
+    header. Phase 25.4 adds optional end-user auth: when the iframe
+    sends an `Authorization: Bearer <end_user_session_token>` from a
+    signed-in end user who is linked to this workspace, the
+    conversation is scoped to `widget_conversations.end_user_id` so
+    the end user's threads follow them across devices.
+
+    Endpoint steps:
 
       1. Resolves the workspace by `public_id` (404 on miss).
       2. Enforces the Origin allowlist (403 on mismatch).
-      3. Per-conversation + per-workspace rate limit (429 on overrun).
-      4. Persists the user message + (for new conversations) starts
-         a `widget_conversations` row.
-      5. Enqueues a `widget_chat` job for 21.6's orchestrator to
+      3. Optional end-user auth: parse + validate the bearer if
+         present. Invalid bearer = 401 immediately (so a stale token
+         doesn't silently dump the user's identified state into an
+         anonymous conversation).
+      4. Per-conversation + per-workspace rate limit (429 on overrun).
+      5. Persists the user message + (for new conversations) starts
+         a `widget_conversations` row, stamping `end_user_id` only
+         when the end user is actively linked to this workspace.
+      6. Enqueues a `widget_chat` job for 21.6's orchestrator to
          pick up. The bot response lands as a separate message that
          the widget picks up via the poll endpoint below.
-      6. Returns 202 Accepted with the conversation_id + message_id.
+      7. Returns 202 Accepted with the conversation_id + message_id.
     """
     import widget_endpoints as _we
     import limits
     import jobs as _jobs
+    from end_user_auth import resolve_end_user_optional
 
     workspace = _we.resolve_workspace_by_public_id(session, public_id)
     _we.check_widget_origin(workspace, request.headers.get("origin"))
@@ -7068,6 +7081,15 @@ def widget_post_message(
                 ),
             },
         )
+
+    # Phase 25.4: optional end-user auth. Strict on present-but-invalid
+    # so a stale token surfaces as 401 instead of silently degrading.
+    eu_auth = resolve_end_user_optional(authorization, session)
+    linked = (
+        eu_auth is not None
+        and any(w.id == workspace.id for w in eu_auth.linked_workspaces)
+    )
+    current_end_user_id = eu_auth.end_user.id if linked else None
 
     # Apply rate limits BEFORE writing anything (Phase 11B-style
     # ordering: reject early, persist late).
@@ -7095,6 +7117,20 @@ def widget_post_message(
                     ),
                 },
             )
+        # Phase 25.4: identity gate. Identified callers can only reach
+        # their own threads (404 on others'); anonymous callers can
+        # only reach unidentified threads (404 on identified ones).
+        # Both rules: conv.end_user_id must equal current_end_user_id.
+        if conv.end_user_id != current_end_user_id:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "error": "conversation_not_found",
+                    "message": (
+                        "no conversation with this id on this widget."
+                    ),
+                },
+            )
         # If the operator has taken over (status='operator_owned'),
         # the bot is paused; the user's message is still recorded
         # but no orchestrator job is enqueued. 21.8 will surface this
@@ -7106,7 +7142,11 @@ def widget_post_message(
             workspace_id=workspace.id,
             customer_facing_agent_name=workspace.customer_facing_agent_name,
             status="open",
-            anon_user_id=body.anon_user_id,
+            # Phase 25.4: identified callers leave anon_user_id NULL
+            # (the audit trail uses end_user_id). Anonymous keeps the
+            # existing per-device cookie value.
+            anon_user_id=body.anon_user_id if current_end_user_id is None else None,
+            end_user_id=current_end_user_id,
             started_at=now,
             last_message_at=now,
         )
@@ -7153,25 +7193,42 @@ def widget_get_conversation(
     conversation_id: str,
     request: Request,
     since: Optional[int] = None,
+    authorization: Optional[str] = Header(default=None),
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    """Phase 21.2: widget polls this for new messages.
+    """Phase 21.2 + Phase 25.4: widget polls this for new messages.
 
     Returns the conversation's messages with id > `since` (cursor
     semantics: the widget tracks the highest message id it's seen
     and asks for everything after). On first poll the widget passes
     `since=0` (or omits it) to get the full history.
 
-    Same Origin enforcement as the POST endpoint — the widget is
-    on the customer's site and must run through the allowlist.
+    Same Origin enforcement as the POST endpoint. Phase 25.4: same
+    optional end-user auth as POST — identified callers can only
+    poll their own threads, anonymous callers can only poll
+    unidentified threads.
     """
     import widget_endpoints as _we
+    from end_user_auth import resolve_end_user_optional
 
     workspace = _we.resolve_workspace_by_public_id(session, public_id)
     _we.check_widget_origin(workspace, request.headers.get("origin"))
 
+    # Phase 25.4: identity gate. Same shape as POST so a leaked
+    # conversation id from a different identity can't be polled.
+    eu_auth = resolve_end_user_optional(authorization, session)
+    linked = (
+        eu_auth is not None
+        and any(w.id == workspace.id for w in eu_auth.linked_workspaces)
+    )
+    current_end_user_id = eu_auth.end_user.id if linked else None
+
     conv = session.get(WidgetConversation, conversation_id)
-    if conv is None or conv.workspace_id != workspace.id:
+    if (
+        conv is None
+        or conv.workspace_id != workspace.id
+        or conv.end_user_id != current_end_user_id
+    ):
         raise HTTPException(
             status_code=404,
             detail={"error": "conversation_not_found"},

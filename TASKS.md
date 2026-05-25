@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 25 — 25.4 widget endpoints accept end-user identity: extend POST /widget/{public_id}/messages + GET /widget/{public_id}/conversations/{id} to accept optional Authorization: Bearer <end_user_session_token>, scope widget_conversations.end_user_id when present + linked to workspace, fall back to anonymous behavior otherwise. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 25 — 25.5 SDK `lightsei.end_user` accessor: ContextVar-backed accessor in sdk/lightsei/_end_user.py mirroring the lightsei.trigger pattern from 22.5. Properties: id, email (PII bots only, redacted for public), display_name, is_identified. Set by widget orchestrator before invoking @on_chat("widget"). Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,28 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 25.4: widget endpoints accept end-user identity
+
+The widget chat surface now scopes conversations to the signed-in end user when an Authorization bearer is present + linked to the vendor. Anonymous flow preserved verbatim for legacy embeds.
+
+**What shipped**:
+
+- `backend/end_user_auth.py`: new `resolve_end_user_optional(authorization, session)` helper. Returns `None` when no bearer is present (anonymous path). Still 401s on present-but-invalid tokens (expired / revoked / cross-token-type / unknown) so a stale token surfaces immediately instead of silently dumping the user's session-private state into a public conversation.
+- `backend/main.py`: `POST /widget/{public_id}/messages` + `GET /widget/{public_id}/conversations/{id}` now accept optional `Authorization: Bearer <end_user_session_token>` via the new helper. Identity gate on both endpoints: `conv.end_user_id` must equal `current_end_user_id` (= the linked end-user's id, or NULL for anonymous), so identified callers can only reach their own threads, anonymous callers can only reach unidentified threads. New-conversation rows leave `anon_user_id` NULL when identified (audit trail clean). Added `Header` to the fastapi imports.
+- `backend/tests/test_widget_end_user_auth.py`: 11 tests covering identified happy path (new + existing + poll), identified isolation (can't see other end-user's threads, can't see anonymous threads), anonymous preservation (can't see identified threads either), unlinked end-user falls back to anonymous, invalid bearer = 401, operator session token = 401 (cross-token guard fires at the widget surface too), cross-vendor isolation (same end-user + two vendors = workspace_id boundary is the isolation).
+
+**Spec deviations**: none. Spec said: identified user sees own conversations only, anonymous user sees only anon-scoped, cross-vendor isolation. All covered. Added invalid-bearer and operator-session-bearer tests on top.
+
+**Design notes**:
+
+- Linked check is "actively linked" only (`end_user_vendor_links.removed_at IS NULL`), inherited from `EndUserAuthResult.linked_workspaces`. Phase 27.2 will add the soft-revoke nuance (read-only access to past conversations after unsubscribe).
+- Identified post does NOT carry `body.anon_user_id` onto the new conversation row. Keeping `anon_user_id` NULL for identified rows means the audit trail and dashboard inbox queries can rely on the two columns being mutually exclusive.
+- Invalid-bearer = 401, not silent-anonymous-fallback. The widget's iframe SDK in 26.x will retry signin when it sees a 401, which is the right consumer-facing behavior; silent fallback would have meant a stale-token user's private state lands in a public thread, which is worse than asking them to re-sign-in.
+
+**Test counts**: backend 1297 → **1308** (+11). 183 tests across widget + 25.x + magic-link all green with no regressions.
+
+**What this enables**: 25.5 can build the SDK `lightsei.end_user` accessor that bot handlers read in `@on_chat("widget")` to branch on identified-vs-anonymous + PII-redact accordingly. 25.6 cross-vendor isolation tests will reuse the linked-to-multiple-vendors scaffolding. 26.x consumer chat surface uses these endpoints directly via end-user session cookies.
 
 ### 2026-05-25 — Phase 25.3: end-user session auth resolver
 

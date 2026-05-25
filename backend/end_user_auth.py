@@ -156,3 +156,20 @@ def get_end_user(
     Returns the resolved EndUserAuthResult on success.
     """
     return _resolve(authorization, session)
+
+
+def resolve_end_user_optional(
+    authorization: Optional[str], session: Session,
+) -> Optional[EndUserAuthResult]:
+    """Phase 25.4: optional-auth variant used by the widget endpoints.
+
+    Returns `None` when no bearer is present (anonymous path).
+    Still 401s on present-but-invalid tokens (expired, revoked,
+    cross-token-type, unknown) so a misconfigured client surfaces
+    immediately rather than silently degrading into anonymous mode,
+    which would dump the user's session-private state into a public
+    conversation.
+    """
+    if _parse_bearer(authorization) is None:
+        return None
+    return _resolve(authorization, session)
