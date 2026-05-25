@@ -20,7 +20,7 @@ import {
   EndUserVendor,
   fetchEndUserMe,
 } from "../api";
-import { clearEndUserToken } from "../endUserSession";
+import { clearEndUserSession } from "../endUserSession";
 
 type State =
   | { kind: "loading" }
@@ -54,7 +54,7 @@ export default function ConsumerHomePage() {
   }, []);
 
   function signOut() {
-    clearEndUserToken();
+    clearEndUserSession();
     setState({ kind: "needs-signin" });
   }
 

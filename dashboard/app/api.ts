@@ -1,3 +1,8 @@
+import {
+  clearEndUserSession,
+  getEndUserSessionToken,
+} from "./endUserSession";
+
 export const API_URL =
   process.env.NEXT_PUBLIC_LIGHTSEI_API_URL || "http://localhost:8000";
 
@@ -9,6 +14,19 @@ export const FALLBACK_API_KEY = process.env.NEXT_PUBLIC_LIGHTSEI_API_KEY || "";
 const SESSION_KEY = "lightsei.session_token";
 const USER_KEY = "lightsei.user";
 const WORKSPACE_KEY = "lightsei.workspace";
+
+// Phase 26.3: auth fallback chain.
+//
+// /c/* consumer routes use end-user auth via `endUserAuthedJson` +
+// the helpers exported from `./endUserSession`.
+//
+// Everything else (operator dashboard) uses `authedJson` + the
+// SESSION_KEY-backed operator helpers below.
+//
+// The two storage keys are distinct (`lightsei.end_user_session`
+// vs `lightsei.session_token`) so a signed-in operator browsing
+// /c with a separate end-user account doesn't bleed credentials
+// across surfaces.
 
 export class UnauthorizedError extends Error {
   constructor(message = "unauthorized") {
@@ -2484,19 +2502,20 @@ export class EndUserUnauthorizedError extends Error {
   }
 }
 
-// Phase 26.2: shared fetch helper that attaches the end-user bearer
-// from localStorage (via endUserSession.ts). Phase 26.3 will swap
-// the token source to a cookie without changing this signature.
-async function endUserAuthedJson(
+// Phase 26.3: top-level helper for /c routes that need end-user auth.
+//
+// Attaches the bearer from the end-user session helpers, clears on
+// 401 (so stale tokens don't loop forever), and translates the
+// backend's structured error detail into a thrown Error.
+//
+// Exported (not file-local) per spec so /c page components can call
+// it directly when their needs don't match the typed fetcher
+// functions below.
+export async function endUserAuthedJson(
   path: string,
   init?: RequestInit,
 ): Promise<unknown> {
-  // Lazy import to avoid pulling endUserSession into operator pages
-  // that don't need it.
-  const { getEndUserToken, clearEndUserToken } = await import(
-    "./endUserSession"
-  );
-  const token = getEndUserToken();
+  const token = getEndUserSessionToken();
   const headers = new Headers(init?.headers);
   if (token) {
     headers.set("Authorization", `Bearer ${token}`);
@@ -2509,7 +2528,7 @@ async function endUserAuthedJson(
   if (r.status === 401) {
     // Stale / missing token. Clear so the next page load doesn't
     // re-attempt with the same dead bearer.
-    clearEndUserToken();
+    clearEndUserSession();
     throw new EndUserUnauthorizedError();
   }
   if (!r.ok) {
@@ -2601,8 +2620,7 @@ export async function postWidgetMessageAsEndUser(
   publicId: string,
   body: { text: string; conversation_id?: string },
 ): Promise<{ conversation_id: string; message_id: number; job_id: string | null }> {
-  const { getEndUserToken } = await import("./endUserSession");
-  const token = getEndUserToken();
+  const token = getEndUserSessionToken();
   const headers: Record<string, string> = {
     "content-type": "application/json",
     // The widget POST endpoint requires Origin to be allowlisted.
@@ -2642,8 +2660,7 @@ export async function fetchWidgetThreadAsEndUser(
   conversationId: string,
   since?: number,
 ): Promise<WidgetThread> {
-  const { getEndUserToken } = await import("./endUserSession");
-  const token = getEndUserToken();
+  const token = getEndUserSessionToken();
   const headers: Record<string, string> = {};
   if (token) headers["Authorization"] = `Bearer ${token}`;
   const url = new URL(

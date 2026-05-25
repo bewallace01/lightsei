@@ -16,7 +16,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 
 import { consumeEndUserMagicLink } from "../../../api";
-import { setEndUserToken } from "../../../endUserSession";
+import { setEndUserSession } from "../../../endUserSession";
 
 type Status =
   | { kind: "verifying" }
@@ -45,7 +45,7 @@ function ConsumeInner() {
             params.get("vendor_invite_code") || undefined,
         });
         if (cancelled) return;
-        setEndUserToken(res.session_token);
+        setEndUserSession(res.session_token);
         setStatus({
           kind: "ok",
           isNew: res.is_new_end_user,

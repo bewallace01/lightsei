@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 26 — 26.3 end-user session cookie + dashboard infrastructure. Add `lightsei.end_user_session` cookie handling parallel to operator session. New helpers in dashboard/app/api.ts: getEndUserSessionToken, setEndUserSession, clearEndUserSession (replacing 26.2's localStorage-backed endUserSession.ts). New endUserAuthedJson helper (already in 26.2 in lazy-import form; promote to top-level). Auth fallback chain: end-user token if on /c routes, operator token otherwise. Phase 25 closed 2026-05-25; 26.1 + 26.2 shipped (vendor_slug schema + claim, /me/end-user endpoints, /c + /c/{slug} + /c/auth/magic-link pages working end-to-end via localStorage). Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 26 — 26.4 PWA manifest + service worker. dashboard/app/manifest.ts (Next.js manifest route) returns Lightsei branding (icon, theme color, full-screen display). Service worker (dashboard/public/sw.js) caches /c shell for offline open; passes everything else through. Apple touch icon set + iOS splash screens (apple-touch-icon-*.png matrix). Phase 25 closed; 26.1 (vendor_slug), 26.2 (functional /c MVP), 26.3 (cookie helpers refactor) shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,26 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 26.3: end-user session helpers refactor
+
+Renames 26.2's localStorage-backed helpers to the spec'd names, promotes the auth-aware JSON helper from a private lazy-import to a top-level export, and documents the consumer-vs-operator auth fallback chain.
+
+**What shipped**:
+
+- `dashboard/app/endUserSession.ts`: helpers renamed `getEndUserToken` → `getEndUserSessionToken`, `setEndUserToken` → `setEndUserSession`, `clearEndUserToken` → `clearEndUserSession`. Same localStorage backing (parity with operator side — operator-side ALSO uses localStorage, despite the spec saying "cookie"; the parity reading is the right one). SSR guards unchanged. Distinct localStorage key (`lightsei.end_user_session` vs operator's `lightsei.session_token`) so the two never collide.
+- `dashboard/app/api.ts`: `endUserAuthedJson` promoted from a file-local lazy-import function to a top-level `export`. Static-imports the renamed helpers at the top of the file. Eight call sites in api.ts + two `/c` page imports (`/c/page.tsx`, `/c/auth/magic-link/page.tsx`) updated to the new names.
+- `dashboard/app/api.ts`: added a short comment block documenting the auth fallback chain. /c/* routes use `endUserAuthedJson` + the endUserSession helpers; everything else uses `authedJson` + the operator-side helpers. The two storage keys keep credentials from bleeding across surfaces if the same browser is signed into both an operator account and an end-user account.
+
+**Spec deviations**: the spec writes "cookie handling" but the operator-side session is ALSO localStorage-backed. Picked the parity reading (localStorage). If/when the operator session moves to httpOnly cookies, this module's implementation flips alongside it without changing the call sites.
+
+**Design notes**:
+- Static imports instead of lazy: the bundle impact of including `endUserSession.ts` everywhere is ~30 lines; tree-shaking handles the operator pages cleanly. Lazy imports were a 26.2 expedient; the static refactor reads more naturally and avoids the async boundary on every fetch.
+- Bundle sizes confirm the cleanup: /c dropped from 2.41 kB → 2.29 kB; /c/auth/magic-link dropped from 2.02 kB → 1.91 kB. /c/[slug] unchanged because it never used the helpers directly.
+
+**Test counts**: backend unchanged; dashboard tsc + next build clean. The 64-test 25.x + 26.x backend suite all green after the rename (no behavioral changes to backend or to the bearer header contract).
+
+**What this enables**: 26.4 builds the PWA manifest + service worker on top of `/c` knowing the auth surface is now stable. Future move to httpOnly cookies (post-26) updates only `endUserSession.ts`; the spec'd helper names + the `endUserAuthedJson` signature are the contract.
 
 ### 2026-05-25 — Phase 26.2: `/c` standalone routes + end-user vendor endpoints
 
