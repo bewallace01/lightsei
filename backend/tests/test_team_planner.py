@@ -51,7 +51,8 @@ def test_submit_team_schema_has_required_fields():
     member = team["items"]
     assert set(member["required"]) == {
         "name", "role", "sensitivity_hint", "summary", "command_kinds",
-        "dispatches_to", "needs_workspace_secrets", "draft_description",
+        "dispatches_to", "needs_workspace_secrets", "capabilities",
+        "draft_description",
     }
     # role is enum-constrained
     assert set(member["properties"]["role"]["enum"]) == {
@@ -120,6 +121,7 @@ def _team_member(
     dispatches_to: list | None = None,
     command_kinds: list | None = None,
     sensitivity_hint: str = "internal",
+    capabilities: list | None = None,
 ) -> dict:
     return {
         "name": name,
@@ -129,6 +131,10 @@ def _team_member(
         "command_kinds": command_kinds if command_kinds is not None else [f"{name}.do"],
         "dispatches_to": dispatches_to if dispatches_to is not None else [],
         "needs_workspace_secrets": [],
+        # Phase 24.1: capabilities is required + validated against
+        # KNOWN_CAPABILITIES + connector:* prefix. Default to []
+        # (valid: operator-only bot) so existing tests don't break.
+        "capabilities": capabilities if capabilities is not None else [],
         "draft_description": f"A bot named {name} that does things.",
     }
 
@@ -288,6 +294,131 @@ def test_validate_team_plan_accepts_all_four_hint_values():
         }
         problems = validate_team_plan(plan, reserved_names=set())
         assert problems == [], f"hint {hint!r} produced problems: {problems}"
+
+
+# ---------- Phase 24.1: capabilities validation ---------- #
+
+
+def test_validate_team_plan_accepts_empty_capabilities():
+    """Empty capability list is valid — 'operator-only bot, has no
+    outbound powers yet.' Default from the helper; existing tests
+    rely on this implicitly."""
+    plan = {
+        "rationale": "test",
+        "team": [
+            _team_member("vega", capabilities=[]),
+            _team_member("argus"),
+            _team_member("hermes", role="messenger"),
+        ],
+    }
+    assert validate_team_plan(plan, reserved_names=set()) == []
+
+
+def test_validate_team_plan_accepts_known_capabilities():
+    """Each entry from the well-known vocabulary passes."""
+    plan = {
+        "rationale": "test",
+        "team": [
+            _team_member("vega", capabilities=["internet"]),
+            _team_member(
+                "argus",
+                capabilities=["send_command", "slack:respond"],
+            ),
+            _team_member(
+                "hermes", role="messenger",
+                capabilities=["widget:respond", "widget:escalate"],
+            ),
+        ],
+    }
+    assert validate_team_plan(plan, reserved_names=set()) == []
+
+
+def test_validate_team_plan_accepts_connector_prefix_capabilities():
+    """The connector:<name> prefix is forward-compatible — a workspace
+    can name an app-specific connector (e.g. connector:jyni_crm) even
+    if the connector itself hasn't shipped as a Lightsei primitive yet.
+    The validator accepts it; enforcement waits for the connector
+    adapter to register."""
+    plan = {
+        "rationale": "test",
+        "team": [
+            _team_member(
+                "vega",
+                capabilities=["connector:gmail", "connector:jyni_crm"],
+            ),
+            _team_member("argus"),
+            _team_member("hermes", role="messenger"),
+        ],
+    }
+    assert validate_team_plan(plan, reserved_names=set()) == []
+
+
+def test_validate_team_plan_rejects_unknown_capability():
+    """An unknown capability surfaces as a per-bot problem so the
+    retry message can prompt the LLM to fix only the offending bot."""
+    plan = {
+        "rationale": "test",
+        "team": [
+            _team_member("vega", capabilities=["filesystem", "shell"]),
+            _team_member("argus"),
+            _team_member("hermes", role="messenger"),
+        ],
+    }
+    problems = validate_team_plan(plan, reserved_names=set())
+    # Both bad entries flagged, both scoped to team[0].
+    assert any("team[0].capabilities[0]" in p and "filesystem" in p for p in problems)
+    assert any("team[0].capabilities[1]" in p and "shell" in p for p in problems)
+
+
+def test_validate_team_plan_rejects_missing_capabilities():
+    """The schema marks capabilities as required; if a bot somehow
+    submits without it (malformed LLM output), the validator surfaces
+    a clean 'capabilities must be a list' error so the retry message
+    can fix it."""
+    bad_member = {
+        k: v for k, v in _team_member("vega").items() if k != "capabilities"
+    }
+    plan = {
+        "rationale": "test",
+        "team": [
+            bad_member,
+            _team_member("argus"),
+            _team_member("hermes", role="messenger"),
+        ],
+    }
+    problems = validate_team_plan(plan, reserved_names=set())
+    assert any("team[0].capabilities" in p for p in problems)
+
+
+def test_validate_team_plan_rejects_duplicate_capability():
+    """Duplicates within a single bot's list are flagged per-bot.
+    Deduped at deploy via normalize_capability_list, but the planner
+    shouldn't be emitting dupes in the first place."""
+    plan = {
+        "rationale": "test",
+        "team": [
+            _team_member(
+                "vega",
+                capabilities=["internet", "internet"],
+            ),
+            _team_member("argus"),
+            _team_member("hermes", role="messenger"),
+        ],
+    }
+    problems = validate_team_plan(plan, reserved_names=set())
+    assert any(
+        "team[0].capabilities[1]" in p and "duplicate" in p for p in problems
+    )
+
+
+def test_submit_team_schema_requires_capabilities():
+    """Tool schema explicitly lists `capabilities` in the per-bot
+    required array; this is what gets the LLM to emit it at all.
+    Locks in 24.1 so a future refactor doesn't silently drop it."""
+    member_required = SUBMIT_TEAM_TOOL["input_schema"]["properties"]["team"][
+        "items"
+    ]["required"]
+    assert "capabilities" in member_required
 
 
 # ---------- Endpoint tests with stubbed Anthropic ---------- #

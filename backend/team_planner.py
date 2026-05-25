@@ -16,6 +16,7 @@ from agent_generator import (
     is_valid_star_name,
     render_star_dictionary_for_prompt,
 )
+from capabilities import validate_capability_list
 
 
 # Soft caps the LLM is told to respect. The schema's `minItems` /
@@ -156,6 +157,48 @@ SUBMIT_TEAM_TOOL: dict[str, Any] = {
                                 "user can set missing ones before deploy."
                             ),
                         },
+                        "capabilities": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Phase 24.1: capability allow-list per bot. "
+                                "Required. Empty array means 'operator-only — "
+                                "this bot has no outbound powers until an "
+                                "operator grants some.' Phase 16's SDK gate "
+                                "refuses any capability not in this list, so "
+                                "this is what enforces 'lives only in X' "
+                                "constraints.\n\n"
+                                "Pick from the well-known vocabulary:\n"
+                                "  - 'internet': bot can call arbitrary HTTP "
+                                "endpoints (web research, public APIs). Don't "
+                                "grant to pii/sensitive bots.\n"
+                                "  - 'send_command': bot can dispatch to other "
+                                "bots in its workspace. Required for any bot "
+                                "with a non-empty dispatches_to.\n"
+                                "  - 'slack:respond': bot can post to Slack via "
+                                "lightsei.post_slack. Grant to internal / "
+                                "public bots whose job is to notify a Slack "
+                                "channel.\n"
+                                "  - 'widget:respond' + 'widget:escalate': "
+                                "customer-facing widget bot only. Grant both "
+                                "together — escalation without respond is "
+                                "useless.\n"
+                                "  - 'connector:<name>': bot can call the "
+                                "named connector's tools. Today's known "
+                                "connectors: gmail, google_calendar, google_drive. "
+                                "Forward-compatible: 'connector:hubspot' / "
+                                "'connector:salesforce' / app-specific connectors "
+                                "(e.g. 'connector:jyni_crm') are accepted even "
+                                "before the connector itself ships.\n\n"
+                                "Narrow-allow-list rule: list ONLY what this "
+                                "specific bot needs. A CRM-bound bot might be "
+                                "['connector:jyni_crm']. A web research bot "
+                                "might be ['internet']. A Slack notifier might "
+                                "be ['slack:respond']. Don't grant 'internet' "
+                                "to a CRM bot 'just in case' — narrow lists "
+                                "are the wedge."
+                            ),
+                        },
                         "draft_description": {
                             "type": "string",
                             "description": (
@@ -176,6 +219,7 @@ SUBMIT_TEAM_TOOL: dict[str, Any] = {
                         "command_kinds",
                         "dispatches_to",
                         "needs_workspace_secrets",
+                        "capabilities",
                         "draft_description",
                     ],
                     "additionalProperties": False,
@@ -293,6 +337,100 @@ When in doubt, prefer the more restrictive zone. The Compliance
 preset is opt-in safety; over-classifying a bot as `pii` just means
 the operator has to grant it capabilities explicitly. Under-
 classifying means data leaks.
+
+## Capability allow-list per bot
+
+Every bot needs a `capabilities` array — even if empty. This is the
+**actual enforcement** of the trust-zone wedge: Phase 16's SDK gate
+refuses any capability not in this list. `sensitivity_hint` tells
+the dashboard which zone to put the bot in; `capabilities` tells the
+SDK what the bot can DO. Both are needed; one without the other
+leaves the wedge half-built.
+
+Vocabulary (also in the tool-schema description for `capabilities`):
+
+| capability | what it gates |
+|---|---|
+| `internet` | arbitrary outbound HTTP (web research, public APIs) |
+| `send_command` | dispatching to other bots in the workspace |
+| `slack:respond` | posting to Slack via `lightsei.post_slack` |
+| `widget:respond` | replying inside a widget conversation |
+| `widget:escalate` | flipping a widget conversation to operator inbox |
+| `connector:<name>` | calling a specific connector's tools (gmail, google_calendar, google_drive today; app-specific connectors like `connector:jyni_crm` accepted forward-compat) |
+
+Narrow allow-lists are the wedge. Don't grant `internet` to a CRM
+bot "just in case" — narrow means a prompt-injected bot literally
+cannot escape. A CRM-bound bot is `['connector:jyni_crm']`. A web
+research bot is `['internet']`. A Slack notifier is `['slack:respond']`.
+
+Coupling rules:
+
+- A bot with a non-empty `dispatches_to` needs `send_command` in
+  `capabilities`. The SDK gate is what enforces dispatches actually
+  fire.
+- A messenger that posts to Slack needs `slack:respond`.
+- A customer-facing widget bot needs BOTH `widget:respond` AND
+  `widget:escalate`. The two go together — operators who pick a bot
+  for the widget surface expect both wired.
+- A `pii` or `sensitive` bot defaults to NO outbound capabilities
+  (the load-bearing wedge — see the Trust zones section above).
+  Granting `internet` to a `pii` bot defeats the wedge. If you must,
+  document why in `draft_description`.
+
+## Honoring freeform per-bot constraints
+
+The operator's freeform context (separate from the README) is your
+authoritative source for per-bot constraints that the README itself
+might not say. If the freeform says:
+
+- "Bot X is read-only" → narrow its `capabilities` list to read-only
+  connector tools, exclude any write-shaped capabilities.
+- "Bot Y has internet access" → include `internet` in capabilities.
+- "Bot Z can only read the CRM" → empty `dispatches_to`, minimal
+  capabilities (just the CRM connector), matching zone.
+- "Add a bot that does Q" → propose that bot, even if the README
+  doesn't ask for it.
+
+Freeform overrides README in case of conflict. The operator typed
+it deliberately.
+
+## Worked examples
+
+**Example 1 (CRM-bound read-only bot)**:
+
+```
+name: vega
+role: specialist
+sensitivity_hint: sensitive   (CRM holds contracts, deals — internal regulated data)
+capabilities: ['connector:jyni_crm']   (no internet, no Slack, no other connectors)
+dispatches_to: []   (no fan-out; bot's job is to answer questions, not coordinate)
+```
+
+**Example 2 (web research bot)**:
+
+```
+name: atlas
+role: specialist
+sensitivity_hint: public   (internet-only data; doesn't touch customer info)
+capabilities: ['internet']   (no connectors, no Slack)
+dispatches_to: ['hermes']   (sends findings to messenger)
+```
+
+Atlas would also need `send_command` because of dispatches_to → so:
+
+```
+capabilities: ['internet', 'send_command']
+```
+
+**Example 3 (Slack-only messenger)**:
+
+```
+name: hermes
+role: messenger
+sensitivity_hint: internal   (relays internal data to Slack)
+capabilities: ['slack:respond']   (no internet, no connectors, no dispatch)
+dispatches_to: []   (strict leaf)
+```
 """
 
 
@@ -457,6 +595,14 @@ def validate_team_plan(
                 f"team[{i}].sensitivity_hint `{hint!r}` is not one of "
                 f"'public' / 'internal' / 'sensitive' / 'pii'"
             )
+
+        # Phase 24.1: capabilities is the per-bot allow-list. Required +
+        # validated against KNOWN_CAPABILITIES / connector:* prefix.
+        # Empty list is valid (operator-only bot); unknown entries
+        # surface as planner mistakes so the retry message can fix them.
+        cap_problems = validate_capability_list(m.get("capabilities"))
+        for cp in cap_problems:
+            problems.append(f"team[{i}].{cp}")
 
     if orchestrator_count > 1:
         problems.append(
