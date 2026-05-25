@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 26 — 26.5 install prompt + onboarding. Lightweight "Add to Home Screen" tooltip on /c for iOS Safari users who haven't installed yet (detected via standalone media query). After install, the tooltip stops showing. Phase 25 closed; 26.1 (vendor_slug), 26.2 (functional /c MVP), 26.3 (helpers refactor), 26.4 (PWA manifest + service worker + /c chrome) shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 26 — 26.6 tests + tsc + next build smoke (last sub-task of Phase 26). Backend tests for vendor-slug endpoint (already shipped in 26.1, run as part of sweep). Dashboard tsc + next build. Live smoke: install the PWA on a real iPhone, open it, verify a conversation works end-to-end. After 26.6 the Phase 26 demo runs and the phase closes. Phase 25 closed; 26.1 (vendor_slug), 26.2 (functional /c MVP), 26.3 (helpers refactor), 26.4 (PWA manifest + service worker + /c chrome), 26.5 (install prompt) shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,35 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 26.5: iOS Safari "Add to Home Screen" prompt
+
+Lightweight dismissible bottom banner that shows iOS Safari visitors how to install the PWA. Quietly skips every other platform.
+
+**What shipped**:
+
+- `dashboard/app/c/InstallPrompt.tsx`: client component with three gates before rendering — `isIOSSafari()` (iPhone/iPad UA + Safari, excluding CriOS / FxiOS / EdgiOS / FBAN / FBAV / Instagram / Line in-app browsers), `isStandalone()` (matchMedia `(display-mode: standalone)` OR legacy `navigator.standalone`), and `wasDismissed()` (localStorage key `lightsei.c_install_prompt_dismissed`). All three must be false for the banner to render. iPadOS 13+ (which UA-reports as Macintosh) handled via the `ontouchend` Document feature check.
+- Banner copy: "Install Lightsei. Tap the share icon ⤴ in Safari's toolbar, then choose Add to Home Screen for a one-tap launch." Inline SVG share-glyph (arrow up out of a box) sized to the body text baseline. × dismiss button in the top-right; dismissal persists via localStorage.
+- Auto-hide: subscribes to the `(display-mode: standalone)` media query's change event, so if the user completes the install mid-session the banner disappears without a reload.
+- `dashboard/app/c/layout.tsx`: mounts `<InstallPrompt />` next to `<ServiceWorkerRegister />`. Layout chunk is shared across all `/c/*` routes so the prompt shows on every consumer surface.
+
+**Spec deviations**: none. Spec said "Lightweight 'Add to Home Screen' tooltip on /c for iOS Safari users who haven't installed (detected via standalone media query). After install, the tooltip stops showing." All three behaviors covered: iOS Safari detection (UA), standalone detection (media query + legacy), and live auto-hide on install via the media-query change event.
+
+**Design notes**:
+- iOS Safari only — Android Chrome fires its own `beforeinstallprompt` event and surfaces a native install banner, so no custom UI is needed there. Embedded browsers (Instagram, FB) can't install at all; showing the prompt would just confuse the user.
+- Dismissal is local-only (no backend round trip). If the user clears localStorage or switches devices they see it again. Acceptable for a one-time onboarding nudge; persisting per-end-user backend-side would add a round trip on every /c load for marginal UX value.
+- Banner sits at `fixed bottom-3` with `z-30` — above the operator-less /c chrome but below any future modal layer. Tailwind only; no new dependencies.
+- Component renders nothing during SSR (the useEffect that flips `show` to true is client-only); only shows up after hydration on visitors that match all three gates. Bundle confirmed at .next/static/chunks/app/c/layout-*.js (single layout chunk for all /c routes).
+
+**Verification**:
+- tsc + next build clean. `/c` page size unchanged at 2.29 kB (component lives in the shared layout chunk, not the page chunk).
+- HTML head shape on `/c` unchanged from 26.4 (manifest, apple-touch-icon, apple-mobile-web-app-{capable,title,status-bar-style} all still present).
+- Layout chunk on disk contains both the dismiss key string and "Install Lightsei", confirming the component is bundled.
+- SSR returns no banner HTML (correct — the component only renders client-side on iOS Safari, which curl can't simulate).
+
+**Phase 26 status**: 5 of 6 sub-tasks shipped (26.1, 26.2, 26.3, 26.4, 26.5). One sub-task left — 26.6 (sweep + real-iPhone install smoke + phase close).
+
+**What this enables**: 26.6 runs the full sweep + does the real-device install on Bailey's iPhone. Phase 27.x consumer subscription UI can assume the install path is in place + the prompt will surface for any new end user landing on /c via Safari.
 
 ### 2026-05-25 — Phase 26.4: PWA manifest + service worker + /c chrome
 

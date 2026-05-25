@@ -13,6 +13,7 @@
 // + apple-touch settings here apply on top of the root font setup.
 
 import type { Metadata, Viewport } from "next";
+import InstallPrompt from "./InstallPrompt";
 import ServiceWorkerRegister from "./ServiceWorkerRegister";
 
 export const metadata: Metadata = {
@@ -55,6 +56,7 @@ export default function ConsumerLayout({
     <>
       <ServiceWorkerRegister />
       {children}
+      <InstallPrompt />
     </>
   );
 }
