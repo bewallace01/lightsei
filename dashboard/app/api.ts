@@ -17,6 +17,26 @@ export class UnauthorizedError extends Error {
   }
 }
 
+// Phase 23.6: distinct subclass for the case where the user IS
+// authenticated but their session's active workspace is unset or
+// stale. Pages catch this separately and route to the picker page
+// (/me/workspaces/pick) instead of /login — the user isn't logged
+// out, they just need to pick a workspace to continue.
+export class NoActiveWorkspaceError extends UnauthorizedError {
+  constructor(message = "no active workspace") {
+    super(message);
+    this.name = "NoActiveWorkspaceError";
+  }
+}
+
+// Detail strings the backend's auth.py (Phase 23.2) returns when the
+// session is valid but the workspace context isn't. Keep these in
+// sync with the backend's literal HTTPException details.
+const _NO_ACTIVE_DETAILS = new Set([
+  "no active workspace",
+  "not a member of active workspace",
+]);
+
 export type SessionUser = {
   id: string;
   email: string;
@@ -444,7 +464,24 @@ async function authedJson(
       ...(init?.headers || {}),
     },
   });
-  if (r.status === 401) throw new UnauthorizedError();
+  if (r.status === 401) {
+    // Phase 23.6: distinguish "session invalid → /login" from
+    // "session valid but workspace context bad → /me/workspaces/pick".
+    // Peek the body for the detail string the backend's auth.py
+    // returns, then throw the right subclass.
+    let detail: string | null = null;
+    try {
+      const body = await r.json();
+      const raw = (body as { detail?: unknown })?.detail;
+      if (typeof raw === "string") detail = raw;
+    } catch {
+      // body wasn't JSON; treat as generic.
+    }
+    if (detail && _NO_ACTIVE_DETAILS.has(detail)) {
+      throw new NoActiveWorkspaceError(detail);
+    }
+    throw new UnauthorizedError(detail ?? "unauthorized");
+  }
   if (!r.ok) {
     const body = await r.json().catch(() => ({}));
     const raw = (body as { detail?: unknown })?.detail;
