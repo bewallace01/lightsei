@@ -99,6 +99,17 @@ def is_valid_trigger_kind(kind: object) -> bool:
     return isinstance(kind, str) and kind in _VALID_TRIGGER_KINDS
 
 
+# Phase 23.1: workspace membership roles. Only 'owner' is inserted
+# by v1 (one user per workspace creation). 'member' is reserved for
+# Phase 23B's invite + accept flow. Same validate-app-side pattern
+# as the kind / status vocabularies above.
+_VALID_WORKSPACE_MEMBER_ROLES: frozenset[str] = frozenset({"owner", "member"})
+
+
+def is_valid_workspace_member_role(role: object) -> bool:
+    return isinstance(role, str) and role in _VALID_WORKSPACE_MEMBER_ROLES
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -422,9 +433,74 @@ class Session(Base):
     revoked_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Phase 23.1: which workspace this session is currently viewing.
+    # 23.2 flips `get_workspace_id` to read from here on the
+    # session-auth path. SET NULL on workspace delete so deleting a
+    # workspace from another tab doesn't crash this session — the
+    # next request 401s + redirects through the workspace picker
+    # (23.6) instead. Nullable so the migration backfill is
+    # painless; immediately populated for every existing session in
+    # the same migration.
+    active_workspace_id: Mapped[Optional[str]] = mapped_column(
+        String,
+        ForeignKey("workspaces.id", ondelete="SET NULL"),
+        nullable=True,
+    )
 
     __table_args__ = (
         Index("idx_sessions_user", "user_id"),
+        Index("ix_sessions_active_workspace", "active_workspace_id"),
+    )
+
+
+class WorkspaceMember(Base):
+    """Phase 23.1: one row per (user, workspace) membership pair.
+
+    Replaces the implicit "one workspace per user" relationship
+    that lived on `users.workspace_id`. The legacy column stays
+    in the schema for now — Phase 23.2 flips endpoint resolution
+    to read from `sessions.active_workspace_id`, and a later
+    cleanup drops `users.workspace_id` once nothing references
+    it.
+
+    v1 only inserts one row per workspace at create time
+    (role='owner'); the composite-PK shape is built for Phase
+    23B's invite + accept flow. Role values are validated app-
+    side against `_VALID_WORKSPACE_MEMBER_ROLES`; not enforced
+    at the DB so a future role addition doesn't need a migration.
+    """
+
+    __tablename__ = "workspace_members"
+
+    user_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    role: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        server_default=text("'owner'"),
+        default="owner",
+    )
+    joined_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+
+    __table_args__ = (
+        # Per-workspace roster (chronological). The PK already
+        # covers the per-user lookup.
+        Index(
+            "ix_workspace_members_workspace",
+            "workspace_id", "joined_at",
+        ),
     )
 
 
