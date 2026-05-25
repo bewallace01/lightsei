@@ -335,3 +335,68 @@ def test_orchestrator_handler_registered_in_jobs():
     side effect on import)."""
     import jobs
     assert "widget_chat" in jobs._HANDLERS
+
+
+# ---------- Phase 25.5: end_user payload ---------- #
+
+
+def test_orchestrator_carries_end_user_payload_for_identified_conv():
+    """When the widget conversation has end_user_id set (Phase 25.4
+    identified flow), the orchestrator includes an `end_user` dict
+    on the command payload so the SDK bridge can populate
+    lightsei.end_user before invoking the handler."""
+    from models import EndUser
+    ws_id, conv_id, _, user_msg_id = _setup(
+        bot_caps=["widget:respond"],
+    )
+
+    # Bump the bot's sensitivity_level to pii so the orchestrator
+    # passes that hint through (the SDK uses it for email redaction).
+    with session_scope() as s:
+        bot = s.get(Agent, (ws_id, "vega"))
+        bot.sensitivity_level = "pii"
+        # Insert an EndUser + link it to the conversation.
+        eu_id = str(uuid.uuid4())
+        s.add(EndUser(
+            id=eu_id,
+            email="alice@example.com",
+            display_name="Alice",
+        ))
+        s.flush()
+        conv = s.get(WidgetConversation, conv_id)
+        conv.end_user_id = eu_id
+
+    with session_scope() as s:
+        result = run_widget_chat_job(s, ws_id, {
+            "conversation_id": conv_id,
+            "user_message_id": user_msg_id,
+        })
+
+    assert result["status"] == "dispatched"
+    with session_scope() as s:
+        cmd = s.get(Command, result["command_id"])
+        eu = cmd.payload["end_user"]
+        assert eu["id"] == eu_id
+        assert eu["email"] == "alice@example.com"
+        assert eu["display_name"] == "Alice"
+        # sensitivity_hint mirrors the bot's zone so the SDK can redact
+        # downstream (test_end_user_accessor.py covers the redaction
+        # behavior).
+        assert eu["sensitivity_hint"] == "pii"
+
+
+def test_orchestrator_omits_end_user_payload_for_anonymous_conv():
+    """Anonymous widget conversations (no end_user_id) leave the
+    `end_user` field absent so the SDK bridge stays in anonymous
+    accessor mode."""
+    ws_id, conv_id, _, user_msg_id = _setup(bot_caps=["widget:respond"])
+
+    with session_scope() as s:
+        result = run_widget_chat_job(s, ws_id, {
+            "conversation_id": conv_id,
+            "user_message_id": user_msg_id,
+        })
+
+    with session_scope() as s:
+        cmd = s.get(Command, result["command_id"])
+        assert "end_user" not in cmd.payload

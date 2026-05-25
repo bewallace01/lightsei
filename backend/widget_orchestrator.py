@@ -77,7 +77,7 @@ def run_widget_chat_job(
          built-in bridge handler (21.6) picks it up + calls the
          user-registered `@on_chat("widget")` handler.
     """
-    from models import Agent, Command, WidgetConversation, WidgetMessage
+    from models import Agent, Command, EndUser, WidgetConversation, WidgetMessage
 
     conversation_id = payload.get("conversation_id")
     user_message_id = payload.get("user_message_id")
@@ -156,21 +156,42 @@ def run_widget_chat_job(
                 user_message_text = m.text
                 break
 
+    # Phase 25.5: if the conversation is scoped to an identified end
+    # user (Phase 25.4 widget endpoint set conv.end_user_id), include
+    # their identity on the command payload so the SDK bridge can set
+    # `lightsei.end_user` for the duration of the handler call.
+    # sensitivity_hint = the bot's zone, so the SDK accessor's email
+    # property can redact when the bot isn't PII-cleared.
+    end_user_payload = None
+    if conv.end_user_id is not None:
+        eu = session.get(EndUser, conv.end_user_id)
+        if eu is not None:
+            end_user_payload = {
+                "id": eu.id,
+                "email": eu.email,
+                "display_name": eu.display_name,
+                "sensitivity_hint": bot.sensitivity_level,
+            }
+
+    cmd_payload: dict[str, Any] = {
+        "conversation_id": conv.id,
+        "user_message": user_message_text,
+        "conversation_history": [
+            {"role": m.role, "text": m.text}
+            for m in history_rows
+            if not (user_message_id and m.id == user_message_id)
+        ],
+    }
+    if end_user_payload is not None:
+        cmd_payload["end_user"] = end_user_payload
+
     cmd_id = str(uuid.uuid4())
     session.add(Command(
         id=cmd_id,
         workspace_id=workspace_id,
         agent_name=bot.name,
         kind="widget.chat",
-        payload={
-            "conversation_id": conv.id,
-            "user_message": user_message_text,
-            "conversation_history": [
-                {"role": m.role, "text": m.text}
-                for m in history_rows
-                if not (user_message_id and m.id == user_message_id)
-            ],
-        },
+        payload=cmd_payload,
         status="pending",
         approval_state="approved",  # operator wiring the bot up is the approval
         created_at=_utcnow(),

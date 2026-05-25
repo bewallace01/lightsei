@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 25 — 25.5 SDK `lightsei.end_user` accessor: ContextVar-backed accessor in sdk/lightsei/_end_user.py mirroring the lightsei.trigger pattern from 22.5. Properties: id, email (PII bots only, redacted for public), display_name, is_identified. Set by widget orchestrator before invoking @on_chat("widget"). Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 25 — 25.6 cross-vendor isolation tests: the load-bearing security test for Phase 25. End user Alice linked to vendor A AND vendor B with conversations on both. Verify Alice's session resolves only her vendor-A conversations on vendor A's widget and only her vendor-B conversations on vendor B's widget. Vendor A's PII bot cannot read vendor B's data. Vendor A operator cannot see Alice's vendor-B threads from the inbox even though it's the same end_user_id. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,33 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 25.5: SDK lightsei.end_user accessor + PII-zone redaction
+
+New SDK module mirroring the `lightsei.trigger` pattern from 22.5. Bots reading `lightsei.end_user.email` automatically get the address redacted when configured in any non-PII zone, so a public/internal/sensitive bot can't accidentally exfiltrate identified-user email into logs or downstream calls.
+
+**What shipped**:
+
+- `sdk/lightsei/_end_user.py`: `_EndUserContext` frozen dataclass (id, email, display_name, sensitivity_hint), `_current_end_user_ctx` ContextVar, `_EndUserAccessor` class with `is_identified` / `id` / `email` / `display_name` properties. The `email` property reads `sensitivity_hint` and returns `None` for anything below `'pii'`; `id` and `display_name` pass through unchanged. Helpers `_set_end_user_context` / `_reset_end_user_context` for the bridge.
+- `sdk/lightsei/__init__.py`: exports `end_user` alongside `trigger`.
+- `sdk/lightsei/_chat.py`: `_widget_chat_bridge` reads `payload['end_user']` when present, builds the context, and wraps the handler call in a `try/finally` so the contextvar is reset on every return path (handler return, LightseiEscalate, bot_crash, respond failure). Defensive: a malformed `end_user` dict missing `id` is ignored (anonymous).
+- `backend/widget_orchestrator.py`: when `conv.end_user_id` is set, loads the `EndUser` row + adds `end_user: {id, email, display_name, sensitivity_hint: bot.sensitivity_level}` to the `widget.chat` command payload. Anonymous conversations omit the field entirely so the SDK bridge stays in anonymous mode.
+- `sdk/tests/test_end_user_accessor.py`: 11 tests covering accessor-outside-dispatch (all None/False), accessor-inside-dispatch (id+email+display_name+is_identified), email redaction parameterized over (public/internal/sensitive), context reset after with-block, bridge-sets+resets, bridge-skips-when-payload-absent, bridge-redacts-when-public-zone, bridge-resets-on-handler-crash, bridge-ignores-payload-without-id.
+- `backend/tests/test_widget_orchestrator.py`: +2 tests confirming the orchestrator carries `end_user` on the command payload when `conv.end_user_id` is set (with `sensitivity_hint = bot.sensitivity_level`) and omits the field for anonymous conversations.
+
+**Spec deviations**: none. Spec said: ContextVar accessor with id/email/display_name/is_identified, set by widget orchestrator before invoking the handler, tests cover all four properties under identified+anonymous plus PII redaction. All covered.
+
+**Design notes**:
+
+- `sensitivity_hint` is the BOT's `Agent.sensitivity_level` (not the end user's; end users don't have a sensitivity field). Decision: the trust-zone wedge is about what the bot is cleared to see, not what the end user is. A PII-cleared bot gets the email; a public bot doesn't, regardless of who the end user is.
+- `display_name` is NOT redacted in any zone. The end user picked it themselves so it's treated as user-volunteered rather than latent PII. An operator who wants stricter handling can leave the column NULL.
+- The try/finally around the handler call uses an outer wrapper rather than a `with`-style helper so all the existing early-return paths (handler return, LightseiEscalate caught, bot_crash caught, respond failure) flow through the reset cleanly. The reset import is lazy (`from ._end_user import _reset_end_user_context` inside the finally) so importing `_chat` doesn't pull in `_end_user` unless we actually set the context.
+
+**Pre-existing flake observed**: `test_widget_endpoints.py::test_post_message_enqueues_widget_chat_job` failed once in the full sweep (passed in isolation + on retry). This is the documented `feedback_jobs_runner_test_race` pattern from memory: the conftest startup hook runs the jobs runner which races assertions on `job.status == "pending"`. Not caused by 25.5 (the test code is unrelated to end-user identity); flagged as a follow-up to fix the assertion pattern, not blocking this phase.
+
+**Test counts**: backend 1308 → **1310** (+2 orchestrator tests). SDK 164 → **175** (+11 accessor tests). 185 tests across widget + 25.x + magic-link pass clean on retry; SDK 55 widget+trigger+accessor tests all green.
+
+**What this enables**: 25.6 cross-vendor isolation tests can now drive `@on_chat("widget")` handlers + assert `lightsei.end_user.id` matches the right end-user for each vendor's conversations. 26.x consumer chat surface bots can branch UX on `is_identified` (show "Hi $name" for signed-in users, "Welcome!" for anonymous). 27.x cross-vendor subscriptions can use `id` + `display_name` for per-vendor end-user UI without re-fetching from the backend.
 
 ### 2026-05-25 — Phase 25.4: widget endpoints accept end-user identity
 

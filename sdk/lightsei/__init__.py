@@ -22,6 +22,7 @@ from ._commands import (
     send_command as _impl_send_command,
 )
 from ._context import get_run_id
+from ._end_user import end_user
 from ._trigger import on_trigger, trigger
 from ._cost_insights import get_cost_insights as _impl_get_cost_insights
 from ._instance import TooManyInstancesError
@@ -90,6 +91,7 @@ __all__ = [
     "escalate",
     "on_trigger",
     "trigger",
+    "end_user",
 ]
 
 

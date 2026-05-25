@@ -163,71 +163,100 @@ def _widget_chat_bridge(payload):
         "conversation_history": (payload or {}).get("conversation_history") or [],
     }
 
-    try:
-        result = handler(turn)
-    except LightseiEscalate as exc:
-        # Bot raised LightseiEscalate from inside the @on_chat
-        # handler. Route to the escalate endpoint with the exception's
-        # reason + payload.
-        try:
-            _escalate_helper(
-                conversation_id,
-                reason=exc.reason,
-                payload=exc.payload,
-            )
-        except LightseiError as inner:
-            logger.warning(
-                "widget.chat bridge: escalate after LightseiEscalate "
-                "failed: %s", inner,
-            )
-            return {"ok": False, "escalated": False, "error": str(inner)}
-        return {"ok": True, "escalated": True, "reason": exc.reason}
-    except BaseException as exc:
-        # Uncaught exception. Surface as bot_crash escalation so the
-        # operator gets pulled in rather than the user staring at a
-        # silent conversation. Don't let an exception in escalate()
-        # propagate either — graceful degradation per CLAUDE.md.
-        logger.exception(
-            "widget.chat bridge: handler raised; escalating as bot_crash"
+    # Phase 25.5: lightsei.end_user context. Backend orchestrator
+    # passes `end_user: {id, email, display_name, sensitivity_hint}`
+    # when the widget conversation is scoped to an identified end
+    # user (Phase 25.4). Anonymous turns leave the field absent and
+    # the accessor stays in is_identified=False mode.
+    end_user_payload = (payload or {}).get("end_user")
+    end_user_token = None
+    if isinstance(end_user_payload, dict) and end_user_payload.get("id"):
+        from ._end_user import (
+            _EndUserContext,
+            _set_end_user_context,
         )
-        try:
-            _escalate_helper(
-                conversation_id,
-                reason="bot_crash",
-                payload={"error": repr(exc)},
-            )
-        except Exception:
-            pass
-        return {"ok": False, "escalated": True, "error": repr(exc)}
-
-    # Successful return. Two shapes accepted: a string reply or
-    # None (handler decided not to reply this turn). Anything else
-    # is a bot-author bug, surface it cleanly.
-    if result is None:
-        return {"ok": True, "no_reply": True}
-    if not isinstance(result, str):
-        logger.warning(
-            "widget.chat bridge: handler returned %s; expected str or None",
-            type(result).__name__,
-        )
-        return {
-            "ok": False,
-            "error": (
-                f"@on_chat('widget') handler must return a string or None; "
-                f"got {type(result).__name__}"
+        end_user_token = _set_end_user_context(_EndUserContext(
+            id=str(end_user_payload["id"]),
+            email=end_user_payload.get("email"),
+            display_name=end_user_payload.get("display_name"),
+            sensitivity_hint=str(
+                end_user_payload.get("sensitivity_hint") or "public"
             ),
-        }
-    if not result.strip():
-        return {"ok": True, "no_reply": True}
+        ))
 
+    # Phase 25.5: outer try/finally so the end_user contextvar is
+    # reset on every return path (handler return, escalation, crash).
     try:
-        _respond_helper(conversation_id, result)
-    except LightseiError as exc:
-        logger.warning(
-            "widget.chat bridge: respond call failed: %s", exc,
-        )
-        return {"ok": False, "responded": False, "error": str(exc)}
-    return {"ok": True, "responded": True}
+        try:
+            result = handler(turn)
+        except LightseiEscalate as exc:
+            # Bot raised LightseiEscalate from inside the @on_chat
+            # handler. Route to the escalate endpoint with the
+            # exception's reason + payload.
+            try:
+                _escalate_helper(
+                    conversation_id,
+                    reason=exc.reason,
+                    payload=exc.payload,
+                )
+            except LightseiError as inner:
+                logger.warning(
+                    "widget.chat bridge: escalate after LightseiEscalate "
+                    "failed: %s", inner,
+                )
+                return {"ok": False, "escalated": False, "error": str(inner)}
+            return {"ok": True, "escalated": True, "reason": exc.reason}
+        except BaseException as exc:
+            # Uncaught exception. Surface as bot_crash escalation so
+            # the operator gets pulled in rather than the user staring
+            # at a silent conversation. Don't let an exception in
+            # escalate() propagate either, graceful degradation per
+            # CLAUDE.md.
+            logger.exception(
+                "widget.chat bridge: handler raised; escalating as bot_crash"
+            )
+            try:
+                _escalate_helper(
+                    conversation_id,
+                    reason="bot_crash",
+                    payload={"error": repr(exc)},
+                )
+            except Exception:
+                pass
+            return {"ok": False, "escalated": True, "error": repr(exc)}
+
+        # Successful return. Two shapes accepted: a string reply or
+        # None (handler decided not to reply this turn). Anything else
+        # is a bot-author bug, surface it cleanly.
+        if result is None:
+            return {"ok": True, "no_reply": True}
+        if not isinstance(result, str):
+            logger.warning(
+                "widget.chat bridge: handler returned %s; expected str or None",
+                type(result).__name__,
+            )
+            return {
+                "ok": False,
+                "error": (
+                    f"@on_chat('widget') handler must return a string or None; "
+                    f"got {type(result).__name__}"
+                ),
+            }
+        if not result.strip():
+            return {"ok": True, "no_reply": True}
+
+        try:
+            _respond_helper(conversation_id, result)
+        except LightseiError as exc:
+            logger.warning(
+                "widget.chat bridge: respond call failed: %s", exc,
+            )
+            return {"ok": False, "responded": False, "error": str(exc)}
+        return {"ok": True, "responded": True}
+    finally:
+        if end_user_token is not None:
+            from ._end_user import _reset_end_user_context
+            _reset_end_user_context(end_user_token)
 
 
 def _register_widget_chat_bridge() -> None:
