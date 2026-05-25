@@ -429,8 +429,15 @@ export default function Header() {
                       {user.email}
                     </div>
                   </div>
-                  {/* Phase 23.4: list + switch + create workspaces. */}
-                  <WorkspaceSwitcher onClose={() => setMenuOpen(false)} />
+                  {/* Phase 23.4: list + switch + create workspaces.
+                      Phase 23.x (#218): onWorkspaceChanged lets the
+                      switcher lift the new workspace into Header
+                      state so the chip + dropdown title catch up
+                      without a page reload. */}
+                  <WorkspaceSwitcher
+                    onClose={() => setMenuOpen(false)}
+                    onWorkspaceChanged={(ws) => setWorkspace(ws)}
+                  />
                   <div className="py-1 border-t border-gray-100">
                     <Link
                       href="/workspace-settings"

@@ -6,13 +6,32 @@ import { useEffect, useState } from "react";
 import {
   createMyWorkspace,
   listMyWorkspaces,
+  setStoredWorkspace,
+  SessionWorkspace,
   switchMyWorkspace,
   WorkspaceMembership,
 } from "./api";
 
 type Props = {
   onClose: () => void;
+  // Phase 23.x (#218): optional callback the Header passes in so its
+  // workspace chip + dropdown title can update without a page reload.
+  // When set, WorkspaceSwitcher invokes it after a successful
+  // switch / create with the WorkspaceMembership shape; Header lifts
+  // that into its own SessionWorkspace state.
+  onWorkspaceChanged?: (next: SessionWorkspace) => void;
 };
+
+function _toSessionWorkspace(m: WorkspaceMembership): SessionWorkspace {
+  return {
+    id: m.id,
+    name: m.name,
+    plan_tier: m.plan_tier === "paid" ? "paid" : "free",
+    created_at: m.created_at,
+    // The membership response doesn't carry billing-shaped fields;
+    // they refresh on next fetchWorkspace() call (e.g. /account load).
+  };
+}
 
 /**
  * Phase 23.4: workspace switcher mounted inside the Header dropdown.
@@ -24,7 +43,10 @@ type Props = {
  * pulls fresh state. "+ New workspace" opens an inline modal that
  * names + creates + auto-switches the new workspace.
  */
-export default function WorkspaceSwitcher({ onClose }: Props) {
+export default function WorkspaceSwitcher({
+  onClose,
+  onWorkspaceChanged,
+}: Props) {
   const router = useRouter();
   const [rows, setRows] = useState<WorkspaceMembership[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -51,7 +73,13 @@ export default function WorkspaceSwitcher({ onClose }: Props) {
     setBusyId(target.id);
     setError(null);
     try {
-      await switchMyWorkspace(target.id);
+      const updated = await switchMyWorkspace(target.id);
+      // Phase 23.x (#218): patch session storage + lift Header state
+      // BEFORE router.refresh() so the chip + dropdown title catch
+      // up without waiting for a remount.
+      const ws = _toSessionWorkspace(updated);
+      setStoredWorkspace(ws);
+      onWorkspaceChanged?.(ws);
       // Mutating the session active pointer = every workspace-scoped
       // fetch needs to re-run. router.refresh() invalidates the
       // App Router's RSC cache; client useEffect-driven fetches
@@ -122,7 +150,13 @@ export default function WorkspaceSwitcher({ onClose }: Props) {
       {showCreate && (
         <CreateWorkspaceModal
           onClose={() => setShowCreate(false)}
-          onCreated={() => {
+          onCreated={(created) => {
+            // Phase 23.x (#218): same storage-patch + parent-notify
+            // pattern as the switch path so the Header chip catches
+            // up immediately.
+            const ws = _toSessionWorkspace(created);
+            setStoredWorkspace(ws);
+            onWorkspaceChanged?.(ws);
             // The backend already flipped active; close the parent
             // dropdown + refresh so every component pulls the new
             // workspace's data.
@@ -141,7 +175,7 @@ function CreateWorkspaceModal({
   onCreated,
 }: {
   onClose: () => void;
-  onCreated: () => void;
+  onCreated: (created: WorkspaceMembership) => void;
 }) {
   const [name, setName] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -156,8 +190,8 @@ function CreateWorkspaceModal({
     setError(null);
     setSubmitting(true);
     try {
-      await createMyWorkspace(trimmed);
-      onCreated();
+      const created = await createMyWorkspace(trimmed);
+      onCreated(created);
     } catch (e) {
       setError((e as Error).message);
       setSubmitting(false);

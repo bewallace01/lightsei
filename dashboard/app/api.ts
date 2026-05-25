@@ -89,6 +89,18 @@ export function getStoredWorkspace(): SessionWorkspace | null {
   return raw ? (JSON.parse(raw) as SessionWorkspace) : null;
 }
 
+// Phase 23.x (#218): patch just the workspace bucket of session
+// storage without re-setting the token + user. The
+// WorkspaceSwitcher calls this after a switch/create so the
+// Header chip + dropdown title catch up without a page reload.
+// Billing-shaped fields (free_credits, has_stripe_customer, etc.)
+// not present on the WorkspaceMembership response get refreshed
+// next time the dashboard calls fetchWorkspace().
+export function setStoredWorkspace(workspace: SessionWorkspace): void {
+  if (typeof window === "undefined") return;
+  localStorage.setItem(WORKSPACE_KEY, JSON.stringify(workspace));
+}
+
 function authHeaders(): Record<string, string> {
   const token = getSessionToken() || FALLBACK_API_KEY;
   if (!token) return {};
