@@ -2,8 +2,12 @@
 
 Two credential types live in the same `Authorization: Bearer <token>` header:
   - API keys (prefix `bk_`) authenticate as a workspace, no user identity.
-  - Session tokens (prefix `bks_`) authenticate as a user; the workspace is
-    the user's owning workspace.
+    The workspace is `api_key.workspace_id` — pinned at key creation.
+  - Session tokens (prefix `bks_`) authenticate as a user. Phase 23.2 onward,
+    the workspace is `session.active_workspace_id` (the dashboard's per-session
+    active pointer), guarded by a `workspace_members` lookup so a session
+    whose user was removed from the active workspace (or whose workspace was
+    deleted from another tab) 401s cleanly instead of silently leaking access.
 
 In both cases the dep returns a workspace_id. `get_authenticated_request`
 also returns whichever credential row was used so endpoints that need the
@@ -19,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from db import get_session
 from keys import SESSION_PREFIX, hash_token, is_api_key, is_session_token
-from models import ApiKey, Session as SessionRow, User
+from models import ApiKey, Session as SessionRow, User, WorkspaceMember
 
 
 @dataclass
@@ -62,7 +66,36 @@ def _resolve(
         user = session.get(User, sess.user_id)
         if user is None:
             raise HTTPException(status_code=401, detail="invalid session")
-        return AuthResult(workspace_id=user.workspace_id, user=user, session=sess)
+        # Phase 23.2: the dashboard's active workspace lives on the
+        # session row (per-session, so two tabs can hold different
+        # workspaces open). A NULL active pointer means the workspace
+        # was deleted from another tab (FK SET NULL fired) or the
+        # session predates migration backfill — either way the
+        # dashboard routes the user to the workspace picker.
+        if sess.active_workspace_id is None:
+            raise HTTPException(
+                status_code=401, detail="no active workspace",
+            )
+        # Defensive: confirm the user is still a member of the active
+        # workspace. Guards against a stale session whose user got
+        # removed (future Phase 23B invite-revoke flow) or whose
+        # active_workspace_id somehow points at a workspace the user
+        # never joined.
+        is_member = session.execute(
+            select(WorkspaceMember).where(
+                WorkspaceMember.user_id == user.id,
+                WorkspaceMember.workspace_id == sess.active_workspace_id,
+            )
+        ).scalar_one_or_none()
+        if is_member is None:
+            raise HTTPException(
+                status_code=401, detail="not a member of active workspace",
+            )
+        return AuthResult(
+            workspace_id=sess.active_workspace_id,
+            user=user,
+            session=sess,
+        )
 
     # Anything else falls through to api_keys. Note we deliberately allow
     # tokens without the `bk_` prefix here so the seeded "demo-key" still

@@ -75,6 +75,7 @@ from models import (
     WidgetEscalation,
     WidgetMessage,
     Workspace,
+    WorkspaceMember,
     WorkspaceSecret,
     is_valid_trigger_kind,
 )
@@ -4003,6 +4004,11 @@ def _create_session(session: Session, user: User) -> tuple[SessionRow, str]:
         token_hash=hash_token(plaintext),
         created_at=now,
         expires_at=now + SESSION_TTL,
+        # Phase 23.2: new sessions land in the user's legacy/primary
+        # workspace. Phase 23.3+ lets the operator switch via the
+        # header dropdown; until then this is the only workspace they
+        # have anyway.
+        active_workspace_id=user.workspace_id,
     )
     session.add(row)
     session.flush()
@@ -4046,6 +4052,12 @@ def signup(
     )
     session.add(user)
     session.flush()  # need user.id present before sessions row FKs to it
+
+    # Phase 23.2: workspace_members is the new source of truth for
+    # "this user belongs to this workspace." Insert here so the new
+    # session-auth resolver (auth.py) accepts the freshly-minted
+    # session on the very next request.
+    session.add(WorkspaceMember(user_id=user.id, workspace_id=ws.id))
 
     plaintext_key = generate_key()
     api_key_row = ApiKey(
@@ -4286,6 +4298,8 @@ def consume_magic_link(
         )
         session.add(user)
         session.flush()
+        # Phase 23.2: see the apikey signup site for the same insert.
+        session.add(WorkspaceMember(user_id=user.id, workspace_id=ws.id))
     else:
         # Existing user signing in via magic link — promote them to
         # verified if they weren't already. Doesn't change the original
@@ -4506,6 +4520,8 @@ def google_oauth_callback(
         )
         session.add(user)
         session.flush()
+        # Phase 23.2: see the apikey signup site for the same insert.
+        session.add(WorkspaceMember(user_id=user.id, workspace_id=ws.id))
     else:
         # Existing user signing in via Google — promote to verified if
         # Google says the email is verified. Doesn't rewrite the
