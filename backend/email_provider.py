@@ -200,12 +200,12 @@ def send_end_user_magic_link(
 
     `dashboard_url` is the base of the dashboard host
     (`https://app.lightsei.com`); the token lands on
-    `/auth/end-user/magic-link?token=...` which the Phase 26.2
-    end-user consume page POSTs back to the backend.
+    `/c/auth/magic-link?token=...` which the Phase 26.2 end-user
+    consume page POSTs back to the backend.
     """
     magic_url = (
         f"{dashboard_url.rstrip('/')}"
-        f"/auth/end-user/magic-link?token={token}"
+        f"/c/auth/magic-link?token={token}"
     )
     html, text = _render_end_user_magic_link_body(magic_url)
     payload = {

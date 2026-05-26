@@ -45,7 +45,7 @@ def _hash(token: str) -> str:
 
 def test_end_user_send_captures_with_distinct_subject_and_url():
     """End-user helper lands a captured row with the consumer-
-    friendly subject and the /auth/end-user/magic-link path. Keeps
+    friendly subject and the /c/auth/magic-link path. Keeps
     the two senders visibly separate so a routing bug surfaces
     immediately in tests."""
     ep.send_end_user_magic_link(
@@ -59,7 +59,7 @@ def test_end_user_send_captures_with_distinct_subject_and_url():
     assert captured[0]["subject"] == "Sign in to your account"
     assert (
         captured[0]["_magic_url"]
-        == "http://dash.test/auth/end-user/magic-link?token=tok-eu-abc"
+        == "http://dash.test/c/auth/magic-link?token=tok-eu-abc"
     )
     # Both bodies present + carry the token through.
     assert "tok-eu-abc" in captured[0]["text"]
@@ -113,7 +113,7 @@ def test_end_user_request_inserts_token_and_sends_email(client):
     captured = ep.captured_emails()
     assert len(captured) == 1
     assert captured[0]["to"] == ["newcustomer@example.com"]
-    assert "/auth/end-user/magic-link?token=" in captured[0]["_magic_url"]
+    assert "/c/auth/magic-link?token=" in captured[0]["_magic_url"]
 
 
 def test_end_user_request_lowercases_email(client):
