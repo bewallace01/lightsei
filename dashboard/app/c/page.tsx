@@ -22,6 +22,7 @@ import {
   fetchEndUserMe,
   fetchEndUserVendorsWithCounts,
   redeemEndUserInvite,
+  requestEndUserMagicLink,
 } from "../api";
 import { clearEndUserSession } from "../endUserSession";
 import EnablePushPrompt from "./EnablePushPrompt";
@@ -94,17 +95,7 @@ export default function ConsumerHomePage() {
   }
 
   if (state.kind === "needs-signin") {
-    return (
-      <main className="min-h-screen px-6 py-16 max-w-md mx-auto text-center">
-        <h1 className="text-2xl font-semibold tracking-tight mb-3">
-          You&apos;re signed out
-        </h1>
-        <p className="text-sm text-gray-500 mb-6">
-          Sign in via the magic-link email from any vendor that
-          invited you, or ask them to send a fresh one.
-        </p>
-      </main>
-    );
+    return <SignedOutPanel />;
   }
 
   if (state.kind === "error") {
@@ -246,6 +237,77 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
         Enter invite code
       </button>
     </div>
+  );
+}
+
+function SignedOutPanel() {
+  const [email, setEmail] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [sent, setSent] = useState(false);
+
+  async function onSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    const trimmed = email.trim();
+    if (!trimmed || submitting) return;
+    setSubmitting(true);
+    setError(null);
+    try {
+      await requestEndUserMagicLink(trimmed);
+      setSent(true);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  if (sent) {
+    return (
+      <main className="min-h-screen px-6 py-16 max-w-md mx-auto text-center">
+        <h1 className="text-2xl font-semibold tracking-tight mb-3">
+          Check your email
+        </h1>
+        <p className="text-sm text-gray-500">
+          If an account exists for that address, a sign-in link is on
+          its way. Tap the link from this device to land back here
+          signed in.
+        </p>
+      </main>
+    );
+  }
+
+  return (
+    <main className="min-h-screen px-6 py-16 max-w-md mx-auto">
+      <h1 className="text-2xl font-semibold tracking-tight mb-3 text-center">
+        Sign in
+      </h1>
+      <p className="text-sm text-gray-500 mb-6 text-center">
+        Enter your email and we&apos;ll send a magic-link.
+      </p>
+      <form onSubmit={onSubmit} className="space-y-3">
+        <input
+          type="email"
+          autoFocus
+          required
+          inputMode="email"
+          autoComplete="email"
+          placeholder="you@example.com"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          disabled={submitting}
+          className="w-full text-sm rounded-md ring-1 ring-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-600"
+        />
+        {error && <p className="text-xs text-red-600">{error}</p>}
+        <button
+          type="submit"
+          disabled={submitting || !email.trim()}
+          className="w-full text-sm rounded-md bg-indigo-600 text-white px-4 py-2 hover:bg-indigo-500 disabled:opacity-50"
+        >
+          {submitting ? "Sending…" : "Send magic link"}
+        </button>
+      </form>
+    </main>
   );
 }
 
