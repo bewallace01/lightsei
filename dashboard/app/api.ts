@@ -2724,3 +2724,72 @@ export async function revokeVendorInviteCode(
     { method: "DELETE" },
   )) as { revoked: boolean; code: string };
 }
+
+// ----- Phase 27.4: end-user side of invite codes + vendors-with-counts -----
+
+export type EndUserVendorWithCount = EndUserVendor & {
+  unread_count: number;
+};
+
+export async function fetchEndUserVendorsWithCounts(): Promise<{
+  vendors: EndUserVendorWithCount[];
+}> {
+  return (await endUserAuthedJson("/me/end-user/vendors")) as {
+    vendors: EndUserVendorWithCount[];
+  };
+}
+
+export type EndUserRedeemResult = {
+  linked: boolean;
+  vendor: EndUserVendor | null;
+  link: {
+    linked_at: string;
+    linked_via: string;
+    notification_pref: string;
+    display_name_override: string | null;
+  };
+};
+
+export async function redeemEndUserInvite(
+  code: string,
+): Promise<EndUserRedeemResult> {
+  return (await endUserAuthedJson("/me/end-user/redeem-invite", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ code }),
+  })) as EndUserRedeemResult;
+}
+
+export async function patchEndUserVendor(
+  workspaceId: string,
+  patch: {
+    notification_pref?: string;
+    display_name_override?: string | null;
+  },
+): Promise<{
+  workspace_id: string;
+  notification_pref: string;
+  display_name_override: string | null;
+}> {
+  return (await endUserAuthedJson(
+    `/me/end-user/vendors/${encodeURIComponent(workspaceId)}`,
+    {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(patch),
+    },
+  )) as {
+    workspace_id: string;
+    notification_pref: string;
+    display_name_override: string | null;
+  };
+}
+
+export async function unlinkEndUserVendor(
+  workspaceId: string,
+): Promise<{ unlinked: boolean; workspace_id: string }> {
+  return (await endUserAuthedJson(
+    `/me/end-user/vendors/${encodeURIComponent(workspaceId)}`,
+    { method: "DELETE" },
+  )) as { unlinked: boolean; workspace_id: string };
+}

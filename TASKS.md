@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 27 — 27.4 end-user `/c` my-bots index. `/c` becomes the vendor-cards home: one card per linked vendor (logo, name, last message preview, unread count, "Open chat" CTA). "+ Add vendor" opens invite-code entry modal. Per-vendor "Settings" link to `/c/{slug}/settings`. Phase 25 + 26 closed. 27.1 schema + 27.2 endpoints + 27.3 operator UI shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 27 — 27.5 per-vendor end-user settings page at /c/{slug}/settings. End user manages display_name_override, notification_pref, unsubscribe (DELETE /me/end-user/vendors/{workspace_id}) for that vendor. Phase 25 + 26 closed. 27.1 schema + 27.2 endpoints + 27.3 operator UI + 27.4 /c my-bots index shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,38 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 27.4: end-user `/c` my-bots index + Add-vendor invite-code redeem modal
+
+`/c` graduates from a simple vendor list (Phase 26.2) into the proper my-bots dashboard. End users can now redeem invite codes directly from the home page without leaving the consumer surface.
+
+**What shipped**:
+
+- `dashboard/app/api.ts`: 4 new helpers around 27.2's end-user endpoints:
+  - `EndUserVendorWithCount` type + `fetchEndUserVendorsWithCounts()` (Phase 27.2 GET /me/end-user/vendors with the `unread_count` field).
+  - `redeemEndUserInvite(code)` (POST /me/end-user/redeem-invite).
+  - `patchEndUserVendor(workspaceId, patch)` (PATCH /me/end-user/vendors/{id}) — pre-wired for 27.5.
+  - `unlinkEndUserVendor(workspaceId)` (DELETE /me/end-user/vendors/{id}) — pre-wired for 27.5.
+- `dashboard/app/c/page.tsx` rewritten:
+  - Loads `fetchEndUserMe` + `fetchEndUserVendorsWithCounts` in parallel.
+  - Header: signed-in email + "+ Add vendor" button + "Sign out".
+  - Vendor cards: name, bot subtitle, unread count badge (hidden when 0), "Open chat →" link to `/c/{slug}`, per-card "Settings" link to `/c/{slug}/settings` (Phase 27.5 builds the actual page).
+  - Empty state: prominent "Enter invite code" CTA for brand-new end users.
+  - `AddVendorModal` client component: backdrop + click-to-close + escape via Cancel, single-line code input (font-mono), auto-focus, inline error display, refreshes vendor list on success.
+
+**Spec deviations**:
+- "Logo" + "last message preview" parked. The vendor projection (`_serialize_vendor_for_end_user` in backend) doesn't yet include either; adding them is a Phase 27B follow-up. The dashboard structure (card with subtitle line) is in place so when the backend adds those fields, only the card body needs an edit, not a layout rework.
+- `unread_count` is always 0 from the backend in v1 (Phase 27.2 carry-over). The badge logic is wired (`v.unread_count > 0` → render); flipping to real counts is a follow-up.
+
+**Design notes**:
+- Modal click-outside-to-close uses `e.stopPropagation()` on the inner card so clicks inside don't bubble up + close. Standard pattern.
+- "Settings" link uses gray-500 styling (de-emphasized) vs "Open chat" indigo-600 (primary action). Most clicks should be Open Chat; settings is a tap-through for occasional edits.
+- The Add-vendor modal redeems via `POST /me/end-user/redeem-invite` which 422s on bad codes; the error.message surfaces directly inline. Backend's distinctive detail ("invite code is invalid or expired, ask the vendor to send a fresh one") shows in the modal verbatim.
+- After-redeem flow: close modal → trigger parent `refresh()` → vendor list re-renders with the new card. No router push needed (same route).
+
+**Verification**: tsc clean. next build clean. `/c` bundle 2.29 → 2.9 kB (+0.61 kB for the modal + card extensions). Well under the spec's 5 kB budget.
+
+**What this enables**: 27.5 builds the per-vendor settings page at `/c/{slug}/settings` using the (already-wired) `patchEndUserVendor` + `unlinkEndUserVendor` helpers. 27.6 closes Phase 27 with tests + sweep + scripted demo.
 
 ### 2026-05-25 — Phase 27.3: operator invite-code management on /workspace-settings
 
