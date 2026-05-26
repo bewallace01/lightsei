@@ -45,6 +45,10 @@ export const viewport: Viewport = {
   // iOS when the input is focused.
   initialScale: 1,
   width: "device-width",
+  // Light-mode only — same reason as the operator dashboard
+  // (Chrome/Edge auto-dark would wreck the gray-500 text + chip
+  // colors that were tuned against white).
+  colorScheme: "light",
 };
 
 export default function ConsumerLayout({

@@ -1,5 +1,5 @@
 import "./globals.css";
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Fraunces, Space_Grotesk, Space_Mono } from "next/font/google";
 import Header from "./Header";
 
@@ -44,6 +44,16 @@ const mono = Space_Mono({
 export const metadata: Metadata = {
   title: "Lightsei",
   description: "Drop-in observability and guardrails for AI agents",
+};
+
+// Operator dashboard is light-mode only. Without this, Chrome /
+// Edge / iOS Safari auto-darken the page based on the user's OS
+// preference, which leaves gray-500 text + faded badge colors
+// barely-readable against the auto-darkened background. The /c
+// consumer layout sets its own viewport so this only affects the
+// operator surface.
+export const viewport: Viewport = {
+  colorScheme: "light",
 };
 
 export default function RootLayout({
