@@ -57,26 +57,23 @@ function statusBadge(status: InboxConversationRow["status"]): StatusBadge {
     case "escalated":
       return {
         label: "Escalated",
-        className:
-          "bg-rose-900/40 border-rose-700/60 text-rose-200",
+        className: "bg-red-100 border-red-200 text-red-800",
       };
     case "operator_owned":
       return {
         label: "Handling",
-        className:
-          "bg-amber-900/40 border-amber-700/60 text-amber-200",
+        className: "bg-amber-100 border-amber-200 text-amber-800",
       };
     case "resolved":
       return {
         label: "Resolved",
-        className: "bg-zinc-800 border-zinc-700 text-zinc-400",
+        className: "bg-gray-100 border-gray-200 text-gray-600",
       };
     case "open":
     default:
       return {
         label: "Open",
-        className:
-          "bg-indigo-900/40 border-indigo-700/60 text-indigo-200",
+        className: "bg-indigo-100 border-indigo-200 text-indigo-800",
       };
   }
 }
@@ -305,11 +302,11 @@ export default function InboxPage(): JSX.Element {
   );
 
   return (
-    <main className="max-w-6xl mx-auto px-6 py-6 text-sm text-zinc-200">
+    <main className="max-w-6xl mx-auto px-6 py-6 text-sm text-gray-900">
       <header className="mb-4 flex items-baseline justify-between gap-2">
         <div>
           <h1 className="text-xl font-semibold">Inbox</h1>
-          <p className="text-zinc-400 mt-1 text-xs">
+          <p className="text-gray-600 mt-1 text-xs">
             Conversations from your customer-facing widget. Escalated
             and operator-owned threads bubble to the top.
           </p>
@@ -319,14 +316,14 @@ export default function InboxPage(): JSX.Element {
             type="button"
             onClick={() => void onScanPatterns()}
             disabled={busy === "scan"}
-            className="rounded border border-zinc-700 px-3 py-1 text-xs text-zinc-200 hover:bg-zinc-800 disabled:opacity-50"
+            className="rounded border border-gray-200 px-3 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50"
             title="Scan open escalations for patterns and generate suggested fixes"
           >
             {busy === "scan" ? "Scanning…" : "Scan for patterns"}
           </button>
           <Link
             href="/widget-settings"
-            className="text-xs text-zinc-400 hover:text-zinc-200 underline"
+            className="text-xs text-gray-500 hover:text-gray-900 underline"
           >
             Widget settings →
           </Link>
@@ -334,12 +331,12 @@ export default function InboxPage(): JSX.Element {
       </header>
 
       {flash && (
-        <div className="mb-3 rounded border border-emerald-700/60 bg-emerald-900/30 px-3 py-1.5 text-emerald-200 text-xs">
+        <div className="mb-3 rounded border border-green-200 bg-green-50 px-3 py-1.5 text-green-800 text-xs">
           {flash}
         </div>
       )}
       {error && (
-        <div className="mb-3 rounded border border-rose-700/60 bg-rose-900/30 px-3 py-2 text-rose-200">
+        <div className="mb-3 rounded border border-red-200 bg-red-50 px-3 py-2 text-red-700">
           {error}
         </div>
       )}
@@ -354,8 +351,8 @@ export default function InboxPage(): JSX.Element {
             className={
               "rounded-full px-3 py-0.5 text-xs border " +
               (filter === f.key
-                ? "bg-indigo-600/30 border-indigo-600 text-indigo-200"
-                : "border-zinc-700 text-zinc-400 hover:bg-zinc-800")
+                ? "bg-accent-600 border-accent-600 text-white"
+                : "border-gray-200 text-gray-600 hover:bg-gray-50")
             }
           >
             {f.label}
@@ -365,15 +362,15 @@ export default function InboxPage(): JSX.Element {
 
       <div className="grid grid-cols-1 md:grid-cols-[320px,1fr] gap-3">
         {/* Conversation list */}
-        <aside className="rounded-lg border border-zinc-800 bg-zinc-950/60 overflow-hidden">
+        <aside className="rounded-lg border border-gray-200 bg-white overflow-hidden">
           {loadingList && conversations.length === 0 ? (
-            <p className="p-3 text-zinc-500">Loading…</p>
+            <p className="p-3 text-gray-500">Loading…</p>
           ) : conversations.length === 0 ? (
-            <p className="p-3 text-zinc-500 italic">
+            <p className="p-3 text-gray-500 italic">
               No conversations match this filter.
             </p>
           ) : (
-            <ul className="divide-y divide-zinc-800 max-h-[calc(100vh-220px)] overflow-y-auto">
+            <ul className="divide-y divide-gray-100 max-h-[calc(100vh-220px)] overflow-y-auto">
               {conversations.map((c) => {
                 const badge = statusBadge(c.status);
                 const selected = c.id === selectedId;
@@ -383,8 +380,8 @@ export default function InboxPage(): JSX.Element {
                       type="button"
                       onClick={() => setSelectedId(c.id)}
                       className={
-                        "w-full text-left px-3 py-2 hover:bg-zinc-900 " +
-                        (selected ? "bg-zinc-900" : "")
+                        "w-full text-left px-3 py-2 hover:bg-gray-50 " +
+                        (selected ? "bg-gray-100" : "")
                       }
                     >
                       <div className="flex items-center justify-between gap-2">
@@ -400,19 +397,19 @@ export default function InboxPage(): JSX.Element {
                           <SensitivityChip level={c.sensitivity_level} size="sm" />
                         )}
                       </div>
-                      <p className="text-xs text-zinc-300 mt-1 line-clamp-2">
+                      <p className="text-xs text-gray-700 mt-1 line-clamp-2">
                         {c.last_message_preview || (
-                          <span className="text-zinc-600 italic">
+                          <span className="text-gray-400 italic">
                             (no messages yet)
                           </span>
                         )}
                       </p>
-                      <div className="flex items-center justify-between mt-1 text-[10px] text-zinc-500">
+                      <div className="flex items-center justify-between mt-1 text-[10px] text-gray-500">
                         <span>{c.customer_facing_agent_name || "—"}</span>
                         <span>{fmtRelative(c.last_message_at)}</span>
                       </div>
                       {c.open_escalation_count > 0 && (
-                        <div className="text-[10px] text-rose-300 mt-0.5">
+                        <div className="text-[10px] text-red-700 mt-0.5">
                           {c.open_escalation_count} open escalation
                           {c.open_escalation_count > 1 ? "s" : ""}
                         </div>
@@ -426,24 +423,24 @@ export default function InboxPage(): JSX.Element {
         </aside>
 
         {/* Thread view */}
-        <section className="rounded-lg border border-zinc-800 bg-zinc-950/60 flex flex-col min-h-[calc(100vh-220px)]">
+        <section className="rounded-lg border border-gray-200 bg-white flex flex-col min-h-[calc(100vh-220px)]">
           {!selectedId ? (
-            <div className="p-6 text-zinc-500 text-xs italic">
+            <div className="p-6 text-gray-500 text-xs italic">
               Pick a conversation from the list to view it.
             </div>
           ) : !detail ? (
-            <div className="p-6 text-zinc-500 text-xs italic">
+            <div className="p-6 text-gray-500 text-xs italic">
               {loadingDetail ? "Loading…" : "No detail loaded."}
             </div>
           ) : (
             <>
               {/* Thread header */}
-              <header className="px-4 py-2.5 border-b border-zinc-800 flex items-center justify-between">
+              <header className="px-4 py-2.5 border-b border-gray-200 flex items-center justify-between">
                 <div>
-                  <div className="text-xs text-zinc-500">
+                  <div className="text-xs text-gray-500">
                     {detail.anon_user_id || "anonymous"}
                   </div>
-                  <div className="text-sm font-semibold text-zinc-200">
+                  <div className="text-sm font-semibold text-gray-900">
                     {detail.customer_facing_agent_name || "—"}
                     {detail.sensitivity_level && (
                       <span className="ml-2">
@@ -467,20 +464,20 @@ export default function InboxPage(): JSX.Element {
 
               {/* Escalation panel (when there's an open one) */}
               {escalationOpen && (
-                <div className="px-4 py-2 border-b border-zinc-800 bg-rose-950/20">
-                  <div className="text-xs font-medium text-rose-200">
+                <div className="px-4 py-2 border-b border-gray-200 bg-red-50">
+                  <div className="text-xs font-medium text-red-800">
                     Open escalation: {escalationOpen.reason}
                   </div>
                   {Object.keys(escalationOpen.payload || {}).length > 0 && (
-                    <pre className="text-[11px] text-rose-300/80 mt-1 whitespace-pre-wrap">
+                    <pre className="text-[11px] text-red-700 mt-1 whitespace-pre-wrap font-mono">
                       {JSON.stringify(escalationOpen.payload, null, 2)}
                     </pre>
                   )}
                   {escalationOpen.suggested_fix && (
-                    <div className="mt-2 rounded border border-indigo-700/60 bg-indigo-950/30 p-2">
-                      <div className="text-xs font-medium text-indigo-200 mb-1">
+                    <div className="mt-2 rounded border border-indigo-200 bg-indigo-50 p-2">
+                      <div className="text-xs font-medium text-indigo-900 mb-1">
                         Polaris suggested:{" "}
-                        <span className="font-normal text-indigo-300/80">
+                        <span className="font-normal text-indigo-700">
                           {String(
                             escalationOpen.suggested_fix.summary ||
                               escalationOpen.suggested_fix.kind ||
@@ -489,7 +486,7 @@ export default function InboxPage(): JSX.Element {
                         </span>
                       </div>
                       {typeof escalationOpen.suggested_fix.detail === "string" && (
-                        <pre className="text-[11px] text-indigo-100/90 whitespace-pre-wrap mb-2">
+                        <pre className="text-[11px] text-indigo-900 whitespace-pre-wrap mb-2 font-mono">
                           {String(escalationOpen.suggested_fix.detail)}
                         </pre>
                       )}
@@ -498,7 +495,7 @@ export default function InboxPage(): JSX.Element {
                           type="button"
                           onClick={() => void onApplyFix(escalationOpen.id)}
                           disabled={busy === "apply"}
-                          className="rounded bg-indigo-600 hover:bg-indigo-500 px-2.5 py-1 text-xs text-white disabled:opacity-50"
+                          className="rounded bg-accent-600 hover:bg-accent-700 px-2.5 py-1 text-xs text-white disabled:opacity-50"
                         >
                           {busy === "apply" ? "Applying…" : "Apply suggested fix"}
                         </button>
@@ -506,7 +503,7 @@ export default function InboxPage(): JSX.Element {
                           type="button"
                           onClick={() => void onDismissFix(escalationOpen.id)}
                           disabled={busy === "dismiss"}
-                          className="rounded border border-zinc-700 px-2.5 py-1 text-xs text-zinc-300 hover:bg-zinc-800 disabled:opacity-50"
+                          className="rounded border border-gray-200 px-2.5 py-1 text-xs text-gray-700 hover:bg-gray-50 disabled:opacity-50"
                         >
                           {busy === "dismiss" ? "…" : "Dismiss"}
                         </button>
@@ -519,7 +516,7 @@ export default function InboxPage(): JSX.Element {
               {/* Messages pane */}
               <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
                 {detail.messages.length === 0 ? (
-                  <p className="text-xs text-zinc-500 italic">
+                  <p className="text-xs text-gray-500 italic">
                     No messages yet.
                   </p>
                 ) : (
@@ -531,19 +528,19 @@ export default function InboxPage(): JSX.Element {
 
               {/* Action bar */}
               {detail.status === "resolved" ? (
-                <div className="px-4 py-3 border-t border-zinc-800 text-xs text-zinc-500 italic">
+                <div className="px-4 py-3 border-t border-gray-200 text-xs text-gray-500 italic">
                   This conversation has been resolved. Reopening is not
                   supported in v1.
                 </div>
               ) : (
-                <div className="px-4 py-2 border-t border-zinc-800 flex flex-col gap-2">
+                <div className="px-4 py-2 border-t border-gray-200 flex flex-col gap-2">
                   <div className="flex items-center gap-2">
                     {detail.status !== "operator_owned" && (
                       <button
                         type="button"
                         onClick={() => void onTakeOver()}
                         disabled={busy === "take"}
-                        className="rounded bg-amber-700 hover:bg-amber-600 px-3 py-1 text-xs text-white disabled:opacity-50"
+                        className="rounded bg-amber-500 hover:bg-amber-600 px-3 py-1 text-xs text-white disabled:opacity-50"
                       >
                         {busy === "take" ? "…" : "Take over"}
                       </button>
@@ -552,11 +549,11 @@ export default function InboxPage(): JSX.Element {
                       type="button"
                       onClick={() => void onResolve()}
                       disabled={busy === "resolve"}
-                      className="rounded border border-emerald-700/60 text-emerald-300 px-3 py-1 text-xs hover:bg-emerald-900/30 disabled:opacity-50"
+                      className="rounded border border-emerald-200 text-emerald-700 px-3 py-1 text-xs hover:bg-emerald-50 disabled:opacity-50"
                     >
                       {busy === "resolve" ? "…" : "Mark resolved"}
                     </button>
-                    <span className="text-[11px] text-zinc-500 ml-auto">
+                    <span className="text-[11px] text-gray-500 ml-auto">
                       ⌘+Enter to send
                     </span>
                   </div>
@@ -572,13 +569,13 @@ export default function InboxPage(): JSX.Element {
                           : "Reply to chime in (use Take over to pause the bot)…"
                       }
                       rows={2}
-                      className="flex-1 resize-none rounded border border-zinc-700 bg-black/40 px-2 py-1.5 text-xs text-zinc-100 focus:outline-none focus:ring-1 focus:ring-indigo-400"
+                      className="flex-1 resize-none rounded border border-gray-300 bg-white px-2 py-1.5 text-xs text-gray-900 focus:outline-none focus:ring-1 focus:ring-accent-500"
                     />
                     <button
                       type="button"
                       onClick={() => void onReply()}
                       disabled={!replyText.trim() || busy === "reply"}
-                      className="rounded bg-indigo-600 hover:bg-indigo-500 px-3 py-1.5 text-xs text-white disabled:opacity-50"
+                      className="rounded bg-accent-600 hover:bg-accent-700 px-3 py-1.5 text-xs text-white disabled:opacity-50"
                     >
                       {busy === "reply" ? "…" : "Send"}
                     </button>
@@ -601,13 +598,13 @@ function InboxBubble({
 }): JSX.Element {
   const role = message.role;
   const alignRight = role === "operator";  // operator = "us" in the inbox view
-  let bubble = "bg-zinc-800 text-zinc-200";  // default
+  let bubble = "bg-gray-100 text-gray-900";  // default
   let prefix = "";
-  if (role === "user") bubble = "bg-zinc-900 border border-zinc-700 text-zinc-200";
-  else if (role === "bot") bubble = "bg-indigo-900/30 border border-indigo-700/40 text-indigo-100";
-  else if (role === "operator") bubble = "bg-emerald-900/40 border border-emerald-700/60 text-emerald-100";
+  if (role === "user") bubble = "bg-gray-50 border border-gray-200 text-gray-900";
+  else if (role === "bot") bubble = "bg-indigo-50 border border-indigo-200 text-indigo-900";
+  else if (role === "operator") bubble = "bg-emerald-50 border border-emerald-200 text-emerald-900";
   else if (role === "system") {
-    bubble = "bg-amber-900/20 border border-amber-700/40 text-amber-200/80 italic text-xs";
+    bubble = "bg-amber-50 border border-amber-200 text-amber-800 italic text-xs";
     prefix = "system · ";
   }
   return (

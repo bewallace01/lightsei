@@ -156,16 +156,16 @@ export default function WidgetSettingsPage(): JSX.Element {
 
   if (loading) {
     return (
-      <main className="max-w-3xl mx-auto px-6 py-8 text-sm text-zinc-300">
-        <p className="text-zinc-500">Loading…</p>
+      <main className="max-w-3xl mx-auto px-6 py-8 text-sm text-gray-700">
+        <p className="text-gray-500">Loading…</p>
       </main>
     );
   }
 
   if (!settings) {
     return (
-      <main className="max-w-3xl mx-auto px-6 py-8 text-sm text-zinc-300">
-        <p className="text-rose-300">{error || "Failed to load widget settings."}</p>
+      <main className="max-w-3xl mx-auto px-6 py-8 text-sm text-gray-700">
+        <p className="text-red-700">{error || "Failed to load widget settings."}</p>
       </main>
     );
   }
@@ -176,15 +176,15 @@ export default function WidgetSettingsPage(): JSX.Element {
       : `/widget/${settings.widget_public_id}`;
 
   return (
-    <main className="max-w-3xl mx-auto px-6 py-8 text-sm text-zinc-200">
+    <main className="max-w-3xl mx-auto px-6 py-8 text-sm text-gray-900">
       <header className="mb-5">
-        <div className="text-xs text-zinc-500 mb-2">
-          <Link href="/integrations" className="hover:text-zinc-300">
+        <div className="text-xs text-gray-500 mb-2">
+          <Link href="/integrations" className="hover:text-gray-900">
             ← Integrations
           </Link>
         </div>
         <h1 className="text-xl font-semibold">Widget settings</h1>
-        <p className="text-zinc-400 mt-1 max-w-xl">
+        <p className="text-gray-600 mt-1 max-w-xl">
           Configure the embeddable chat widget your end users see on
           your product. Pick which bot answers them, control which
           sites can embed the widget, and copy the snippet.
@@ -192,30 +192,30 @@ export default function WidgetSettingsPage(): JSX.Element {
       </header>
 
       {flash && (
-        <div className="mb-4 rounded border border-emerald-700/60 bg-emerald-900/30 px-3 py-2 text-emerald-200">
+        <div className="mb-4 rounded border border-green-200 bg-green-50 px-3 py-2 text-green-800">
           {flash}
         </div>
       )}
       {error && (
-        <div className="mb-4 rounded border border-rose-700/60 bg-rose-900/30 px-3 py-2 text-rose-200">
+        <div className="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-red-700">
           {error}
         </div>
       )}
 
       {/* Bot picker */}
-      <section className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-4 mb-4">
-        <h2 className="text-sm font-semibold text-zinc-200 mb-2">
+      <section className="rounded-lg border border-gray-200 bg-white p-4 mb-4">
+        <h2 className="text-sm font-semibold text-gray-900 mb-2">
           Customer-facing bot
         </h2>
-        <p className="text-zinc-400 text-xs mb-3">
+        <p className="text-gray-600 text-xs mb-3">
           This bot answers every widget conversation in this workspace.
-          Picking it auto-grants <code className="text-zinc-300">widget:respond</code>{" "}
-          + <code className="text-zinc-300">widget:escalate</code> if missing.
+          Picking it auto-grants <code className="text-gray-900 font-mono">widget:respond</code>{" "}
+          + <code className="text-gray-900 font-mono">widget:escalate</code> if missing.
         </p>
         {settings.available_agents.length === 0 ? (
-          <p className="text-zinc-500 text-xs italic">
+          <p className="text-gray-500 text-xs italic">
             No agents deployed in this workspace yet. Deploy a bot from{" "}
-            <Link href="/agents" className="text-indigo-400 hover:underline">
+            <Link href="/agents" className="text-accent-600 hover:underline">
               /agents
             </Link>{" "}
             first.
@@ -225,7 +225,7 @@ export default function WidgetSettingsPage(): JSX.Element {
             value={settings.customer_facing_agent_name || ""}
             onChange={(e) => void onPickBot(e.target.value)}
             disabled={savingBot}
-            className="w-full rounded border border-zinc-700 bg-black/40 px-2 py-1.5 text-xs text-zinc-100 disabled:opacity-50"
+            className="w-full rounded border border-gray-300 bg-white px-2 py-1.5 text-xs text-gray-900 disabled:opacity-50"
           >
             <option value="">— Not configured —</option>
             {settings.available_agents.map((a) => (
@@ -237,7 +237,7 @@ export default function WidgetSettingsPage(): JSX.Element {
           </select>
         )}
         {settings.customer_facing_agent_name && (
-          <div className="mt-3 text-xs text-zinc-400 flex items-center gap-2">
+          <div className="mt-3 text-xs text-gray-600 flex items-center gap-2">
             <span>Selected zone:</span>
             <SensitivityChip
               level={
@@ -252,30 +252,30 @@ export default function WidgetSettingsPage(): JSX.Element {
       </section>
 
       {/* Origin allowlist */}
-      <section className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-4 mb-4">
-        <h2 className="text-sm font-semibold text-zinc-200 mb-2">
+      <section className="rounded-lg border border-gray-200 bg-white p-4 mb-4">
+        <h2 className="text-sm font-semibold text-gray-900 mb-2">
           Allowed origins
         </h2>
-        <p className="text-zinc-400 text-xs mb-3">
-          One HTTPS origin per line (e.g. <code>https://halo.dev</code>).
+        <p className="text-gray-600 text-xs mb-3">
+          One HTTPS origin per line (e.g. <code className="font-mono">https://halo.dev</code>).
           The widget endpoint refuses POSTs from any origin not on this list,
           so without entries here the widget can't be embedded anywhere.
-          For local dev, <code>http://localhost:PORT</code> is also accepted.
+          For local dev, <code className="font-mono">http://localhost:PORT</code> is also accepted.
         </p>
         <textarea
           value={originsText}
           onChange={(e) => setOriginsText(e.target.value)}
           rows={4}
           spellCheck={false}
-          className="w-full rounded border border-zinc-700 bg-black/40 px-2 py-1.5 text-xs font-mono text-zinc-100"
+          className="w-full rounded border border-gray-300 bg-white px-2 py-1.5 text-xs font-mono text-gray-900"
           placeholder={"https://your-product.com\nhttps://www.your-product.com"}
           disabled={savingOrigins}
         />
         {originErrors.length > 0 && (
-          <ul className="mt-2 text-xs text-rose-300 space-y-1">
+          <ul className="mt-2 text-xs text-red-700 space-y-1">
             {originErrors.map((e) => (
               <li key={`${e.index}-${e.value}`}>
-                <code>{e.value || "(empty)"}</code>: {e.error}
+                <code className="font-mono">{e.value || "(empty)"}</code>: {e.error}
               </li>
             ))}
           </ul>
@@ -285,34 +285,34 @@ export default function WidgetSettingsPage(): JSX.Element {
             type="button"
             onClick={() => void onSaveOrigins()}
             disabled={savingOrigins}
-            className="rounded bg-indigo-600 hover:bg-indigo-500 px-3 py-1.5 text-xs text-white disabled:opacity-50"
+            className="rounded bg-accent-600 hover:bg-accent-700 px-3 py-1.5 text-xs text-white disabled:opacity-50"
           >
             {savingOrigins ? "Saving…" : "Save origins"}
           </button>
-          <span className="text-xs text-zinc-500">
+          <span className="text-xs text-gray-500">
             {settings.allowed_widget_origins.length} active
           </span>
         </div>
       </section>
 
       {/* Snippet */}
-      <section className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-4 mb-4">
-        <h2 className="text-sm font-semibold text-zinc-200 mb-2">
+      <section className="rounded-lg border border-gray-200 bg-white p-4 mb-4">
+        <h2 className="text-sm font-semibold text-gray-900 mb-2">
           Embed snippet
         </h2>
-        <p className="text-zinc-400 text-xs mb-3">
+        <p className="text-gray-600 text-xs mb-3">
           Paste this once on every page where you want the widget to
           appear. The script loads asynchronously and injects a
           fixed-position chat bubble in the bottom-right.
         </p>
-        <pre className="rounded bg-black/60 border border-zinc-800 p-3 text-xs text-zinc-300 overflow-x-auto whitespace-pre">
+        <pre className="rounded bg-gray-50 border border-gray-200 p-3 text-xs text-gray-900 overflow-x-auto whitespace-pre font-mono">
 {snippet}
         </pre>
         <div className="mt-3 flex items-center gap-2">
           <button
             type="button"
             onClick={() => void onCopy()}
-            className="rounded border border-zinc-700 px-3 py-1.5 text-xs hover:bg-zinc-800"
+            className="rounded border border-gray-200 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
           >
             {copied ? "Copied!" : "Copy snippet"}
           </button>
@@ -320,14 +320,14 @@ export default function WidgetSettingsPage(): JSX.Element {
             href={previewUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="rounded border border-zinc-700 px-3 py-1.5 text-xs hover:bg-zinc-800"
+            className="rounded border border-gray-200 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
           >
             Test it now →
           </a>
         </div>
-        <p className="mt-2 text-xs text-zinc-500">
+        <p className="mt-2 text-xs text-gray-500">
           The "Test it now" link opens the widget at{" "}
-          <code className="text-zinc-300">/widget/{settings.widget_public_id}</code>.
+          <code className="text-gray-900 font-mono">/widget/{settings.widget_public_id}</code>.
           Make sure your current dashboard origin is in the allowed-origins
           list above first; otherwise the preview will surface a 403.
         </p>
