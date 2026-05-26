@@ -19,3 +19,8 @@ stripe==15.1.0
 # scheduled-triggers surface. Same primitive used by Airflow, Prefect,
 # Dagster; handles DST correctly so 9am-every-weekday means 9am local.
 croniter==3.0.3
+# Phase 28.2: web push delivery (VAPID-signed payloads). pywebpush
+# bundles py-vapid + http_ece + handles the encryption + JWT signing
+# Chrome/Firefox/Safari expect. Lazy-imported inside push.send so the
+# test suite stays network-free without it installed locally.
+pywebpush==2.0.3

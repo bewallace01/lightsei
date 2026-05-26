@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 28 — 28.2 backend/push.py send module. Pure module wrapping py-vapid + pywebpush. Helper `send_to_end_user(end_user_id, title, body, deep_link_url)` finds all active subscriptions + sends. Cleans up 410 (Gone) responses. Env vars: LIGHTSEI_VAPID_PUBLIC_KEY + LIGHTSEI_VAPID_PRIVATE_KEY. Phase 25 + 26 + 27 closed. 28.1 schema shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 28 — 28.3 wire push into widget orchestrator + inbox. After persisting bot response in 21.6 widget orchestrator, call push.send_to_end_user if the recipient is identified + has notifications enabled (notification_pref != 'off'). Same hook in /workspaces/me/inbox/{conversation_id}/messages operator-reply endpoint (Phase 21.8). Phase 25 + 26 + 27 closed. 28.1 schema + 28.2 send module shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,30 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 28.2: backend/push.py VAPID send module
+
+Pure module that fans out push notifications across an end user's active subscriptions. Tri-state env machinery matches the operator email_provider pattern + the `feedback_external_service_require_live` memory.
+
+**What shipped**:
+
+- `backend/requirements.txt`: `pywebpush==2.0.3` added (lazy-imported inside live send path so tests + non-push code paths don't need it installed).
+- `backend/push.py`: `send_to_end_user(session, end_user_id, *, title, body, deep_link_url, icon_url)` queries active subscriptions (filter `revoked_at IS NULL`), builds a JSON payload (title + body + optional deep_link_url + optional icon), and either captures (test mode) or signs + POSTs via pywebpush (live mode). Returns summary dict with `sent` / `failed` / `revoked` / `total_subs` counts. Capture mode mirrors live-path side effects (bumps `last_used_at`) so tests asserting on persistence work uniformly. 410 Gone responses in live mode set `revoked_at` on the subscription so future fan-outs skip it via the partial active index. Other non-2xx errors log + continue (best-effort per Phase 28 spec).
+- Env machinery: `LIGHTSEI_VAPID_PUBLIC_KEY`, `LIGHTSEI_VAPID_PRIVATE_KEY`, `LIGHTSEI_VAPID_SUBJECT` (default `mailto:noreply@lightsei.com`), `LIGHTSEI_PUSH_FAKE_CAPTURE`, `LIGHTSEI_PUSH_REQUIRE_LIVE`. `PushNotConfiguredError` raised when REQUIRE_LIVE is set but keys are missing (prevents silent capture on prod misconfig).
+- `backend/tests/test_push.py`: 11 tests. 4 tri-state env tests (no-keys=capture, fake-capture wins, require-live raises without keys, fake-capture wins over require-live). 5 happy-path tests (one-sub, two-sub, last_used_at bumped, revoked subs skipped, no-subs no-op, unknown end-user no-op). 1 cross-end-user isolation test. 1 payload-shape test confirming optional fields are omitted.
+
+**Spec deviations**:
+- **Live 410 cleanup is exercised in pywebpush land, not unit-tested**. The 410 branch lives inside `except WebPushException` and depends on pywebpush's response shape — covering it requires mocking pywebpush's internals, which buys little signal. Will be exercised on the Phase 28.6 real-device push test (Bailey's iPhone receives a real notification + we verify revoked subscriptions stop firing).
+
+**Design notes**:
+- Tri-state pattern lifted directly from `email_provider.py` (Phase 17.2/17.7) + the `feedback_external_service_require_live` memory. Same env-var shape, same FAKE_CAPTURE-wins precedence so tests are predictable across both modules.
+- `pywebpush` is lazy-imported inside the live-send branch only. Tests + non-push backend code paths don't need it. The import failure in live mode raises `PushNotConfiguredError` so it surfaces immediately rather than producing a less-clear stack trace.
+- Capture-mode side-effects (bumping `last_used_at`) match the live path so a future test that asserts "subscription gets used" works whether VAPID is configured or not. Was tempted to skip the side-effect in capture mode but the divergence would cause exactly the kind of "works in test, breaks in prod" surprise the live/capture split is meant to prevent.
+- Payload shape (`title` / `body` / optional `deep_link_url` / optional `icon`) is the contract the Phase 28.4 service worker reads. Locked here so 28.3 + 28.4 don't need to renegotiate.
+
+**Test counts**: backend 1442 → **1453** (+11).
+
+**What this enables**: 28.3 wires `push.send_to_end_user(...)` into the widget orchestrator (Phase 21.6) + the operator-reply endpoint (Phase 21.8) so bot/operator messages trigger pushes for identified end users with `notification_pref != 'off'`. 28.4 extends `sw.js` to handle the `push` event + render the notification via the service worker. 28.5 adds the subscribe UI on `/c`. 28.6 closes Phase 28 with the full sweep + Bailey's real-iPhone push receipt.
 
 ### 2026-05-25 — Phase 28.1: end_user_push_subscriptions schema
 
