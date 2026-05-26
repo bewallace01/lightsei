@@ -141,6 +141,21 @@ def is_valid_end_user_vendor_link_via(linked_via: object) -> bool:
     )
 
 
+# Phase 27.1: per-vendor end-user notification preference. Set via
+# Phase 27.2's PATCH /me/end-user/vendors/{workspace_id} endpoint and
+# read by Phase 28's push delivery before sending. 'mentions' is a
+# future hook (bots will need to @-mention end users explicitly to
+# trigger it); for v1 only 'all' and 'off' actually gate sends.
+_VALID_NOTIFICATION_PREFS: frozenset[str] = frozenset(
+    {"all", "mentions", "off"}
+)
+DEFAULT_NOTIFICATION_PREF = "all"
+
+
+def is_valid_notification_pref(pref: object) -> bool:
+    return isinstance(pref, str) and pref in _VALID_NOTIFICATION_PREFS
+
+
 # Phase 26.1: vendor_slug format. Lives in user-facing URLs
 # (`/c/{vendor_slug}`) so it has to be lowercase + URL-safe.
 # 3-32 chars, [a-z0-9-], no leading or trailing dash. The
@@ -2076,6 +2091,23 @@ class EndUserVendorLink(Base):
     removed_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True,
     )
+    # Phase 27.1: optional per-vendor display name. The end user can
+    # show as "Alice Smith" to vendor A but "alice@example.com" to
+    # vendor B without forking the EndUser row. NULL = fall back to
+    # `end_users.display_name`.
+    display_name_override: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True,
+    )
+    # Phase 27.1: per-vendor push notification preference. Phase 28's
+    # push delivery reads this before sending. 'all' = every reply,
+    # 'mentions' = only when bot @-mentions the end user (future
+    # hook), 'off' = never. Default 'all' per Phase 27 spec.
+    notification_pref: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        server_default=text("'all'"),
+        default=DEFAULT_NOTIFICATION_PREF,
+    )
 
     __table_args__ = (
         # Per-workspace roster: "show me every end user linked to
@@ -2084,6 +2116,60 @@ class EndUserVendorLink(Base):
         Index(
             "ix_end_user_vendor_links_workspace",
             "workspace_id", "linked_at",
+        ),
+    )
+
+
+class VendorInviteCode(Base):
+    """Phase 27.1: single-use, time-bound code an operator mints so
+    an end user can claim a vendor link.
+
+    The `code` value is also the primary key and the literal string
+    the operator hands to the end user (e.g. via a generated URL or
+    a copy-paste-able token shown once on the workspace settings
+    page). UUID-shaped to be unguessable; single-use because
+    `consumed_at` getting set is irreversible.
+
+    `consumed_by_end_user_id` is an audit pointer (SET NULL on end-
+    user delete). The actual link row that grants chat access lives
+    in `end_user_vendor_links`; this table is the bookkeeping ledger
+    of which codes were issued + redeemed.
+
+    No partial unique on `(workspace_id, code)` because `code` is
+    PK + therefore unique across all workspaces, which is the
+    looser-but-also-fine guarantee.
+    """
+
+    __tablename__ = "vendor_invite_codes"
+
+    code: Mapped[str] = mapped_column(String(64), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+    )
+    consumed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    consumed_by_end_user_id: Mapped[Optional[str]] = mapped_column(
+        String,
+        ForeignKey("end_users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_vendor_invite_codes_workspace_created",
+            "workspace_id", text("created_at DESC"),
         ),
     )
 

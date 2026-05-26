@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 27 — 27.1 schema: vendor_invite_codes + per-vendor end-user settings. Alembic 0044 adds `vendor_invite_codes` (code uuid pk, workspace_id fk, created_at, expires_at, consumed_at nullable, consumed_by_end_user_id fk nullable) + extends `end_user_vendor_links` with `display_name_override` (nullable) + `notification_pref` (`all`/`mentions`/`off`, default `all`) + `removed_at` (nullable; already added in 25.1 spec but verify). Phase 25 + 26 closed 2026-05-25. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 27 — 27.2 backend endpoints. POST /workspaces/me/end-user-invites body {count} mints N codes, GET lists outstanding, DELETE /{code} revokes. POST /me/end-user/redeem-invite body {code} consumes + creates link. GET /me/end-user/vendors lists linked vendors with unread counts. PATCH /me/end-user/vendors/{workspace_id} updates notification_pref + display_name_override. DELETE /me/end-user/vendors/{workspace_id} soft-revokes (sets removed_at). Phase 25 + 26 closed 2026-05-25. 27.1 schema shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,28 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 27.1: vendor_invite_codes schema + per-vendor end-user settings
+
+Foundation for Phase 27 invite-code redemption + the per-vendor end-user settings page. One alembic migration adds the codes table + two new columns on `end_user_vendor_links`; no backfill needed.
+
+**What shipped**:
+
+- `backend/alembic/versions/20260525_0044_vendor_invite_codes.py`: creates `vendor_invite_codes` (code varchar(64) pk + workspace_id fk CASCADE + created_at default now + expires_at + consumed_at nullable + consumed_by_end_user_id fk SET NULL nullable) + index `ix_vendor_invite_codes_workspace_created` (workspace_id + created_at DESC for the operator-side "show me my outstanding codes" query). Adds `end_user_vendor_links.display_name_override` (varchar(128) nullable) + `end_user_vendor_links.notification_pref` (varchar(16) default 'all'). `removed_at` already landed in alembic 0042 per the Phase 25.1 spec — verified, skipped.
+- `backend/models.py`: `VendorInviteCode` model class. `EndUserVendorLink` extended with `display_name_override` + `notification_pref` columns. New module-level `_VALID_NOTIFICATION_PREFS` frozenset + `DEFAULT_NOTIFICATION_PREF` + `is_valid_notification_pref` helper following the existing dict-and-helper pattern.
+- `backend/tests/test_vendor_invite_codes_schema.py`: 23 tests. VendorInviteCode roundtrip with server defaults, PK rejects duplicates, workspace cascade, SET NULL on end-user delete (audit row survives consumer removal), index landing, EndUserVendorLink display_name_override nullable + roundtrip, notification_pref server default 'all', parameterized accept/reject for known + bad values, validator-frozenset-default consistency check.
+
+**Spec deviations**: none. Spec said `vendor_invite_codes (code uuid pk, workspace_id fk, created_at, expires_at, consumed_at nullable, consumed_by_end_user_id fk nullable)` + the two new columns on links. All present. `removed_at` was double-spec'd (25.1 + 27.1 both mentioned it); confirmed already in alembic 0042 so 0044 doesn't re-add.
+
+**Design notes**:
+- `code` is the primary key + also the literal string the operator hands to the end user. No separate hash because the code is single-use + short-lived (30-day default TTL set at issue time, not as a DB constraint so the operator can mint longer-lived codes later). A leak reveals at most one redemption.
+- `consumed_by_end_user_id` is SET NULL (not CASCADE) on end-user delete so the vendor's audit ledger of redeemed codes survives consumer removal. The CASCADE for "the link row goes away when the end user does" lives on `end_user_vendor_links`, not on this table.
+- `notification_pref` default is 'all' per spec. Phase 28's push delivery is what reads this gate; for v1 only 'all' and 'off' actually affect sends ('mentions' is a future hook that needs bots to @-mention end users explicitly to fire).
+- `display_name_override` is nullable per design: NULL means fall back to `end_users.display_name`. Lets the same end user appear differently per vendor without forking the EndUser row.
+
+**Test counts**: backend 1380 → **1403** (+23).
+
+**What this enables**: 27.2 wires the operator-side mint + revoke + the end-user redeem + per-vendor settings endpoints against this schema. 27.3 surfaces invite-code management on `/workspace-settings`. 27.4 + 27.5 build the consumer-side `/c` my-bots index + per-vendor settings page using the new columns. Phase 28 push delivery reads `notification_pref` to gate sends.
 
 ### 2026-05-25 — Phase 26 closed: iPhone install verified on Bailey's phone + Dockerfile fix landed
 
