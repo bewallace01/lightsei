@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 28 — 28.6 tests + sweep. Full backend + SDK pytest sweep, dashboard tsc + next build, real-iPhone push receipt with Bailey to close the phase. 28.5 shipped 2026-05-26: backend POST + DELETE /me/end-user/push-subscriptions endpoints (upsert by composite (end_user_id, endpoint); soft-revoke; cross-user isolated), GET /me/end-user extended with push_vapid_public_key + has_active_push_subscription so /c renders the EnablePushPrompt without a second fetch. VAPID key shipped at runtime (not build-time) so key rotation doesn't need a dashboard rebuild. 28.1 schema + 28.2 send + 28.3 wiring + 28.4 sw.js handlers + 28.5 subscribe UI all shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 29 — 29.1 Xcode project + SwiftUI scaffolding. Bundle id, app icon, splash, Info.plist, deep-link routing. iOS 16+ minimum, SwiftUI single-codebase, thin client over existing backend. Bailey has Xcode but no Apple Developer account yet, so 29.1-29.3 run in the simulator; 29.2 Sign-in-with-Apple + 29.4 APNS need the $99/yr account before they work on a real device. Phase 28 closed in capture mode 2026-05-26: all 1475 backend + 175 SDK tests green, push pipeline live (db23389 + VAPID keys on prod), but iPhone real-device receipt parked to 29.4 APNS — the magic-link-into-PWA handoff is broken on iOS without universal links, which require a native app. Pivot driven by Bailey: "i want a real ios app, not safari in app shape." Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,30 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-26 — Phase 28 closed (capture-mode), iPhone push receipt parked to 29.4 APNS
+
+Phase 28 (web push) is functionally complete: backend send module + endpoint wiring + service worker handlers + subscribe UI all green, 1475 backend + 175 SDK tests passing, prod backend has VAPID keys + REQUIRE_LIVE=1. The Phase 28 close gate (Bailey's real-iPhone push receipt) hit an unrelated iOS PWA gap that took the demo off the table:
+
+- iOS Safari only exposes Web Push in standalone (home-screen-installed) PWAs.
+- Magic-link emails always open in Safari proper, never in the installed PWA — there's no universal-link routing without a native app.
+- iOS Safari + the installed PWA have separate localStorage scopes, so a Safari sign-in doesn't carry over.
+
+Net: Bailey couldn't get to the EnablePushPrompt on the installed PWA without manually working around the auth handoff. Decision (2026-05-26): close Phase 28 in capture mode and move the real-device push receipt to Phase 29.4 (APNS), where the native app provides both the auth surface (Sign in with Apple + universal-link magic links) and the push delivery surface (APNS HTTP/2 instead of Web Push).
+
+**Demo-prep fixes shipped along the way** (not core 28.6, but needed to even attempt the iPhone test):
+
+- `c20bf1c` — `colorScheme: 'light'` on operator + consumer layouts (browser auto-dark was a red herring for the integrations-page issue but the fix still useful defense-in-depth).
+- `9558da6` — `/integrations` (index + connector detail) converted to light theme to match the rest of the operator dashboard.
+- `5817562` — `/inbox` + `/widget-settings` converted to light theme. After this, no more dark-island operator pages.
+- `6572456` — `/c` signed-out state grew an inline email magic-link form. Was a dead-end text panel before.
+- `c7732b3` — `sw.js` CACHE_NAME v2 → v3 so the /c page changes from above actually propagated to clients with the SW already installed. Adds a TODO/follow-up to revisit /c precache strategy (every /c change requires a manual bump today).
+- `a60c3fe` — `email_provider.send_end_user_magic_link` was constructing the link as `/auth/end-user/magic-link?token=...` but the Next.js route is `/c/auth/magic-link`. Every end-user magic link 404'd until this fix. Docstring + tests asserted the broken path, so the bug was self-consistent end-to-end and never caught until the live iPhone test. (See parking-lot follow-up: audit the Phase 25.2 docstring + adjacent docs for similar drift.)
+- `25641c8` — `/c` signed-out state grew a "paste your sign-in link" form as a workaround for the iOS PWA storage-scope gap (also helps Android Chrome PWA users + any desktop Mail-to-PWA flow).
+
+**What 28.6 verified end-to-end (capture mode)**: backend 1475 → still 1475 (no regressions from 28.5 wiring), SDK 175. Backend `/me/end-user` on prod returns the correct `push_vapid_public_key` + `has_active_push_subscription` fields (verified via probe end-user against prod). Dashboard `/c` bundle includes `EnablePushPrompt` + reads the new fields. Subscribe + unsubscribe endpoints work via the new test suite (12 tests). All that's missing is the actual VAPID-signed POST to Apple's push service, which only the live device can demonstrate.
+
+**Parked for 29.4**: real iPhone push receipt with the native app subscribing for APNS device tokens instead of web push subscriptions. Same `_push_notify_end_user_if_subscribed` fan-out helper from 28.3 will pick up either kind of subscription via a new APNS adapter alongside the existing pywebpush path.
 
 ### 2026-05-26 — Phase 28.5: subscription UI on /c + push subscription endpoints
 
