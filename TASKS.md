@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 28 — 28.3 wire push into widget orchestrator + inbox. After persisting bot response in 21.6 widget orchestrator, call push.send_to_end_user if the recipient is identified + has notifications enabled (notification_pref != 'off'). Same hook in /workspaces/me/inbox/{conversation_id}/messages operator-reply endpoint (Phase 21.8). Phase 25 + 26 + 27 closed. 28.1 schema + 28.2 send module shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 28 — 28.4 service worker push handler. Extend dashboard/public/sw.js to register a `push` event listener that calls self.registration.showNotification(...) + a `notificationclick` listener that deep-links into the /c/{slug}/conversation/{id} URL. Phase 25 + 26 + 27 closed. 28.1 schema + 28.2 send module + 28.3 widget+inbox wiring shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,29 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 28.3: wire push.send_to_end_user into widget-bot + operator-reply
+
+`POST /widget-bot/respond` (bot persists reply) + `POST /workspaces/me/inbox/{id}/messages` (operator chimes in) now fire a push notification for the identified end user if they've subscribed + opted in.
+
+**What shipped**:
+
+- `backend/main.py`: new helper `_push_notify_end_user_if_subscribed(session, conv, *, body_text)` placed next to `_load_widget_conversation`. Gates: skip if conv.end_user_id is None (anonymous), skip if no active EndUserVendorLink (or soft-removed), skip if link.notification_pref == 'off'. Payload: `title=workspace.name`, `body=body_text[:140]` (with trailing ellipsis on truncation), `deep_link_url=/c/{vendor_slug}/conversation/{conv.id}` (falls back to `/c` when no vendor_slug claimed). Wrapped in try/except so push failures never break the bot/operator persist path — best-effort per Phase 28 spec.
+- `backend/main.py`: invoked at the end of `widget_bot_respond` + `inbox_operator_reply`, after `session.flush()` of the WidgetMessage row. Single line in each endpoint; the helper does all the work.
+- `backend/tests/test_push_wiring.py`: 10 tests. 6 bot-respond cases (happy path, long-body preview truncation, anonymous conv, pref=off, soft-revoked link, no-subscriptions), 3 operator-reply cases (happy path, anonymous, pref=off), 1 multi-device fan-out test.
+
+**Spec deviations**: none. Spec said: "After persisting bot response in 21.6 widget orchestrator, call push.send_to_end_user if the recipient is identified + has notifications enabled. Same hook in /inbox operator-reply endpoint." Both hooks wired, gates respected.
+
+**Design notes**:
+- Helper lives in main.py rather than push.py or widget_orchestrator.py because the gating logic spans WidgetConversation + EndUserVendorLink + Workspace; pulling it into a dedicated module would just re-import the same three models. Cheap inline beats premature abstraction.
+- Push payload preview cap is 140 chars (with `…` suffix on truncation). iOS notification body wraps long text awkwardly; 140 is roughly where Safari's preview stops being readable.
+- Deep-link format `/c/{slug}/conversation/{conv_id}` matches the Phase 28.4 service worker's notificationclick handler (which will deep-link to that URL).
+- Spec calls this hook from the "21.6 widget orchestrator", but the orchestrator only enqueues commands; the actual bot reply lands in `POST /widget-bot/respond` (Phase 21.5). The endpoint is the right hook point — same persist path the orchestrator's downstream bots use.
+- Wrapped in try/except: push module is best-effort per spec, and we don't want a transient push failure to turn into a 500 on the operator's reply. The push module logs its own errors; this wrapper catches everything else as a safety net.
+
+**Test counts**: backend 1453 → **1463** (+10). 65 tests across push + widget-bot + inbox + push-wiring all green.
+
+**What this enables**: 28.4 builds the service-worker `push` + `notificationclick` handlers so the captured payloads actually render as iOS notifications + deep-link to the right conversation. 28.5 adds the subscribe-UI on /c. 28.6 closes the phase with the full sweep + Bailey's real-iPhone push receipt.
 
 ### 2026-05-25 — Phase 28.2: backend/push.py VAPID send module
 

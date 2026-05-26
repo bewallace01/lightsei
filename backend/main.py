@@ -7961,6 +7961,84 @@ def _load_widget_conversation(
     return conv
 
 
+# How many chars of the message body to put in the push notification
+# preview. Long enough to give the user useful context; short enough
+# that iOS doesn't truncate awkwardly inside a word.
+_PUSH_BODY_PREVIEW_CHARS = 140
+
+
+def _push_notify_end_user_if_subscribed(
+    session: Session,
+    conv: WidgetConversation,
+    *,
+    body_text: str,
+) -> None:
+    """Phase 28.3: best-effort push notification when a bot or
+    operator message lands in a widget conversation.
+
+    No-op when:
+      - The conversation is anonymous (conv.end_user_id is None).
+      - The end-user has no active link OR the link is soft-removed.
+      - The link's notification_pref is 'off'.
+      - The end-user has no active push subscriptions (push.send
+        handles this internally — we still call so the count
+        bumps via capture mode in tests).
+
+    Wrapped in try/except so a push failure doesn't take down the
+    persist path. The Phase 28.2 send module is best-effort by
+    spec; this wrapper just enforces "don't break the main flow"
+    on top.
+    """
+    if conv.end_user_id is None:
+        return
+    try:
+        import push as _push
+
+        link = session.get(
+            EndUserVendorLink, (conv.end_user_id, conv.workspace_id),
+        )
+        if link is None or link.removed_at is not None:
+            return
+        if link.notification_pref == "off":
+            return
+
+        ws = session.get(Workspace, conv.workspace_id)
+        vendor_name = ws.name if ws else "Lightsei"
+        vendor_slug = ws.vendor_slug if ws else None
+
+        preview = body_text.strip()
+        if len(preview) > _PUSH_BODY_PREVIEW_CHARS:
+            preview = preview[: _PUSH_BODY_PREVIEW_CHARS - 1] + "…"
+
+        # Deep link into the conversation on the consumer surface.
+        # When the vendor hasn't claimed a slug yet, deep-link to /c
+        # (the my-bots index) instead.
+        deep_link = (
+            f"/c/{vendor_slug}/conversation/{conv.id}"
+            if vendor_slug
+            else "/c"
+        )
+
+        _push.send_to_end_user(
+            session,
+            conv.end_user_id,
+            title=vendor_name,
+            body=preview,
+            deep_link_url=deep_link,
+        )
+    except Exception:
+        # Best-effort: push failures (capture mode glitches, missing
+        # subscription rows, transient pywebpush errors) must not
+        # break the bot/operator persist path. The push module logs
+        # its own errors; we swallow at this layer to keep the HTTP
+        # response 200.
+        import logging as _logging
+        _logging.getLogger("lightsei.push").exception(
+            "push notify failed for conv %s (best-effort, "
+            "ignoring)", conv.id,
+        )
+
+
 @app.post("/widget-bot/respond")
 def widget_bot_respond(
     body: WidgetRespondIn,
@@ -8007,6 +8085,9 @@ def widget_bot_respond(
     session.add(msg)
     conv.last_message_at = now
     session.flush()
+    # Phase 28.3: push notify the identified end user (best-effort
+    # no-op on anonymous / opted-out / no-subscriptions).
+    _push_notify_end_user_if_subscribed(session, conv, body_text=body.text)
     return {
         "ok": True,
         "message_id": msg.id,
@@ -8686,6 +8767,10 @@ def inbox_operator_reply(
     session.add(msg)
     conv.last_message_at = now
     session.flush()
+    # Phase 28.3: same push hook as widget-bot/respond. Identified
+    # end users with notification_pref != 'off' get notified that
+    # the operator just chimed in.
+    _push_notify_end_user_if_subscribed(session, conv, body_text=body.text)
     return {
         "ok": True,
         "message_id": msg.id,
