@@ -405,3 +405,85 @@ def test_cross_vendor_isolation_same_end_user_two_vendors(client):
         # Same end_user_id on both — that's correct; the workspace
         # boundary is the isolation, not the identity.
         assert conv_a.end_user_id == conv_b.end_user_id
+
+
+# ---------- Phase 27.6: soft-revoke read-only ---------- #
+
+
+def test_soft_revoked_end_user_can_still_poll_past_conversation(client):
+    """Phase 27 spec: 'past conversations stay accessible to the end
+    user (read-only); no new messages can be sent.'
+
+    Setup: end user linked + posts a conversation. Then the link
+    gets soft-revoked (removed_at set). The end user can still GET
+    the thread (read path), but POSTing a new message goes through
+    the anonymous-fallback path and 404s on the identified conv id.
+    """
+    from models import EndUserVendorLink
+    ws_id, public_id = _make_widget_workspace()
+    _, token = _make_end_user_with_session(link_to_workspace_ids=[ws_id])
+
+    # Send a message while still actively linked — creates conv.
+    r1 = _post(client, public_id, headers=_auth(token))
+    conv_id = r1.json()["conversation_id"]
+
+    # Soft-revoke the link (simulates DELETE /me/end-user/vendors/{id}).
+    with session_scope() as s:
+        # The link's end_user_id is whatever _make_end_user_with_session
+        # produced; look it up by workspace.
+        from sqlalchemy import select as _sel
+        link = s.execute(_sel(EndUserVendorLink).where(
+            EndUserVendorLink.workspace_id == ws_id,
+        )).scalar_one()
+        link.removed_at = _now()
+
+    # GET (read path) STILL works with the same bearer.
+    r_get = _poll(client, public_id, conv_id, headers=_auth(token))
+    assert r_get.status_code == 200, (
+        "soft-revoked end user must keep read access to past conversations"
+    )
+    msgs = r_get.json()["messages"]
+    assert len(msgs) >= 1
+
+    # POST (write path) loses identified status — falls back to
+    # anonymous, which 404s on the identified conv id.
+    r_post = _post(
+        client, public_id, headers=_auth(token),
+        conversation_id=conv_id,
+    )
+    assert r_post.status_code == 404, (
+        "soft-revoked end user must NOT be able to post new messages "
+        "into the previously-linked vendor's conversations"
+    )
+
+
+def test_soft_revoked_end_user_cannot_start_new_conversation(client):
+    """The unsubscribed end user posting WITHOUT conversation_id
+    creates a fresh anonymous conversation (no end_user_id stamp)
+    rather than a new identified one. Confirms the write path drops
+    identity on soft-revoke."""
+    from models import EndUserVendorLink
+    ws_id, public_id = _make_widget_workspace()
+    eu_id, token = _make_end_user_with_session(
+        link_to_workspace_ids=[ws_id],
+    )
+    # Soft-revoke immediately.
+    with session_scope() as s:
+        from sqlalchemy import select as _sel
+        link = s.execute(_sel(EndUserVendorLink).where(
+            EndUserVendorLink.workspace_id == ws_id,
+            EndUserVendorLink.end_user_id == eu_id,
+        )).scalar_one()
+        link.removed_at = _now()
+
+    r = _post(
+        client, public_id, headers=_auth(token), anon_user_id="anon-fb",
+    )
+    assert r.status_code == 202
+    conv_id = r.json()["conversation_id"]
+    with session_scope() as s:
+        conv = s.get(WidgetConversation, conv_id)
+        # End-user identity dropped on the write path; conv lands
+        # anonymous even though bearer is technically valid.
+        assert conv.end_user_id is None
+        assert conv.anon_user_id == "anon-fb"

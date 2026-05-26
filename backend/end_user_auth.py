@@ -55,13 +55,37 @@ class EndUserAuthResult:
     """What the resolver hands back to callers.
 
     `linked_workspaces` is the list of workspaces the end user is
-    actively subscribed to (`end_user_vendor_links.removed_at IS NULL`).
-    Phase 25.4 + 26 + 27 surfaces use this to scope what the end user
-    can see across vendors without re-querying per request.
+    **actively** subscribed to (`end_user_vendor_links.removed_at IS
+    NULL`). Phase 25.4 + 26 + 27 surfaces use this to scope what the
+    end user can see across vendors without re-querying per request.
+
+    `removed_workspaces` is the parallel list for soft-revoked links
+    (Phase 27.6). The /c/{slug} thread GET endpoint uses this to
+    enforce "unsubscribed end user still reads past conversations
+    but can't send new" — read paths grant access when a workspace
+    appears in EITHER list; write paths only honor
+    `linked_workspaces`.
     """
     end_user: EndUser
     session: EndUserSession
     linked_workspaces: list[Workspace] = field(default_factory=list)
+    removed_workspaces: list[Workspace] = field(default_factory=list)
+
+    def can_read_workspace(self, workspace_id: str) -> bool:
+        """True iff the end user has either an active or soft-revoked
+        link to the workspace. Read-path gate."""
+        for w in self.linked_workspaces:
+            if w.id == workspace_id:
+                return True
+        for w in self.removed_workspaces:
+            if w.id == workspace_id:
+                return True
+        return False
+
+    def can_write_workspace(self, workspace_id: str) -> bool:
+        """True iff the end user has an ACTIVE link to the workspace.
+        Write-path gate; soft-revoked links can't send new messages."""
+        return any(w.id == workspace_id for w in self.linked_workspaces)
 
 
 def _parse_bearer(authorization: Optional[str]) -> Optional[str]:
@@ -123,10 +147,11 @@ def _resolve(
             status_code=401, detail="invalid end-user session",
         )
 
-    # Active subscriptions only: a soft-revoked link (removed_at set)
-    # means the end user can read past conversations but isn't a
-    # current customer of that vendor. Phase 27.2 wires the soft-
-    # revoke flow; for now this filter is forward-compatible.
+    # Two parallel queries so the caller can distinguish
+    # currently-subscribed vendors (write + read access) from
+    # soft-revoked-but-historic vendors (read-only access, Phase
+    # 27.6). One round-trip avoidable via a JOIN with a CASE if
+    # this ever shows up in a profile.
     linked_rows = session.execute(
         select(Workspace)
         .join(
@@ -138,11 +163,23 @@ def _resolve(
             EndUserVendorLink.removed_at.is_(None),
         )
     ).scalars().all()
+    removed_rows = session.execute(
+        select(Workspace)
+        .join(
+            EndUserVendorLink,
+            EndUserVendorLink.workspace_id == Workspace.id,
+        )
+        .where(
+            EndUserVendorLink.end_user_id == end_user.id,
+            EndUserVendorLink.removed_at.is_not(None),
+        )
+    ).scalars().all()
 
     return EndUserAuthResult(
         end_user=end_user,
         session=eu_sess,
         linked_workspaces=list(linked_rows),
+        removed_workspaces=list(removed_rows),
     )
 
 

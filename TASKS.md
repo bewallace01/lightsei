@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 27 — 27.6 tests + sweep (last sub-task). Backend tests cover invite code mint + redeem + revoke + soft-unsubscribe (already shipped in 27.2). Cross-vendor isolation tests extended for "unsubscribed end user still reads past conversations but can't send new" case. Dashboard tsc + next build. After 27.6, Phase 27 demo runs and phase closes. Phase 25 + 26 closed. 27.1 + 27.2 + 27.3 + 27.4 + 27.5 shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 28 — 28.1 schema: end_user_push_subscriptions. Alembic 0045 adds `end_user_push_subscriptions` (id pk, end_user_id fk cascade, endpoint text, p256dh text, auth text, created_at, last_used_at nullable, revoked_at nullable). Composite unique on (end_user_id, endpoint) so re-subscribing from the same device doesn't dup-row. Phase 25 + 26 + 27 closed 2026-05-25. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,49 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 27 closed: cross-vendor subscriptions end-to-end (mint → redeem → settings → soft-revoke read-only)
+
+Phase 27 wraps. All 6 sub-tasks shipped same-day. End users can now self-serve their full cross-vendor subscription lifecycle without operator hand-holding: discover invite codes from vendors, redeem them, manage per-vendor preferences, unsubscribe with read-only access preserved for compliance.
+
+**What shipped across Phase 27**:
+
+- **27.1**: alembic 0044 + `vendor_invite_codes` table + `display_name_override` + `notification_pref` columns on `end_user_vendor_links`. New `VendorInviteCode` model + validator helpers. 23 schema tests.
+- **27.2**: 7 endpoints (3 operator: mint/list/revoke; 4 end-user: redeem/list/patch/soft-revoke) + 29 endpoint tests. Race-safe redeem (consume code before link insert), soft-removed link re-activation on re-redeem, idempotent soft-revoke 404s.
+- **27.3**: operator-side `EndUserInvitesSection` mounted on `/workspace-settings`. Shown-once new-codes panel + mint form + outstanding-codes list with per-code copy + revoke. UI count cap (10) tighter than backend (100) for "shown once" sanity.
+- **27.4**: `/c` rewritten as proper my-bots dashboard with vendor cards, unread-badge slot, "+ Add vendor" modal with invite-code redeem, per-card Settings link. 4 new api.ts helpers (`fetchEndUserVendorsWithCounts`, `redeemEndUserInvite`, `patchEndUserVendor`, `unlinkEndUserVendor`).
+- **27.5**: new `/c/[slug]/settings` route + GET endpoint extension to include per-link settings. Display name override + notification pref radio + unsubscribe button with native confirm. Dirty-gated Save. 1 new backend test.
+- **27.6 (this entry)**: soft-revoke read-only implementation + 2 new isolation tests + full sweep + Phase 27 demo.
+
+**27.6 deep-dive**:
+
+- `backend/end_user_auth.py`: `EndUserAuthResult` grew `removed_workspaces: list[Workspace]` (parallel to `linked_workspaces`) + `can_read_workspace(workspace_id)` / `can_write_workspace(workspace_id)` helpers. The resolver now runs two queries (active links + soft-removed links) so callers can pick the right gate.
+- `backend/main.py` widget endpoints: `GET /widget/{public_id}/conversations/{id}` uses `can_read_workspace` (allows soft-revoked); `POST /widget/{public_id}/messages` uses `can_write_workspace` (active-link only). Bot writes its own messages via internal paths that aren't subject to this gate — the gate is only for the end-user's own write attempts.
+- `backend/tests/test_widget_end_user_auth.py`: 2 new tests. `test_soft_revoked_end_user_can_still_poll_past_conversation` confirms read access survives `removed_at`. `test_soft_revoked_end_user_cannot_start_new_conversation` confirms write attempts fall back to anonymous (conv lands with `end_user_id=None` and `anon_user_id` set from the body).
+
+**Verification**:
+
+- Full backend sweep: **1435 passed** in 268s. No flake this run (the `feedback_jobs_runner_test_race` test in `test_widget_endpoints.py` happened to pass on the first try).
+- Full SDK sweep: **175 passed** in 40s.
+- Dashboard tsc + next build clean. Bundle sizes: `/c` 2.9 kB, `/c/[slug]` 3.36 kB, `/c/[slug]/settings` 3.18 kB, `/c/auth/magic-link` 1.91 kB, `/workspace-settings` 4.24 kB. All comfortably under spec budget.
+- **`backend/scripts/phase_27_demo.py`**: 12-step scripted demo runs the full flow end-to-end: vendor setup → operator mint → end-user signup → invite redeem → vendor list → identified chat → PATCH per-vendor settings → GET reflects custom settings → soft-revoke → read past conv (200) → POST new msg blocked (404) → vendor list excludes soft-revoked. All 12 steps green.
+
+**Spec deviations (carried through to phase close)**:
+
+- 27.2: `unread_count` still hard-coded 0 in v1 (parked Phase 27B — needs `last_seen_at` column on `end_user_vendor_links`). Field is on the response shape; UI badge slot is wired but never shows.
+- 27.4: vendor card "logo" + "last message preview" parked (need backend projection extensions, Phase 27B). Cards show name + bot subtitle only.
+
+**Phase 27B parked**:
+- Real `unread_count` tracking (add `last_seen_at` column + count messages newer than that per vendor)
+- Vendor logo + last-message-preview on vendor cards
+- Public vendor directory (`/c/discover`)
+- Vendor-issued direct invite (vendor types end-user email + Lightsei mails the invite link)
+- End-user-initiated subscription requests (multi-step trust flow)
+- Per-bot-within-vendor subscriptions
+
+**Test counts**: Phase 27 added **+52 backend tests** (1380 → 1432 in 27.2 + 23 in 27.1 - some overlap; full sweep shows +55 against the pre-27 baseline). SDK unchanged at 175 (no SDK changes in Phase 27).
+
+**What this enables**: Phase 28 (web push notifications) reads `notification_pref` from the end_user_vendor_links table to gate sends. Phase 29 (native iOS) shares the same invite-code redemption endpoint + per-vendor settings. The Phase 27 demo flow is the canonical "consumer onboarding" smoke that 28/29 build on top of.
 
 ### 2026-05-25 — Phase 27.5: per-vendor end-user settings page at /c/{slug}/settings
 

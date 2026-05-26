@@ -7657,12 +7657,17 @@ def widget_post_message(
             },
         )
 
-    # Phase 25.4: optional end-user auth. Strict on present-but-invalid
-    # so a stale token surfaces as 401 instead of silently degrading.
+    # Phase 25.4 + Phase 27.6: optional end-user auth. Strict on
+    # present-but-invalid so a stale token surfaces as 401 instead
+    # of silently degrading. POST is the WRITE path so we use the
+    # active-link gate; soft-revoked links can't send new messages
+    # per Phase 27 spec. (The GET endpoint below uses
+    # can_read_workspace, which includes soft-revoked links so an
+    # unsubscribed end user keeps read access to past conversations.)
     eu_auth = resolve_end_user_optional(authorization, session)
     linked = (
         eu_auth is not None
-        and any(w.id == workspace.id for w in eu_auth.linked_workspaces)
+        and eu_auth.can_write_workspace(workspace.id)
     )
     current_end_user_id = eu_auth.end_user.id if linked else None
 
@@ -7789,14 +7794,17 @@ def widget_get_conversation(
     workspace = _we.resolve_workspace_by_public_id(session, public_id)
     _we.check_widget_origin(workspace, request.headers.get("origin"))
 
-    # Phase 25.4: identity gate. Same shape as POST so a leaked
-    # conversation id from a different identity can't be polled.
+    # Phase 25.4 + Phase 27.6: identity gate. The GET path uses the
+    # read-gate (active OR soft-revoked link) so an unsubscribed end
+    # user can still read past conversations per Phase 27 spec. The
+    # POST path uses the write-gate (active link only) so they can't
+    # send new messages.
     eu_auth = resolve_end_user_optional(authorization, session)
-    linked = (
+    can_read = (
         eu_auth is not None
-        and any(w.id == workspace.id for w in eu_auth.linked_workspaces)
+        and eu_auth.can_read_workspace(workspace.id)
     )
-    current_end_user_id = eu_auth.end_user.id if linked else None
+    current_end_user_id = eu_auth.end_user.id if can_read else None
 
     conv = session.get(WidgetConversation, conversation_id)
     if (
