@@ -24,11 +24,16 @@
 // when the file content changes; the activate handler prunes old
 // caches.
 
+// v2 → v3 (Phase 28.6 demo): /c page changed (signed-out state grew
+// a magic-link sign-in form). Since /c is precached, returning users
+// would keep seeing the old shell until the cache key flips. Bumping
+// here forces a fresh install on next visit.
+//
 // Bumped from v1 → v2 in Phase 28.4 to force the new install path
 // (adds `push` + `notificationclick` listeners). Browsers run the
-// new install handler when this file's content changes; the v1
-// activate handler still prunes the v1 cache below.
-const CACHE_NAME = "lightsei-c-shell-v2";
+// new install handler when this file's content changes; the activate
+// handler prunes older caches.
+const CACHE_NAME = "lightsei-c-shell-v3";
 
 const PRECACHE_URLS = [
   "/c",
