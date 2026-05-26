@@ -1,0 +1,17 @@
+# xcodegen regenerates these from project.yml — never commit them.
+Lightsei.xcodeproj/
+Resources/Info.plist
+
+# Xcode build artifacts.
+build/
+DerivedData/
+*.xcuserdata/
+*.xcworkspace/xcuserdata/
+
+# User-specific Xcode state.
+xcuserdata/
+*.xcuserstate
+
+# Swift Package Manager (when we add deps in 29.2+).
+.swiftpm/
+Package.resolved
