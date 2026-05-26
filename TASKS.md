@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 28 — 28.4 service worker push handler. Extend dashboard/public/sw.js to register a `push` event listener that calls self.registration.showNotification(...) + a `notificationclick` listener that deep-links into the /c/{slug}/conversation/{id} URL. Phase 25 + 26 + 27 closed. 28.1 schema + 28.2 send module + 28.3 widget+inbox wiring shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 28 — 28.5 subscription UI. `/c` shows an "Enable notifications" prompt for end users who haven't subscribed. On click: calls PushManager.subscribe() + POSTs the subscription to backend (new POST /me/end-user/push-subscriptions endpoint). Backend ships LIGHTSEI_VAPID_PUBLIC_KEY at build time so the frontend can pass it to applicationServerKey. Phase 25 + 26 + 27 closed. 28.1 schema + 28.2 send + 28.3 wiring + 28.4 sw.js handlers shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,30 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 28.4: service worker push + notificationclick handlers
+
+`sw.js` grows the consumer side of web push: render the notification when one arrives + deep-link the user back to the right conversation when they tap it.
+
+**What shipped**:
+
+- `dashboard/public/sw.js`: `CACHE_NAME` bumped `lightsei-c-shell-v1` → `v2` to force the new install. Two new event listeners:
+  - **`push`**: parses `event.data.json()` (with text fallback if a service sends non-JSON), calls `self.registration.showNotification(title, {body, icon: '/icon-192.png', badge: '/icon-192.png', data: {deep_link_url}})`. Defaults: title `"Lightsei"`, body `"You have a new message."`, deep_link `/c`. iOS 16.4+ uses apple-touch-icon for the badge when no explicit icon is provided; Chrome/Firefox/Android pick up the explicit indigo "L" passed here.
+  - **`notificationclick`**: closes the notification, then `clients.matchAll({type: "window", includeUncontrolled: true})` to find an existing same-origin tab. If found: `focus()` + `postMessage({kind:"deep-link", url})` so the React app does `router.replace(url)` without a full reload. If not found: `clients.openWindow(deepLinkUrl)`.
+- `dashboard/app/c/ServiceWorkerRegister.tsx`: now uses `useRouter()` + listens for `{kind:"deep-link", url}` postMessages from the SW. When received, calls `router.replace(url)`. Cleanup on unmount removes the message listener. Postmessage bridge chosen over `client.navigate()` because navigate isn't reliable cross-browser (Safari support shaky); postmessage works everywhere.
+
+**Spec deviations**: none. Spec said "push event listener that calls showNotification + notificationclick listener that deep-links." Both wired.
+
+**Design notes**:
+- `CACHE_NAME` bump forces clients to re-install the SW on next visit. The v1 → v2 activate handler prunes the old cache via the `keys.filter(k => k.startsWith("lightsei-") && k !== CACHE_NAME)` line that already existed from 26.4.
+- `applicationServerKey` (the VAPID public key end users need to subscribe) lives on the frontend env, not on the SW directly. Phase 28.5 wires that into the subscribe call site.
+- Notification icon defaults to `/icon-192.png` so the indigo "L" shows up on Android Chrome + macOS notification center. iOS uses the home-screen-installed apple-touch-icon (different code path); `badge` does nothing on iOS but doesn't hurt either.
+- Deep-link payload uses the same shape as `payload.deep_link_url` from Phase 28.3's `_push_notify_end_user_if_subscribed`. Backend + service worker agree on `/c/{slug}/conversation/{id}` (or `/c` fallback).
+- Service-worker code is browser-only; no unit tests beyond tsc + next build smoke. The full push pipeline (backend send → push service → service worker → notification → tap → deep-link) gets exercised manually in Phase 28.6 on Bailey's iPhone.
+
+**Verification**: tsc clean. next build clean. `/c` bundle unchanged (the new SW listeners + the message bridge in ServiceWorkerRegister are small enough to fit in the existing chunk).
+
+**What this enables**: 28.5 adds the "Enable notifications" prompt on `/c` + the `POST /me/end-user/push-subscriptions` endpoint that records the browser's PushManager.subscribe() response into the schema from 28.1. After 28.5, the full end-to-end push pipeline works: subscribe in browser → backend records → bot reply → backend send → push service → SW push handler → iOS notification → tap → deep link to conversation.
 
 ### 2026-05-25 — Phase 28.3: wire push.send_to_end_user into widget-bot + operator-reply
 
