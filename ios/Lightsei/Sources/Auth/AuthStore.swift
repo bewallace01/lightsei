@@ -1,0 +1,66 @@
+// Phase 29.2a: observable auth state for the app.
+//
+// One source of truth for "am I signed in?" + the EndUser profile.
+// LightseiApp creates one AuthStore at launch, ContentView switches
+// on `state`, the sign-in flows call signIn(token:) to flip to .ok.
+//
+// Persists the session token to the Keychain via Keychain.read/
+// write/clear. Restores on launch via `restore()`.
+
+import Foundation
+
+@MainActor
+final class AuthStore: ObservableObject {
+    enum State {
+        case unknown          // before restore() runs
+        case signedOut
+        case ok(EndUser)
+    }
+
+    @Published private(set) var state: State = .unknown
+
+    private var api: APIClient = .production
+
+    /// Re-hydrate from Keychain + verify the token against the
+    /// backend via GET /me/end-user. Called once at app launch.
+    func restore() async {
+        guard let token = Keychain.read() else {
+            state = .signedOut
+            return
+        }
+        var client = api
+        client.bearer = token
+        do {
+            let me = try await client.fetchEndUserMe()
+            api.bearer = token
+            state = .ok(me.end_user)
+        } catch APIError.unauthorized {
+            Keychain.clear()
+            state = .signedOut
+        } catch {
+            // Network blip on launch: keep the token (don't clear)
+            // and treat as signed-out for now. Next call will
+            // either succeed or surface a clearer error.
+            state = .signedOut
+        }
+    }
+
+    /// Sign in by consuming a magic-link token. Persists the
+    /// resulting session token + flips state.
+    func signIn(magicLinkToken: String) async throws {
+        let resp = try await api.consumeMagicLink(token: magicLinkToken)
+        try Keychain.write(resp.session_token)
+        api.bearer = resp.session_token
+        state = .ok(resp.end_user)
+    }
+
+    func signOut() {
+        Keychain.clear()
+        api.bearer = nil
+        state = .signedOut
+    }
+
+    /// Bearer-attached client for callers (e.g. SignInView for the
+    /// magic-link request, future vendor list fetches).
+    var client: APIClient { api }
+}

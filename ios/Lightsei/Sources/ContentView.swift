@@ -1,38 +1,45 @@
-// Phase 29.1: placeholder root view.
+// Phase 29.2a: root view, switches on the AuthStore state.
 //
-// Just enough surface to confirm the project builds, links against
-// SwiftUI, and renders in the simulator. Phase 29.3 swaps this for
-// the real vendor-list + chat surface that mirrors the /c web app.
+// Three cases:
+//
+//   .unknown    → splash while restore() runs (avoids a flash of
+//                 SignInView for returning users).
+//   .signedOut  → SignInView.
+//   .ok(user)   → SignedInPlaceholderView (29.3 replaces this with
+//                 the real vendor-list + chat surface).
 
 import SwiftUI
 
 struct ContentView: View {
+    @EnvironmentObject var auth: AuthStore
+
+    var body: some View {
+        switch auth.state {
+        case .unknown:
+            SplashView()
+        case .signedOut:
+            SignInView()
+        case .ok(let user):
+            SignedInPlaceholderView(endUser: user)
+        }
+    }
+}
+
+private struct SplashView: View {
     var body: some View {
         ZStack {
-            // Match the consumer surface's white background so the
-            // visual identity tracks the web /c experience.
             Color(.systemBackground).ignoresSafeArea()
-
-            VStack(spacing: 24) {
-                // Star glyph stand-in for the constellation brand mark.
-                // Replaced by a real asset (matching the operator
-                // dashboard's celestial trio) once the icon set is
-                // generated.
+            VStack(spacing: 16) {
                 Image(systemName: "sparkle")
                     .font(.system(size: 64, weight: .light))
                     .foregroundStyle(.tint)
-
                 Text("Lightsei")
-                    .font(.system(size: 34, weight: .semibold, design: .serif))
-
-                Text("Phase 29.1 scaffold")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.secondary)
+                    .font(.system(size: 28, weight: .semibold, design: .serif))
             }
         }
     }
 }
 
 #Preview {
-    ContentView()
+    ContentView().environmentObject(AuthStore())
 }

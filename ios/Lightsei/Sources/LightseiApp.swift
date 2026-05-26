@@ -1,24 +1,41 @@
-// Phase 29.1: app entry point.
+// Phase 29.2a: app entry point with auth store + deep-link handler.
 //
-// SwiftUI lifecycle (no UIApplicationDelegate yet). Phase 29.2 adds a
-// scene-phase observer + URL handler for the magic-link sign-in flow.
-// Phase 29.4 adds an AppDelegate for APNS device-token registration
-// (UNUserNotificationCenter doesn't cover the silent push case).
+// Owns the single AuthStore instance for the app and runs `restore()`
+// once at launch so a returning user lands on the signed-in surface
+// without seeing the sign-in form flash. Custom URL scheme deep links
+// (`lightsei://auth/magic-link?token=…`) consume into the auth store.
+// 29.2b adds universal-link handling via `.onContinueUserActivity`.
 
 import SwiftUI
 
 @main
 struct LightseiApp: App {
+    @StateObject private var auth = AuthStore()
+
     var body: some Scene {
         WindowGroup {
             ContentView()
-                // Custom URL scheme handler. Phase 29.2 swaps the body
-                // for the real magic-link consume flow; today this is
-                // just a breadcrumb so we can verify the deep-link
-                // pipe works end-to-end in the simulator.
+                .environmentObject(auth)
+                .task { await auth.restore() }
                 .onOpenURL { url in
-                    print("[Lightsei] opened via URL: \(url.absoluteString)")
+                    handleMagicLinkURL(url)
                 }
+        }
+    }
+
+    private func handleMagicLinkURL(_ url: URL) {
+        guard let token = MagicLink.extractToken(from: url.absoluteString) else {
+            // Unknown URL shape: log + ignore. Better than crashing
+            // or silently signing the user out.
+            print("[Lightsei] unhandled URL: \(url.absoluteString)")
+            return
+        }
+        Task {
+            do {
+                try await auth.signIn(magicLinkToken: token)
+            } catch {
+                print("[Lightsei] consume failed: \(error)")
+            }
         }
     }
 }
