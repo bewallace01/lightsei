@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 27 — 27.3 operator surface: invite-code management on /workspace-settings. Add an "End-user invites" section to /workspace-settings (the Phase 23.5 page) that lists active invite codes, has a generate-N-codes button (default 1), shows newly-minted codes once for the operator to copy, and exposes per-code revoke. Phase 25 + 26 closed. 27.1 schema + 27.2 endpoints shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 27 — 27.4 end-user `/c` my-bots index. `/c` becomes the vendor-cards home: one card per linked vendor (logo, name, last message preview, unread count, "Open chat" CTA). "+ Add vendor" opens invite-code entry modal. Per-vendor "Settings" link to `/c/{slug}/settings`. Phase 25 + 26 closed. 27.1 schema + 27.2 endpoints + 27.3 operator UI shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,31 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 27.3: operator invite-code management on /workspace-settings
+
+The operator-facing UI for Phase 27.2's mint/list/revoke endpoints. Slots into the existing `/workspace-settings` page between Members and Danger zone.
+
+**What shipped**:
+
+- `dashboard/app/api.ts`: `VendorInviteCode` type + `mintVendorInviteCodes(count, ttl_days?)`, `fetchVendorInviteCodes({includeConsumed?, includeExpired?})`, `revokeVendorInviteCode(code)` operator-side helpers using the existing `authedJson` plumbing.
+- `dashboard/app/workspace-settings/EndUserInvitesSection.tsx`: full client component with three pieces:
+  - **Newly-minted codes panel** (shown once, dismissible). Each code has a Copy button (clipboard API with brief "Copied" feedback). Friendly reminder that the codes are also listed below.
+  - **Mint form**: count input (1-10 with UI cap below backend's 100 so the "shown once" panel stays manageable) + TTL days input (1-365, default 30) + "Generate codes" button. Inline error display.
+  - **Outstanding codes list**: per-code Copy + Revoke. Shows expiration date. Empty state copy ("No outstanding codes. Generate a few above.").
+- `dashboard/app/workspace-settings/page.tsx`: imports `<EndUserInvitesSection />` + mounts it between Members and Danger zone.
+
+**Design notes**:
+- UI count cap (10) is tighter than the backend cap (100) on purpose: showing 100 codes in the "shown once" panel would overwhelm the operator + tempt them to lose track of which ones they've handed out. Power users who really need 100 can call the API directly or mint 10 at a time.
+- Codes are NOT secrets in the cryptographic sense — single-use, short-lived, UUID-shaped — so we surface them in the list AND in the once-shown panel. The "shown once" pattern matches API-key minting from Phase 17 (where the secret IS load-bearing) but here it's just a UX nudge to copy fresh.
+- Clipboard API failures (non-HTTPS, older browsers) silently fall back to the code still being visible on the page for manual select + copy.
+- Local optimistic delete on revoke so the UI feels instant; the API call is fire-and-forget visually.
+
+**Spec deviations**: none. Spec said: "List active codes, generate-N-codes button, copy code, revoke code." All four covered.
+
+**Verification**: tsc clean. next build clean. `/workspace-settings` page bundle grew from 3.14 kB to 4.24 kB (+1.1 kB, well within reason for a full mint/list/revoke surface).
+
+**What this enables**: 27.4 builds the end-user-side `/c` my-bots index that consumes the codes via the redeem flow. 27.5 builds the per-vendor settings page using the patch endpoint. Operators can now hand out codes manually + iterate on the consumer flow against real data.
 
 ### 2026-05-25 — Phase 27.2: vendor invite endpoints + per-vendor end-user settings (7 endpoints)
 

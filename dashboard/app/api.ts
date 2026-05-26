@@ -2677,3 +2677,50 @@ export async function fetchWidgetThreadAsEndUser(
   }
   return (await r.json()) as WidgetThread;
 }
+
+// ----- Phase 27.2/27.3: vendor invite codes (operator side) -----
+
+export type VendorInviteCode = {
+  code: string;
+  workspace_id: string;
+  created_at: string;
+  expires_at: string;
+  consumed_at: string | null;
+  consumed_by_end_user_id: string | null;
+};
+
+export async function mintVendorInviteCodes(
+  count: number,
+  ttl_days?: number,
+): Promise<{ codes: VendorInviteCode[] }> {
+  return (await authedJson("/workspaces/me/end-user-invites", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      count,
+      ...(ttl_days !== undefined ? { ttl_days } : {}),
+    }),
+  })) as { codes: VendorInviteCode[] };
+}
+
+export async function fetchVendorInviteCodes(opts?: {
+  includeConsumed?: boolean;
+  includeExpired?: boolean;
+}): Promise<{ codes: VendorInviteCode[] }> {
+  const params = new URLSearchParams();
+  if (opts?.includeConsumed) params.set("include_consumed", "true");
+  if (opts?.includeExpired) params.set("include_expired", "true");
+  const qs = params.toString();
+  return (await authedJson(
+    `/workspaces/me/end-user-invites${qs ? "?" + qs : ""}`,
+  )) as { codes: VendorInviteCode[] };
+}
+
+export async function revokeVendorInviteCode(
+  code: string,
+): Promise<{ revoked: boolean; code: string }> {
+  return (await authedJson(
+    `/workspaces/me/end-user-invites/${encodeURIComponent(code)}`,
+    { method: "DELETE" },
+  )) as { revoked: boolean; code: string };
+}

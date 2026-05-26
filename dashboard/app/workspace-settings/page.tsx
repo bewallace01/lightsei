@@ -11,6 +11,7 @@ import {
   listMyWorkspaces,
   patchMyWorkspace,
 } from "../api";
+import EndUserInvitesSection from "./EndUserInvitesSection";
 
 export default function WorkspaceSettingsPage() {
   const router = useRouter();
@@ -193,6 +194,9 @@ export default function WorkspaceSettingsPage() {
           </div>
         </div>
       </section>
+
+      {/* ---------- End-user invites (Phase 27.3) ---------- */}
+      <EndUserInvitesSection />
 
       {/* ---------- Danger zone ---------- */}
       <section>
