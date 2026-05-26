@@ -46,3 +46,14 @@ targets:
             CFBundleURLName: com.lightsei.app
             CFBundleURLSchemes:
               - lightsei
+    # Phase 29.2b: universal links. The `?mode=developer` query lets
+    # the simulator bypass Apple's AASA verification (which would
+    # otherwise need an Apple Developer Team ID + provisioning
+    # profile). Drop the query when shipping to a real device after
+    # the Developer account is set up + LIGHTSEI_APPLE_TEAM_ID is
+    # populated on prod.
+    entitlements:
+      path: Resources/Lightsei.entitlements
+      properties:
+        com.apple.developer.associated-domains:
+          - applinks:app.lightsei.com?mode=developer

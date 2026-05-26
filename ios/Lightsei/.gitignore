@@ -1,6 +1,7 @@
 # xcodegen regenerates these from project.yml — never commit them.
 Lightsei.xcodeproj/
 Resources/Info.plist
+Resources/Lightsei.entitlements
 
 # Xcode build artifacts.
 build/

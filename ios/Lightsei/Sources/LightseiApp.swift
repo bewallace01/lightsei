@@ -1,10 +1,19 @@
-// Phase 29.2a: app entry point with auth store + deep-link handler.
+// Phase 29.2a/b: app entry point with auth store + deep-link handler.
 //
 // Owns the single AuthStore instance for the app and runs `restore()`
 // once at launch so a returning user lands on the signed-in surface
-// without seeing the sign-in form flash. Custom URL scheme deep links
-// (`lightsei://auth/magic-link?token=…`) consume into the auth store.
-// 29.2b adds universal-link handling via `.onContinueUserActivity`.
+// without seeing the sign-in form flash. Two deep-link paths consume
+// magic-link tokens:
+//
+//   1. .onOpenURL          custom scheme (`lightsei://auth/...`) +
+//                          legacy fallback when AASA hasn't
+//                          propagated yet.
+//   2. .onContinueUserActivity   universal links (Phase 29.2b).
+//                          iOS routes taps on
+//                          https://app.lightsei.com/c/auth/magic-link?token=…
+//                          here when the AASA file at
+//                          /.well-known/apple-app-site-association
+//                          validates the appID.
 
 import SwiftUI
 
@@ -18,12 +27,19 @@ struct LightseiApp: App {
                 .environmentObject(auth)
                 .task { await auth.restore() }
                 .onOpenURL { url in
-                    handleMagicLinkURL(url)
+                    handleIncomingURL(url)
+                }
+                .onContinueUserActivity(
+                    NSUserActivityTypeBrowsingWeb,
+                ) { activity in
+                    if let url = activity.webpageURL {
+                        handleIncomingURL(url)
+                    }
                 }
         }
     }
 
-    private func handleMagicLinkURL(_ url: URL) {
+    private func handleIncomingURL(_ url: URL) {
         guard let token = MagicLink.extractToken(from: url.absoluteString) else {
             // Unknown URL shape: log + ignore. Better than crashing
             // or silently signing the user out.
