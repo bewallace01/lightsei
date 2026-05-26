@@ -19,12 +19,13 @@ import { useCallback, useEffect, useState } from "react";
 import {
   EndUserUnauthorizedError,
   EndUserVendorWithCount,
+  consumeEndUserMagicLink,
   fetchEndUserMe,
   fetchEndUserVendorsWithCounts,
   redeemEndUserInvite,
   requestEndUserMagicLink,
 } from "../api";
-import { clearEndUserSession } from "../endUserSession";
+import { clearEndUserSession, setEndUserSession } from "../endUserSession";
 import EnablePushPrompt from "./EnablePushPrompt";
 
 type State =
@@ -240,11 +241,40 @@ function EmptyState({ onAdd }: { onAdd: () => void }) {
   );
 }
 
+// Extract the token from a pasted magic-link URL. Accepts a full URL
+// or a bare token string. Returns null if no token can be recovered.
+//
+// Background: iOS PWAs added to the home screen have a separate
+// localStorage scope from regular Safari. When a magic-link email is
+// tapped from Mail, iOS always routes to Safari (no universal-link
+// support without a native app), so the consume page sets the session
+// in Safari's scope and the home-screen PWA stays signed out. The
+// paste-link path lets PWA users copy the URL from Mail and finish
+// signing in inside the PWA itself.
+function extractMagicToken(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (!trimmed) return null;
+  try {
+    const u = new URL(trimmed);
+    const t = u.searchParams.get("token");
+    if (t) return t;
+  } catch {
+    // Not a URL — fall through and treat as a raw token.
+  }
+  // Heuristic: token_urlsafe(32) → 43 chars, base64url alphabet.
+  if (/^[A-Za-z0-9_-]{20,}$/.test(trimmed)) return trimmed;
+  return null;
+}
+
 function SignedOutPanel() {
   const [email, setEmail] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sent, setSent] = useState(false);
+
+  const [pastedLink, setPastedLink] = useState("");
+  const [consuming, setConsuming] = useState(false);
+  const [pasteError, setPasteError] = useState<string | null>(null);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -262,6 +292,31 @@ function SignedOutPanel() {
     }
   }
 
+  async function onPasteSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (consuming) return;
+    setPasteError(null);
+    const token = extractMagicToken(pastedLink);
+    if (!token) {
+      setPasteError(
+        "Couldn't find a sign-in token in that. Paste the full link from your email.",
+      );
+      return;
+    }
+    setConsuming(true);
+    try {
+      const res = await consumeEndUserMagicLink(token);
+      setEndUserSession(res.session_token);
+      // Hard reload so the page's auth state hydrates from scratch
+      // with the new token.
+      window.location.assign("/c");
+    } catch (e) {
+      setPasteError((e as Error).message);
+    } finally {
+      setConsuming(false);
+    }
+  }
+
   if (sent) {
     return (
       <main className="min-h-screen px-6 py-16 max-w-md mx-auto text-center">
@@ -273,6 +328,32 @@ function SignedOutPanel() {
           its way. Tap the link from this device to land back here
           signed in.
         </p>
+        <p className="text-xs text-gray-400 mt-6">
+          If you&apos;re using the installed app and the link opens in
+          Safari instead, long-press the link in your email, copy it,
+          then come back here and paste below.
+        </p>
+        <form onSubmit={onPasteSubmit} className="mt-4 space-y-3 text-left">
+          <input
+            type="url"
+            inputMode="url"
+            placeholder="Paste your sign-in link"
+            value={pastedLink}
+            onChange={(e) => setPastedLink(e.target.value)}
+            disabled={consuming}
+            className="w-full text-sm rounded-md ring-1 ring-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-600"
+          />
+          {pasteError && (
+            <p className="text-xs text-red-600">{pasteError}</p>
+          )}
+          <button
+            type="submit"
+            disabled={consuming || !pastedLink.trim()}
+            className="w-full text-sm rounded-md bg-indigo-600 text-white px-4 py-2 hover:bg-indigo-500 disabled:opacity-50"
+          >
+            {consuming ? "Signing in…" : "Sign in with pasted link"}
+          </button>
+        </form>
       </main>
     );
   }
@@ -305,6 +386,37 @@ function SignedOutPanel() {
           className="w-full text-sm rounded-md bg-indigo-600 text-white px-4 py-2 hover:bg-indigo-500 disabled:opacity-50"
         >
           {submitting ? "Sending…" : "Send magic link"}
+        </button>
+      </form>
+
+      <div className="my-8 flex items-center gap-3">
+        <div className="flex-1 h-px bg-gray-200" />
+        <span className="text-[11px] uppercase tracking-wider text-gray-400">
+          or
+        </span>
+        <div className="flex-1 h-px bg-gray-200" />
+      </div>
+
+      <p className="text-xs text-gray-500 mb-3 text-center">
+        Already have a sign-in link? Paste it here.
+      </p>
+      <form onSubmit={onPasteSubmit} className="space-y-3">
+        <input
+          type="url"
+          inputMode="url"
+          placeholder="https://app.lightsei.com/c/auth/magic-link?token=..."
+          value={pastedLink}
+          onChange={(e) => setPastedLink(e.target.value)}
+          disabled={consuming}
+          className="w-full text-sm rounded-md ring-1 ring-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-600"
+        />
+        {pasteError && <p className="text-xs text-red-600">{pasteError}</p>}
+        <button
+          type="submit"
+          disabled={consuming || !pastedLink.trim()}
+          className="w-full text-sm rounded-md border border-gray-300 text-gray-700 px-4 py-2 hover:bg-gray-50 disabled:opacity-50"
+        >
+          {consuming ? "Signing in…" : "Sign in with pasted link"}
         </button>
       </form>
     </main>
