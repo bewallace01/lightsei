@@ -54,6 +54,7 @@ from models import (
     EndUser,
     EndUserSession,
     EndUserSigninToken,
+    EndUserVendorLink,
     Event,
     EventValidation,
     GenerationJob,
@@ -81,8 +82,10 @@ from models import (
     Workspace,
     WorkspaceMember,
     WorkspaceSecret,
+    is_valid_notification_pref,
     is_valid_trigger_kind,
     is_valid_vendor_slug,
+    VendorInviteCode,
 )
 import github_api
 import notifications
@@ -209,6 +212,32 @@ class WorkspacePatchIn(BaseModel):
 # length cap is the cheap pre-filter.
 class VendorSlugIn(BaseModel):
     slug: str = Field(min_length=3, max_length=32)
+
+
+# Phase 27.2: vendor invite mint body. Operator picks how many codes
+# to issue + optional TTL override (default 30 days). Caps at 100 so
+# a misclick doesn't flood the table with a million codes.
+class VendorInviteMintIn(BaseModel):
+    count: int = Field(default=1, ge=1, le=100)
+    ttl_days: int = Field(default=30, ge=1, le=365)
+
+
+# Phase 27.2: end-user redeem body. Code is the literal value the
+# operator handed the end user.
+class VendorInviteRedeemIn(BaseModel):
+    code: str = Field(min_length=1, max_length=64)
+
+
+# Phase 27.2: end-user updates their per-vendor settings. Both
+# fields independently optional via Pydantic v2 model_fields_set
+# pattern (same shape as WorkspacePatchIn).
+class EndUserVendorPatchIn(BaseModel):
+    notification_pref: Optional[str] = None
+    # NULL clears the override (falls back to end_users.display_name);
+    # empty string is also treated as a clear.
+    display_name_override: Optional[str] = Field(
+        default=None, max_length=128,
+    )
 
 
 class ApiKeyCreateIn(BaseModel):
@@ -5035,6 +5064,304 @@ def me_end_user_vendor_conversations(
             for c in rows
         ],
     }
+
+
+# ---------- Phase 27.2: vendor invite codes + per-vendor end-user settings ---------- #
+
+
+# Cap on how many codes a single mint request can issue. Higher than
+# the practical "one customer at a time" use case (operators rarely
+# need >10), but low enough that a misclick can't dump a million
+# rows into vendor_invite_codes.
+VENDOR_INVITE_MINT_CAP = 100
+
+
+def _serialize_invite_code(c: VendorInviteCode) -> dict[str, Any]:
+    return {
+        "code": c.code,
+        "workspace_id": c.workspace_id,
+        "created_at": c.created_at.isoformat(),
+        "expires_at": c.expires_at.isoformat(),
+        "consumed_at": (
+            c.consumed_at.isoformat() if c.consumed_at else None
+        ),
+        "consumed_by_end_user_id": c.consumed_by_end_user_id,
+    }
+
+
+@app.post("/workspaces/me/end-user-invites")
+def mint_vendor_invite_codes(
+    body: VendorInviteMintIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 27.2: operator mints N single-use invite codes.
+
+    Codes are UUID-shaped + 30-day TTL by default. The response is
+    the only place the plaintext is shown — Phase 27.3's UI tells
+    the operator to copy them now. (We could also re-fetch but the
+    "shown once" pattern matches API-key minting from Phase 17.)
+    """
+    now = utcnow()
+    expires_at = now + timedelta(days=body.ttl_days)
+    minted: list[VendorInviteCode] = []
+    for _ in range(body.count):
+        code = f"inv-{uuid.uuid4()}"
+        row = VendorInviteCode(
+            code=code,
+            workspace_id=workspace_id,
+            created_at=now,
+            expires_at=expires_at,
+        )
+        session.add(row)
+        minted.append(row)
+    session.flush()
+    return {
+        "codes": [_serialize_invite_code(c) for c in minted],
+    }
+
+
+@app.get("/workspaces/me/end-user-invites")
+def list_vendor_invite_codes(
+    include_consumed: bool = False,
+    include_expired: bool = False,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 27.2: list invite codes for the operator's workspace.
+
+    Default = only outstanding codes (not consumed, not expired).
+    Query params `?include_consumed=true` / `?include_expired=true`
+    widen the result; the Phase 27.3 UI uses the default for the
+    "still redeemable" surface and includes both for the full audit
+    log.
+    """
+    now = utcnow()
+    q = select(VendorInviteCode).where(
+        VendorInviteCode.workspace_id == workspace_id
+    )
+    if not include_consumed:
+        q = q.where(VendorInviteCode.consumed_at.is_(None))
+    if not include_expired:
+        q = q.where(VendorInviteCode.expires_at > now)
+    q = q.order_by(VendorInviteCode.created_at.desc())
+
+    rows = session.execute(q).scalars().all()
+    return {
+        "codes": [_serialize_invite_code(c) for c in rows],
+    }
+
+
+@app.delete("/workspaces/me/end-user-invites/{code}")
+def revoke_vendor_invite_code(
+    code: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 27.2: revoke an unconsumed invite code.
+
+    Hard-delete. A consumed code returns 404 (since revoking a
+    consumed code is a no-op anyway — the end-user link already
+    exists). A code from a different workspace also returns 404
+    (no-leak; operator A shouldn't be able to probe whether op B
+    has a specific code).
+    """
+    row = session.get(VendorInviteCode, code)
+    if (
+        row is None
+        or row.workspace_id != workspace_id
+        or row.consumed_at is not None
+    ):
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "invite_code_not_found"},
+        )
+    session.delete(row)
+    return {"revoked": True, "code": code}
+
+
+@app.post("/me/end-user/redeem-invite")
+def redeem_vendor_invite_code(
+    body: VendorInviteRedeemIn,
+    auth: EndUserAuthResult = Depends(get_end_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 27.2: end user redeems an invite code, getting linked
+    to the vendor that issued it.
+
+    422 on invalid / expired / already-consumed code (single error
+    shape so a probe can't distinguish). On success the code's
+    `consumed_at` + `consumed_by_end_user_id` get set + an
+    `end_user_vendor_links` row is created (or re-activated if a
+    soft-removed row exists). Idempotent re-redeem within the same
+    workspace + end-user pair returns 200 with the existing link;
+    re-consuming the same code path is blocked by the consumed_at
+    check above.
+    """
+    now = utcnow()
+    code_row = session.get(VendorInviteCode, body.code)
+    if (
+        code_row is None
+        or code_row.consumed_at is not None
+        or code_row.expires_at <= now
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "invite_code_invalid",
+                "message": (
+                    "invite code is invalid or expired, ask the vendor "
+                    "to send a fresh one"
+                ),
+            },
+        )
+
+    # Mark consumed before doing the link insert so a parallel
+    # redeem of the same code loses the race + 422s.
+    code_row.consumed_at = now
+    code_row.consumed_by_end_user_id = auth.end_user.id
+    session.flush()
+
+    existing = session.get(
+        EndUserVendorLink, (auth.end_user.id, code_row.workspace_id),
+    )
+    if existing is not None:
+        # Already linked. If soft-revoked, re-activate by clearing
+        # removed_at. Otherwise no-op.
+        if existing.removed_at is not None:
+            existing.removed_at = None
+        link = existing
+    else:
+        link = EndUserVendorLink(
+            end_user_id=auth.end_user.id,
+            workspace_id=code_row.workspace_id,
+            linked_via="invite_code",
+            linked_at=now,
+        )
+        session.add(link)
+        session.flush()
+
+    ws = session.get(Workspace, code_row.workspace_id)
+    return {
+        "linked": True,
+        "vendor": (
+            _serialize_vendor_for_end_user(ws) if ws else None
+        ),
+        "link": {
+            "linked_at": link.linked_at.isoformat(),
+            "linked_via": link.linked_via,
+            "notification_pref": link.notification_pref,
+            "display_name_override": link.display_name_override,
+        },
+    }
+
+
+@app.get("/me/end-user/vendors")
+def list_end_user_vendors(
+    auth: EndUserAuthResult = Depends(get_end_user),
+) -> dict[str, Any]:
+    """Phase 27.2: list the end user's actively-linked vendors with
+    placeholder unread counts.
+
+    Note: `unread_count` is hard-coded to 0 in v1. Proper per-vendor
+    last-seen tracking + unread counting parks as a Phase 27B
+    follow-up (needs a `last_seen_at` column on
+    end_user_vendor_links). The field is on the response shape now
+    so the Phase 27.4 my-bots dashboard can render the badge slot
+    without a future schema-renumber.
+    """
+    return {
+        "vendors": [
+            {
+                **_serialize_vendor_for_end_user(w),
+                "unread_count": 0,
+            }
+            for w in auth.linked_workspaces
+        ],
+    }
+
+
+@app.patch("/me/end-user/vendors/{workspace_id}")
+def patch_end_user_vendor(
+    workspace_id: str,
+    body: EndUserVendorPatchIn,
+    auth: EndUserAuthResult = Depends(get_end_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 27.2: end user updates their per-vendor settings
+    (notification_pref + display_name_override).
+
+    404 if the end user isn't linked to this workspace. 422 on
+    invalid notification_pref (server-side re-validated via
+    is_valid_notification_pref). Empty-string display_name_override
+    clears the override (falls back to end_users.display_name on
+    read paths).
+    """
+    link = session.get(EndUserVendorLink, (auth.end_user.id, workspace_id))
+    if link is None or link.removed_at is not None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "vendor_link_not_found"},
+        )
+
+    fields = body.model_fields_set
+    if "notification_pref" in fields:
+        if body.notification_pref is None:
+            # Reset to default rather than NULL (column is NOT NULL).
+            link.notification_pref = "all"
+        else:
+            if not is_valid_notification_pref(body.notification_pref):
+                raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": "invalid_notification_pref",
+                        "valid": sorted(["all", "mentions", "off"]),
+                    },
+                )
+            link.notification_pref = body.notification_pref
+    if "display_name_override" in fields:
+        if not body.display_name_override:
+            # Empty string OR explicit null → clear the override.
+            link.display_name_override = None
+        else:
+            link.display_name_override = body.display_name_override.strip()
+
+    session.flush()
+    return {
+        "workspace_id": workspace_id,
+        "notification_pref": link.notification_pref,
+        "display_name_override": link.display_name_override,
+    }
+
+
+@app.delete("/me/end-user/vendors/{workspace_id}")
+def soft_revoke_end_user_vendor(
+    workspace_id: str,
+    auth: EndUserAuthResult = Depends(get_end_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 27.2: end user unsubscribes from a vendor. Soft-revoke
+    (sets `removed_at`), not hard-delete.
+
+    Per Phase 27 spec: past conversations stay readable to the end
+    user (read-only); no new messages can be sent. Today (pre-27.2)
+    the read-only nuance is parked to a follow-up; for now,
+    unlinking removes the vendor from the active-list endpoints
+    (already filtered on `removed_at IS NULL`).
+
+    404 if not currently linked (or already-removed) so the
+    revoke is idempotent: a second DELETE returns 404, not a
+    silent OK.
+    """
+    link = session.get(EndUserVendorLink, (auth.end_user.id, workspace_id))
+    if link is None or link.removed_at is not None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "vendor_link_not_found"},
+        )
+    link.removed_at = utcnow()
+    session.flush()
+    return {"unlinked": True, "workspace_id": workspace_id}
 
 
 # ---------- Phase 17.3: Google OAuth ---------- #

@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 27 — 27.2 backend endpoints. POST /workspaces/me/end-user-invites body {count} mints N codes, GET lists outstanding, DELETE /{code} revokes. POST /me/end-user/redeem-invite body {code} consumes + creates link. GET /me/end-user/vendors lists linked vendors with unread counts. PATCH /me/end-user/vendors/{workspace_id} updates notification_pref + display_name_override. DELETE /me/end-user/vendors/{workspace_id} soft-revokes (sets removed_at). Phase 25 + 26 closed 2026-05-25. 27.1 schema shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 27 — 27.3 operator surface: invite-code management on /workspace-settings. Add an "End-user invites" section to /workspace-settings (the Phase 23.5 page) that lists active invite codes, has a generate-N-codes button (default 1), shows newly-minted codes once for the operator to copy, and exposes per-code revoke. Phase 25 + 26 closed. 27.1 schema + 27.2 endpoints shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,39 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 27.2: vendor invite endpoints + per-vendor end-user settings (7 endpoints)
+
+The full invite-code redemption + per-vendor settings backend. Operator mints + lists + revokes codes; end user redeems + lists vendors + patches per-vendor prefs + soft-unsubscribes. Cleanly slots between the 27.1 schema and the 27.3+ UI work.
+
+**What shipped**:
+
+- `backend/main.py` pydantic bodies: `VendorInviteMintIn` (count 1-100 + optional ttl_days 1-365 default 30), `VendorInviteRedeemIn` (code), `EndUserVendorPatchIn` (optional notification_pref + display_name_override). Imported `VendorInviteCode`, `EndUserVendorLink`, `is_valid_notification_pref` from models.
+- **3 operator endpoints** (workspace-scoped via `get_workspace_id`):
+  - `POST /workspaces/me/end-user-invites`: mints N codes (UUID-shaped `inv-<uuid>`), returns plaintext in response (shown to operator once, same pattern as API-key minting). 30-day default TTL.
+  - `GET /workspaces/me/end-user-invites`: lists outstanding codes (filters consumed + expired by default; `?include_consumed=true&include_expired=true` widens). Ordered by created_at desc.
+  - `DELETE /workspaces/me/end-user-invites/{code}`: hard-delete unconsumed code. 404 on consumed / other workspace's / unknown (no-leak shape).
+- **4 end-user endpoints** (via `get_end_user`):
+  - `POST /me/end-user/redeem-invite`: looks up code, 422 on invalid/expired/consumed (single error shape so probes can't distinguish). Marks consumed + stamps `consumed_by_end_user_id`. Creates `end_user_vendor_links` row (or re-activates soft-removed). Returns vendor projection + link summary.
+  - `GET /me/end-user/vendors`: lists active links with `unread_count` field (hard-coded 0 in v1 — see deviations).
+  - `PATCH /me/end-user/vendors/{workspace_id}`: updates `notification_pref` (validated against `is_valid_notification_pref`; defaults back to 'all' if null sent) + `display_name_override` (empty string clears). 404 if unlinked or soft-removed.
+  - `DELETE /me/end-user/vendors/{workspace_id}`: soft-revoke (sets `removed_at`). 404 if already-removed (idempotent: second DELETE returns 404, not silent OK).
+- `backend/tests/test_vendor_invite_endpoints.py`: 29 tests. 5 mint tests (auth, default, bulk, count caps, ttl). 3 list tests (default filtering, include both, workspace-scoped). 4 revoke tests (happy, consumed-404, other-workspace-404, unknown-404). 6 redeem tests (auth, happy, unknown, expired, double-consume, reactivates-soft-removed). 3 list-vendors tests (unread field, auth, excludes soft-removed). 5 patch tests (notification_pref, invalid 422, display_name + empty clear, 404 unlinked, 404 soft-removed). 3 soft-revoke tests (sets removed_at, idempotent 404, 404 unlinked).
+
+**Spec deviations**:
+
+- **`unread_count` is hard-coded 0 in v1**. Proper per-vendor last-seen tracking needs a `last_seen_at` column on `end_user_vendor_links` (parked as a Phase 27B follow-up). The field IS on the response shape so the Phase 27.4 my-bots dashboard can render the badge slot without a schema renumber when the count goes real.
+- Soft-revoke read-only nuance not yet implemented (spec says "past conversations stay accessible to the end user (read-only); no new messages can be sent" — today unlinking just removes the vendor from active-list endpoints). Phase 26.2's widget endpoint identity gate already filters on `linked_workspaces` (active only), so unlinked end-users automatically lose chat access. Read-only access to past conversations is a separate dashboard surface, parked for Phase 27B.
+
+**Design notes**:
+- Redeem path consumes the code BEFORE looking at the link (race-safe: parallel double-redeem loses to 422).
+- Soft-removed-but-re-redeemed: clears `removed_at` to re-activate the existing link row rather than inserting a duplicate. Preserves linked_via + linked_at history.
+- `notification_pref=None` in the PATCH body resets to 'all' (the column default) rather than NULL (column is NOT NULL). Lets the dashboard "reset to default" without a separate endpoint.
+- `display_name_override=""` is treated as a clear (empty string and explicit null both NULL the column).
+
+**Test counts**: backend 1403 → **1432** (+29). 181 tests across 25.x + 26.x + 27.x suites all green; no regressions.
+
+**What this enables**: 27.3 builds the operator-side UI on `/workspace-settings` against the mint + list + revoke endpoints. 27.4 + 27.5 build the consumer-side UI (`/c` redeem flow + `/c/{slug}/settings` per-vendor settings page) against the redeem + patch + soft-revoke endpoints. Phase 28's push delivery reads `notification_pref` to gate sends.
 
 ### 2026-05-25 — Phase 27.1: vendor_invite_codes schema + per-vendor end-user settings
 
