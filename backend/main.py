@@ -52,6 +52,7 @@ from models import (
     DeploymentLog,
     EmailSigninToken,
     EndUser,
+    EndUserApnsToken,
     EndUserPushSubscription,
     EndUserSession,
     EndUserSigninToken,
@@ -258,6 +259,31 @@ class EndUserPushSubscriptionIn(BaseModel):
 # the matching row + set revoked_at.
 class EndUserPushUnsubscribeIn(BaseModel):
     endpoint: str = Field(min_length=1, max_length=2048)
+
+
+# Phase 29.2c stub: Sign in with Apple body. `identity_token` is
+# the JWT the iOS app gets from ASAuthorizationAppleIDCredential.
+# `email` + `display_name` only arrive on the FIRST sign-in (per
+# Apple docs); the iOS app caches them locally + forwards on
+# subsequent calls so the backend can keep its row correct.
+class EndUserSignInWithAppleIn(BaseModel):
+    identity_token: str = Field(min_length=1, max_length=4096)
+    email: Optional[EmailStr] = None
+    display_name: Optional[str] = Field(default=None, max_length=128)
+
+
+# Phase 29.4 stub: APNS device-token register/unregister bodies.
+# `device_token` is hex-encoded (~64 chars today). `bundle_id` +
+# `environment` let the sender pick the right APNS topic + gateway
+# in case TestFlight + App Store builds coexist.
+class EndUserApnsRegisterIn(BaseModel):
+    device_token: str = Field(min_length=1, max_length=256)
+    bundle_id: str = Field(min_length=1, max_length=128)
+    environment: str = Field(pattern=r"^(sandbox|production)$")
+
+
+class EndUserApnsUnregisterIn(BaseModel):
+    device_token: str = Field(min_length=1, max_length=256)
 
 
 class ApiKeyCreateIn(BaseModel):
@@ -5506,6 +5532,141 @@ def revoke_end_user_push_subscription(
     return {"revoked": True, "endpoint": row.endpoint}
 
 
+# ---------- Phase 29.4 stub: end-user APNS device tokens ---------- #
+
+
+@app.post("/me/end-user/apns-tokens")
+def register_end_user_apns_token(
+    body: EndUserApnsRegisterIn,
+    auth: EndUserAuthResult = Depends(get_end_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 29.4 stub: native iOS app registers an APNS device
+    token. Parallel to POST /me/end-user/push-subscriptions for
+    Web Push.
+
+    Upserts by (end_user_id, device_token) — APNS tokens rotate so
+    a re-register from the same device updates the existing row
+    + clears revoked_at.
+    """
+    existing = session.scalar(
+        select(EndUserApnsToken).where(
+            EndUserApnsToken.end_user_id == auth.end_user.id,
+            EndUserApnsToken.device_token == body.device_token,
+        )
+    )
+    if existing is not None:
+        existing.bundle_id = body.bundle_id
+        existing.environment = body.environment
+        existing.revoked_at = None
+        row = existing
+    else:
+        row = EndUserApnsToken(
+            id=str(uuid.uuid4()),
+            end_user_id=auth.end_user.id,
+            device_token=body.device_token,
+            bundle_id=body.bundle_id,
+            environment=body.environment,
+        )
+        session.add(row)
+    session.flush()
+    return {
+        "id": row.id,
+        "device_token": row.device_token,
+        "active": row.revoked_at is None,
+    }
+
+
+@app.delete("/me/end-user/apns-tokens")
+def revoke_end_user_apns_token(
+    body: EndUserApnsUnregisterIn,
+    auth: EndUserAuthResult = Depends(get_end_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 29.4 stub: end user disables APNS push on a device
+    (sign-out or settings toggle). Soft-revoke; same isolation +
+    idempotence shape as the Web Push DELETE."""
+    row = session.scalar(
+        select(EndUserApnsToken).where(
+            EndUserApnsToken.end_user_id == auth.end_user.id,
+            EndUserApnsToken.device_token == body.device_token,
+        )
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "apns_token_not_found"},
+        )
+    if row.revoked_at is None:
+        row.revoked_at = utcnow()
+        session.flush()
+    return {"revoked": True, "device_token": row.device_token}
+
+
+# ---------- Phase 29.2c stub: Sign in with Apple ---------- #
+
+
+@app.post("/auth/end-user/sign-in-with-apple", status_code=200)
+def sign_in_with_apple(
+    body: EndUserSignInWithAppleIn,
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 29.2c stub: exchange an Apple identity token for a
+    Lightsei session.
+
+    The live path (TODO): verify the identity token via
+    `apple_signin.verify_identity_token`, look up or create an
+    EndUser keyed by the Apple `sub` (preferred) or `email`,
+    create an EndUserSession, return the same shape as the
+    magic-link consume endpoint.
+
+    Today returns 501 until LIGHTSEI_APPLE_SIWA_REQUIRE_LIVE is
+    set AND the JWKS verification is implemented in
+    apple_signin.py. The 501 is on purpose — failing-loud here
+    prevents silent account creation while the verifier is a stub.
+    """
+    import apple_signin as _siwa
+
+    try:
+        _claim = _siwa.verify_identity_token(body.identity_token)
+    except _siwa.SiwaNotConfiguredError as e:
+        raise HTTPException(
+            status_code=501,
+            detail={
+                "error": "siwa_not_configured",
+                "message": str(e),
+            },
+        ) from None
+    except _siwa.SiwaInvalidTokenError as e:
+        raise HTTPException(
+            status_code=401,
+            detail={
+                "error": "siwa_invalid_token",
+                "message": str(e),
+            },
+        ) from None
+
+    # Live-path TODO. Once apple_signin.verify_identity_token
+    # returns a real AppleIdentityClaim:
+    #
+    #   1. Look up EndUser by claim.sub (need a new column on
+    #      end_users or a separate end_user_apple_links table —
+    #      decide before flipping live).
+    #   2. If not found, look up by claim.email (Apple sends email
+    #      only on first sign-in; iOS app caches + forwards on
+    #      subsequent calls via body.email).
+    #   3. If still not found, create EndUser.
+    #   4. Create EndUserSession (parallel to magic-link consume).
+    #   5. Return {session_token, end_user, is_new_end_user, ...}.
+    raise HTTPException(
+        status_code=501,
+        detail={
+            "error": "siwa_not_implemented",
+            "message": "Sign in with Apple is stubbed pending Apple Developer account setup",
+        },
+    )
+
+
 # ---------- Phase 17.3: Google OAuth ---------- #
 
 
@@ -8149,6 +8310,27 @@ def _push_notify_end_user_if_subscribed(
             body=preview,
             deep_link_url=deep_link,
         )
+
+        # Phase 29.4 stub: APNS fan-out for end users with the
+        # native iOS app installed. Capture-mode today; goes live
+        # when the Apple Developer account lands + the LIGHTSEI_APNS_*
+        # env vars are configured. Wrapped in its own try so an
+        # APNS failure doesn't tank the web-push that just succeeded.
+        try:
+            import apns as _apns
+            _apns.send_to_end_user(
+                session,
+                conv.end_user_id,
+                title=vendor_name,
+                body=preview,
+                deep_link_url=deep_link,
+            )
+        except Exception:
+            import logging as _logging
+            _logging.getLogger("lightsei.apns").exception(
+                "apns notify failed for conv %s (best-effort, "
+                "ignoring)", conv.id,
+            )
     except Exception:
         # Best-effort: push failures (capture mode glitches, missing
         # subscription rows, transient pywebpush errors) must not

@@ -13,6 +13,7 @@
 // 29.2c will add a "Sign in with Apple" button above the form.
 
 import SwiftUI
+import AuthenticationServices
 
 struct SignInView: View {
     @EnvironmentObject var auth: AuthStore
@@ -26,10 +27,18 @@ struct SignInView: View {
     @State private var consuming: Bool = false
     @State private var pasteError: String?
 
+    // Phase 29.2c stub: Sign in with Apple.
+    @State private var siwaError: String?
+    @State private var siwaBusy: Bool = false
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 header
+
+                siwaSection
+
+                divider
 
                 requestSection
 
@@ -46,9 +55,68 @@ struct SignInView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Sign in").font(.system(size: 28, weight: .semibold))
-            Text("Enter your email and we'll send a magic-link.")
+            Text("Continue with Apple, or get a magic-link by email.")
                 .font(.system(size: 14))
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    // Phase 29.2c stub: Sign in with Apple button + coordinator.
+    // The button is the canonical SignInWithAppleButton; tapping
+    // it presents the system sheet via SignInWithAppleCoordinator.
+    // Backend currently returns 501 ("siwa_not_configured") so a
+    // successful auth still surfaces an inline error — the surface
+    // is here so flipping live is just a backend change.
+    private var siwaSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            SignInWithAppleButton(.signIn) { request in
+                request.requestedScopes = [.email, .fullName]
+            } onCompletion: { _ in
+                // The system gives us a result here, but routing
+                // through AuthStore.signInWithApple keeps the
+                // identity-token plumbing in one place + lets the
+                // coordinator handle presentation. We ignore this
+                // callback's result and trigger our own flow on
+                // tap below via a simultaneous gesture, OR (simpler
+                // here) trigger via the wrapper directly. Apple
+                // requires the official button for App Store
+                // approval, so we keep it as the visible control.
+            }
+            .signInWithAppleButtonStyle(.black)
+            .frame(height: 48)
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+            // Overlay an invisible button so we can hand the flow
+            // off to our coordinator (which surfaces backend
+            // errors). The native SignInWithAppleButton's
+            // onCompletion doesn't give us a clean async hook
+            // for the network round-trip.
+            .overlay(
+                Button(action: { Task { await runSiwa() } }) {
+                    Color.clear
+                }
+                .disabled(siwaBusy),
+            )
+
+            if siwaBusy {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity, alignment: .center)
+            }
+            if let siwaError {
+                Text(siwaError).font(.caption).foregroundStyle(.red)
+            }
+        }
+    }
+
+    private func runSiwa() async {
+        siwaBusy = true
+        siwaError = nil
+        defer { siwaBusy = false }
+        do {
+            try await auth.signInWithApple()
+        } catch {
+            siwaError = (error as? LocalizedError)?
+                .errorDescription ?? "\(error)"
         }
     }
 

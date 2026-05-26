@@ -20,12 +20,27 @@ import SwiftUI
 @main
 struct LightseiApp: App {
     @StateObject private var auth = AuthStore()
+    // Phase 29.4 stub: UIApplicationDelegate adapter for the APNS
+    // device-token callback. SwiftUI's lifecycle doesn't fire
+    // didRegisterForRemoteNotificationsWithDeviceToken directly so
+    // we bridge through LightseiAppDelegate.
+    @UIApplicationDelegateAdaptor(LightseiAppDelegate.self)
+        var appDelegate
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(auth)
-                .task { await auth.restore() }
+                .task {
+                    await auth.restore()
+                    PushRegistration.shared.attach(authStore: auth)
+                    // Only ask once we know who the user is —
+                    // pre-signin the request would block the
+                    // sign-in surface for no benefit.
+                    if case .ok = auth.state {
+                        PushRegistration.shared.request()
+                    }
+                }
                 .onOpenURL { url in
                     handleIncomingURL(url)
                 }

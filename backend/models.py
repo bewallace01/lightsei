@@ -2274,3 +2274,54 @@ class EndUserPushSubscription(Base):
             postgresql_where=text("revoked_at IS NULL"),
         ),
     )
+
+
+class EndUserApnsToken(Base):
+    """Phase 29.4: APNS device token for one (end_user, device) pair.
+
+    Parallel to EndUserPushSubscription but keyed on Apple's APNS
+    device tokens. The Phase 29.4 send helper fans out across active
+    rows for an end user; on 410 BadDeviceToken or 410 Unregistered,
+    it sets `revoked_at` so the row is skipped next time.
+
+    Composite unique on `(end_user_id, device_token)` for the
+    re-register upsert (iOS tokens rotate ~monthly).
+
+    `bundle_id` + `environment` keep prod / TestFlight / dev tokens
+    distinguishable so the sender hits the right APNS topic + gateway.
+    """
+
+    __tablename__ = "end_user_apns_tokens"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    end_user_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("end_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    device_token: Mapped[str] = mapped_column(Text, nullable=False)
+    bundle_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    environment: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "end_user_id", "device_token",
+            name="uq_end_user_apns_tokens_end_user_token",
+        ),
+        Index(
+            "ix_end_user_apns_tokens_active",
+            "end_user_id",
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+    )

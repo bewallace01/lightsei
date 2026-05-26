@@ -63,4 +63,13 @@ final class AuthStore: ObservableObject {
     /// Bearer-attached client for callers (e.g. SignInView for the
     /// magic-link request, future vendor list fetches).
     var client: APIClient { api }
+
+    /// Set the bearer + flip to .ok. Used by auxiliary sign-in
+    /// flows (Sign in with Apple) that live in extension files
+    /// and so can't poke the private `api` field directly.
+    func acceptSession(token: String, endUser: EndUser) throws {
+        try Keychain.write(token)
+        api.bearer = token
+        state = .ok(endUser)
+    }
 }
