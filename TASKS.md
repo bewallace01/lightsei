@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 26 close gate — iPhone install verification on Bailey's phone. Phase 26 is code-complete: 1380 backend tests pass, 175 SDK tests pass, dashboard tsc + next build clean, all 13 automated demo steps pass (vendor signup, slug claim, magic-link, /c data flow, conversation post + poll, PWA assets present). Pending: open /c in Safari on iPhone, "Add to Home Screen", verify full-screen launch + persistent conversation per the checklist printed at the end of `python3 backend/scripts/phase_26_demo.py`. On PASS: Phase 26 closes + NOW advances to 27.1. On FAIL: a "Fix Phase 26 install: <issue>" sub-task gets spawned. Phase 25 closed 2026-05-25; 26.1-26.5 shipped same-day. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 27 — 27.1 schema: vendor_invite_codes + per-vendor end-user settings. Alembic 0044 adds `vendor_invite_codes` (code uuid pk, workspace_id fk, created_at, expires_at, consumed_at nullable, consumed_by_end_user_id fk nullable) + extends `end_user_vendor_links` with `display_name_override` (nullable) + `notification_pref` (`all`/`mentions`/`off`, default `all`) + `removed_at` (nullable; already added in 25.1 spec but verify). Phase 25 + 26 closed 2026-05-25. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,41 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 26 closed: iPhone install verified on Bailey's phone + Dockerfile fix landed
+
+Phase 26 wraps. All 6 sub-tasks shipped same-day. Lightsei is now a real installable PWA on iOS Safari 16.4+, with an indigo "L" icon Bailey confirmed lands on the home screen + opens full-screen.
+
+**iPhone install verification (Bailey's iPhone, prod app.lightsei.com)**:
+
+- **Step 1 PASS (partial)**: `/c` page loads correctly. Banner did NOT appear — flagged as follow-up bug (task #290), not a blocker.
+- **Step 2 PASS**: tap Safari share icon → "Add to Home Screen" appears → name pre-fills as "Lightsei" → tap Add → indigo "L" icon on home screen.
+- **Step 3 PASS**: launch from home screen → opens full-screen (no Safari URL/tab bar) → `/c` renders correctly inside the installed app.
+
+**Latent Dockerfile bug fixed mid-verification** (commit `c5e15dd`):
+
+- The Next.js standalone build doesn't auto-include `public/`; the dashboard Dockerfile copied `.next/standalone` + `.next/static` but not `public/`. /sw.js, /apple-touch-icon.png, /icon-*.png all 404'd in the initial Phase 26.6 deploy. **The Phase 21.4 widget snippet at /widget.js has been 404'ing in prod the entire time** (since Phase 21.4 added the file). The PWA install path surfaced it because all four icon paths + manifest + sw.js are needed for the install flow.
+- One-line fix: `COPY --from=build /app/public ./public` in the runner stage. Pushed + auto-redeployed. Confirmed all assets 200 after rollout.
+
+**Open follow-up** (task #290): InstallPrompt banner didn't show on Bailey's iPhone Safari despite regular Safari (not in-app) and a fresh visit. Code IS in the prod layout chunk (grep confirmed). Most likely cause is one of: localStorage flag set from a previous interaction, hydration error, iOS version UA quirk, or over-strict isIOSSafari() regex. Install path itself works manually via the share menu (the banner is a discovery convenience).
+
+**Phase 26 spec deviations carried through to phase close**:
+
+- **26.4**: iOS splash-screen-per-resolution matrix deferred to 26B (generic iOS launch screen used).
+- **26.5**: install banner detection ships but doesn't render in Bailey's prod test — see task #290.
+- **General**: localStorage instead of cookies for end-user session token (in parity with operator side; flagged in 26.3 Done Log).
+
+**Phase 26 totals**: 6 sub-tasks + 1 latent-bug fix. Backend tests went 1323 → 1380 (+57). SDK unchanged at 175. Dashboard added 3 routes (`/c`, `/c/[slug]`, `/c/auth/magic-link`) + 1 layout + PWA manifest + service worker + 5 PIL-generated PNG icons.
+
+**Phase 26B parked**:
+- iOS splash-screen-per-resolution matrix (deferred from 26.4)
+- InstallPrompt detection debugging if banner stays broken (task #290 covers it)
+- Per-vendor PWAs (each vendor's chat installs as its own app)
+- Custom vendor domain hosting (`chat.jyni.com`)
+- Multi-bot-per-vendor consumer chat
+- Subdomain rebrand
+
+**What this enables**: 27.x consumer subscriptions can build on the live + installable /c surface. End users invited via 27.2's vendor invite codes can now go from magic-link email → /c/auth/magic-link → /c → /c/{slug} chat → home-screen install → daily-app-feel without any operator dashboard chrome. The Phase 21.4 widget snippet at /widget.js is also now serving correctly in prod for the first time (latent-bug fix side effect).
 
 ### 2026-05-25 — Phase 26.6 + Phase 26 code-complete (install verification pending Bailey)
 
