@@ -20,7 +20,7 @@ struct ContentView: View {
         case .signedOut:
             SignInView()
         case .ok(let user):
-            SignedInPlaceholderView(endUser: user)
+            VendorListView(endUser: user)
         }
     }
 }
