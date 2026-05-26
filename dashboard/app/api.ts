@@ -2464,6 +2464,13 @@ export type EndUserVendor = {
 export type EndUserMeResponse = {
   end_user: EndUser;
   linked_vendors: EndUserVendor[];
+  // Phase 28.5: VAPID public key + push subscription state, shipped
+  // alongside identity so /c can render the EnablePushPrompt without
+  // a second fetch. `push_vapid_public_key` is null when the backend
+  // isn't configured for live push (capture mode / local dev); the
+  // prompt hides itself in that case.
+  push_vapid_public_key?: string | null;
+  has_active_push_subscription?: boolean;
 };
 
 export type EndUserVendorConversation = {
@@ -2798,4 +2805,34 @@ export async function unlinkEndUserVendor(
     `/me/end-user/vendors/${encodeURIComponent(workspaceId)}`,
     { method: "DELETE" },
   )) as { unlinked: boolean; workspace_id: string };
+}
+
+// Phase 28.5: end-user push subscriptions.
+//
+// `subscribeEndUserPush` ships the keys from
+// PushManager.subscribe().toJSON() to the backend, which upserts by
+// the (end_user_id, endpoint) composite unique. `unsubscribeEndUserPush`
+// soft-revokes (sets revoked_at); the partial active index excludes
+// revoked rows from the send fan-out.
+
+export async function subscribeEndUserPush(payload: {
+  endpoint: string;
+  p256dh: string;
+  auth: string;
+}): Promise<{ id: string; endpoint: string; active: boolean }> {
+  return (await endUserAuthedJson("/me/end-user/push-subscriptions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  })) as { id: string; endpoint: string; active: boolean };
+}
+
+export async function unsubscribeEndUserPush(
+  endpoint: string,
+): Promise<{ revoked: boolean; endpoint: string }> {
+  return (await endUserAuthedJson("/me/end-user/push-subscriptions", {
+    method: "DELETE",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ endpoint }),
+  })) as { revoked: boolean; endpoint: string };
 }

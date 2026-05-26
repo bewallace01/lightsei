@@ -52,6 +52,7 @@ from models import (
     DeploymentLog,
     EmailSigninToken,
     EndUser,
+    EndUserPushSubscription,
     EndUserSession,
     EndUserSigninToken,
     EndUserVendorLink,
@@ -238,6 +239,25 @@ class EndUserVendorPatchIn(BaseModel):
     display_name_override: Optional[str] = Field(
         default=None, max_length=128,
     )
+
+
+# Phase 28.5: body shape from PushManager.subscribe().toJSON() — the
+# browser hands the backend exactly these three fields (endpoint URL
+# unique to the push service, p256dh + auth keys used by pywebpush
+# to encrypt payloads). The composite unique constraint on the
+# end_user_push_subscriptions table is (end_user_id, endpoint), so
+# re-POSTing the same endpoint upserts the row.
+class EndUserPushSubscriptionIn(BaseModel):
+    endpoint: str = Field(min_length=1, max_length=2048)
+    p256dh: str = Field(min_length=1, max_length=512)
+    auth: str = Field(min_length=1, max_length=512)
+
+
+# Phase 28.5: DELETE body — the browser hands back the endpoint that
+# came from PushManager.unsubscribe(), the backend uses it to find
+# the matching row + set revoked_at.
+class EndUserPushUnsubscribeIn(BaseModel):
+    endpoint: str = Field(min_length=1, max_length=2048)
 
 
 class ApiKeyCreateIn(BaseModel):
@@ -4959,6 +4979,7 @@ def _serialize_vendor_for_end_user(w: Workspace) -> dict[str, Any]:
 @app.get("/me/end-user")
 def me_end_user(
     auth: EndUserAuthResult = Depends(get_end_user),
+    session: Session = Depends(get_session),
 ) -> dict[str, Any]:
     """Phase 26.2: who-am-I for the consumer surface.
 
@@ -4967,13 +4988,31 @@ def me_end_user(
     `/c` calls this on load to render the vendor cards; `/c/{slug}`
     calls it on load to identify the user + verify they're linked
     to the slug they're trying to chat with.
+
+    Phase 28.5 extension: surfaces the VAPID public key + whether
+    the end user already has an active push subscription, so the
+    /c EnablePushPrompt component can render the right state in
+    one fetch.
     """
+    import push as _push
+
+    has_active_push = session.scalar(
+        select(EndUserPushSubscription.id)
+        .where(
+            EndUserPushSubscription.end_user_id == auth.end_user.id,
+            EndUserPushSubscription.revoked_at.is_(None),
+        )
+        .limit(1)
+    ) is not None
+
     return {
         "end_user": _serialize_end_user(auth.end_user),
         "linked_vendors": [
             _serialize_vendor_for_end_user(w)
             for w in auth.linked_workspaces
         ],
+        "push_vapid_public_key": _push.get_vapid_public_key(),
+        "has_active_push_subscription": has_active_push,
     }
 
 
@@ -5381,6 +5420,90 @@ def soft_revoke_end_user_vendor(
     link.removed_at = utcnow()
     session.flush()
     return {"unlinked": True, "workspace_id": workspace_id}
+
+
+# ---------- Phase 28.5: end-user push subscriptions ---------- #
+
+
+@app.post("/me/end-user/push-subscriptions")
+def create_end_user_push_subscription(
+    body: EndUserPushSubscriptionIn,
+    auth: EndUserAuthResult = Depends(get_end_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 28.5: end user enables push notifications on a device.
+
+    The browser calls `PushManager.subscribe({applicationServerKey})`
+    and hands the resulting endpoint + p256dh + auth back here. The
+    composite unique constraint on (end_user_id, endpoint) means a
+    re-subscribe from the same device upserts the row: any existing
+    row is updated in-place (new keys, revoked_at cleared) so the
+    Phase 28.2 send fan-out picks it up again.
+
+    No 410-cleanup race here: 410 cleanup runs on send-failure and
+    sets revoked_at, but a fresh subscribe always clears it.
+    """
+    existing = session.scalar(
+        select(EndUserPushSubscription).where(
+            EndUserPushSubscription.end_user_id == auth.end_user.id,
+            EndUserPushSubscription.endpoint == body.endpoint,
+        )
+    )
+    if existing is not None:
+        existing.p256dh = body.p256dh
+        existing.auth = body.auth
+        existing.revoked_at = None
+        row = existing
+    else:
+        row = EndUserPushSubscription(
+            id=str(uuid.uuid4()),
+            end_user_id=auth.end_user.id,
+            endpoint=body.endpoint,
+            p256dh=body.p256dh,
+            auth=body.auth,
+        )
+        session.add(row)
+    session.flush()
+    return {
+        "id": row.id,
+        "endpoint": row.endpoint,
+        "active": row.revoked_at is None,
+    }
+
+
+@app.delete("/me/end-user/push-subscriptions")
+def revoke_end_user_push_subscription(
+    body: EndUserPushUnsubscribeIn,
+    auth: EndUserAuthResult = Depends(get_end_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 28.5: end user turns off push on a device.
+
+    Browser calls `PushManager.unsubscribe()` first, then POSTs the
+    endpoint back here so we set `revoked_at` on the matching row.
+    Soft-revoke (not hard-delete) so 410-cleanup + audit history
+    stays coherent; the partial active index excludes revoked rows
+    from the send fan-out.
+
+    404 if the endpoint doesn't match a row owned by this end user
+    (cross-end-user isolation: the WHERE clause filters on
+    end_user_id, so another user's endpoint string is invisible).
+    """
+    row = session.scalar(
+        select(EndUserPushSubscription).where(
+            EndUserPushSubscription.end_user_id == auth.end_user.id,
+            EndUserPushSubscription.endpoint == body.endpoint,
+        )
+    )
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "push_subscription_not_found"},
+        )
+    if row.revoked_at is None:
+        row.revoked_at = utcnow()
+        session.flush()
+    return {"revoked": True, "endpoint": row.endpoint}
 
 
 # ---------- Phase 17.3: Google OAuth ---------- #

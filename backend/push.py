@@ -102,6 +102,15 @@ class PushNotConfiguredError(RuntimeError):
     can flag it separately from generic transport failures."""
 
 
+def get_vapid_public_key() -> Optional[str]:
+    """Public accessor for the VAPID public key. Phase 28.5 surfaces
+    this on GET /me/end-user so the /c subscribe flow can pass it to
+    `PushManager.subscribe({ applicationServerKey })`. Returns None
+    when the key isn't configured (capture mode / local dev), and
+    the frontend hides the prompt accordingly."""
+    return _public_key()
+
+
 def captured_pushes() -> list[dict[str, Any]]:
     """Test/debug accessor for pushes captured while in capture mode."""
     return list(_captured)

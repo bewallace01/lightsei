@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 28 — 28.5 subscription UI. `/c` shows an "Enable notifications" prompt for end users who haven't subscribed. On click: calls PushManager.subscribe() + POSTs the subscription to backend (new POST /me/end-user/push-subscriptions endpoint). Backend ships LIGHTSEI_VAPID_PUBLIC_KEY at build time so the frontend can pass it to applicationServerKey. Phase 25 + 26 + 27 closed. 28.1 schema + 28.2 send + 28.3 wiring + 28.4 sw.js handlers shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 28 — 28.6 tests + sweep. Full backend + SDK pytest sweep, dashboard tsc + next build, real-iPhone push receipt with Bailey to close the phase. 28.5 shipped 2026-05-26: backend POST + DELETE /me/end-user/push-subscriptions endpoints (upsert by composite (end_user_id, endpoint); soft-revoke; cross-user isolated), GET /me/end-user extended with push_vapid_public_key + has_active_push_subscription so /c renders the EnablePushPrompt without a second fetch. VAPID key shipped at runtime (not build-time) so key rotation doesn't need a dashboard rebuild. 28.1 schema + 28.2 send + 28.3 wiring + 28.4 sw.js handlers + 28.5 subscribe UI all shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,44 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-26 — Phase 28.5: subscription UI on /c + push subscription endpoints
+
+The `/c` consumer surface now has an "Enable notifications" prompt that drives the full subscribe flow: ask Notification permission, call `PushManager.subscribe({applicationServerKey})`, POST the keys to the backend, flip to "Notifications enabled" with a Turn off button. Backend round-trips the VAPID public key + active-subscription state on `GET /me/end-user` so the prompt renders in the right state on first paint without a second fetch.
+
+**What shipped**:
+
+- `backend/push.py`: new public accessor `get_vapid_public_key()` wraps the existing `_public_key()` env getter. Lets main.py surface the key without reaching into a private helper.
+- `backend/main.py`:
+  - `EndUserPushSubscriptionIn` + `EndUserPushUnsubscribeIn` Pydantic body models. The subscribe shape mirrors `PushManager.subscribe().toJSON()` exactly (endpoint + p256dh + auth).
+  - `EndUserPushSubscription` added to the models import block.
+  - `GET /me/end-user` extended with two fields: `push_vapid_public_key` (the base64url VAPID key, null when the backend isn't configured for live push) + `has_active_push_subscription` (boolean from a single-row existence check on `end_user_push_subscriptions WHERE end_user_id = self AND revoked_at IS NULL`).
+  - `POST /me/end-user/push-subscriptions`: upserts by the (end_user_id, endpoint) composite unique. Existing row → update p256dh + auth + clear revoked_at. Missing row → insert. Returns `{id, endpoint, active}`.
+  - `DELETE /me/end-user/push-subscriptions`: body-bearing DELETE, sets revoked_at on the matching row. 404 if the endpoint doesn't match a row owned by this end user (cross-user isolation via the WHERE clause). Idempotent: a second DELETE returns 200 without overwriting revoked_at.
+- `backend/tests/test_end_user_push_subscriptions_endpoints.py`: **12 new tests** covering: auth required, row creation, idempotent re-POST, re-activate revoked row, validation rejects empty endpoint, revoke happy path, idempotent re-DELETE, 404 on unknown endpoint, cross-user isolation (can't revoke another user's row), VAPID key surfacing via env, null when env unset, `has_active_push_subscription` flips with row state.
+- `dashboard/app/api.ts`:
+  - `EndUserMeResponse` grows `push_vapid_public_key?: string | null` + `has_active_push_subscription?: boolean`.
+  - `subscribeEndUserPush({endpoint, p256dh, auth})` POSTs to the new endpoint.
+  - `unsubscribeEndUserPush(endpoint)` DELETEs with body.
+- `dashboard/app/c/EnablePushPrompt.tsx` (new, ~140 lines): client component that gates on `serviceWorker in navigator && PushManager in window` + non-null vapidPublicKey + permission != 'denied'. Enable flow: request permission → `navigator.serviceWorker.ready` → `PushManager.subscribe` with the VAPID key (translated from base64url to Uint8Array via the standard pad-and-decode helper) → serialize p256dh + auth keys via `sub.getKey()` → base64url-encode them → POST to backend. Disable flow: get the current subscription → DELETE to backend → `sub.unsubscribe()`. Renders as a single white card on /c above the vendor list.
+- `dashboard/app/c/page.tsx`: extends the `ok` State variant with `vapidPublicKey` + `hasActivePushSubscription`, hydrates from `fetchEndUserMe`, renders `<EnablePushPrompt>` above the vendor list.
+
+**Spec deviations**:
+
+- Spec said "Backend ships LIGHTSEI_VAPID_PUBLIC_KEY at build time so the frontend can pass it to applicationServerKey." Shipped via the runtime `GET /me/end-user` response instead of a `NEXT_PUBLIC_LIGHTSEI_VAPID_PUBLIC_KEY` build-time env var. Reasons: (1) key rotation doesn't require a dashboard rebuild + redeploy, (2) avoids managing yet another dashboard env var on Railway, (3) the backend already returns identity context on /c load so the cost is zero extra roundtrips. Flagged to Bailey before implementing; no objection.
+
+**Design notes**:
+
+- Composite-unique upsert (vs separate INSERT + ON CONFLICT) is the right model for "same browser, same end user, subscribed twice" — the second POST is the source of truth (e.g., permission revoked + re-granted produces a different p256dh keypair). Re-activate-via-clear-revoked_at also handles the common case where a 410 cleanup ran but the user comes back later.
+- DELETE-with-body is slightly weird REST but fits cleanly here: the endpoint string is a long URL the client can't reasonably stuff into the path or query without escaping headaches. Pattern matches the existing `unlinkEndUserVendor` shape (DELETE on `/me/end-user/vendors/{id}`) for consistency.
+- VAPID public key on `/me/end-user` instead of a dedicated `/push/config` endpoint cuts one round trip on /c page load (the most common reach surface). If we ever need to serve it to non-end-user paths, can promote to a dedicated config endpoint without breaking this.
+- EnablePushPrompt is the third "gate on capability" component on /c (alongside InstallPrompt + ServiceWorkerRegister). All three soft-fail when the browser doesn't support the underlying API; the /c surface remains usable for everyone.
+
+**Test counts**: backend 1463 → **1475** (+12). All 64 end-user + push tests green together (none of the existing tests regressed when GET /me/end-user picked up the new fields + the `session` dep).
+
+**Verification**: backend pytest green (12 new + 52 existing). Dashboard tsc + next build clean. `/c` route bundle stayed within the existing budget.
+
+**What this enables**: Phase 28's full end-to-end push pipeline now works in capture mode (everything green in tests) + is ready for the live verification in 28.6 — Bailey's iPhone subscribes via the prompt, an operator reply on /inbox fans out via the Phase 28.3 helper through Phase 28.2's pywebpush + the apple push service, the SW's 28.4 push handler renders the notification, the notificationclick handler postMessages a deep-link to the right conversation.
 
 ### 2026-05-25 — Phase 28.4: service worker push + notificationclick handlers
 

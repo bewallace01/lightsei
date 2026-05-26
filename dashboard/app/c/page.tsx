@@ -24,10 +24,19 @@ import {
   redeemEndUserInvite,
 } from "../api";
 import { clearEndUserSession } from "../endUserSession";
+import EnablePushPrompt from "./EnablePushPrompt";
 
 type State =
   | { kind: "loading" }
-  | { kind: "ok"; email: string; vendors: EndUserVendorWithCount[] }
+  | {
+      kind: "ok";
+      email: string;
+      vendors: EndUserVendorWithCount[];
+      // Phase 28.5: carry the push state into the rendered tree so
+      // EnablePushPrompt can render with the right initial state.
+      vapidPublicKey: string | null;
+      hasActivePushSubscription: boolean;
+    }
   | { kind: "needs-signin" }
   | { kind: "error"; message: string };
 
@@ -48,6 +57,9 @@ export default function ConsumerHomePage() {
         kind: "ok",
         email: me.end_user.email,
         vendors: vendors.vendors,
+        vapidPublicKey: me.push_vapid_public_key ?? null,
+        hasActivePushSubscription:
+          me.has_active_push_subscription ?? false,
       });
     } catch (e) {
       if (e instanceof EndUserUnauthorizedError) {
@@ -103,7 +115,7 @@ export default function ConsumerHomePage() {
     );
   }
 
-  const { email, vendors } = state;
+  const { email, vendors, vapidPublicKey, hasActivePushSubscription } = state;
 
   return (
     <main className="min-h-screen px-6 py-10 max-w-2xl mx-auto">
@@ -133,6 +145,13 @@ export default function ConsumerHomePage() {
           </button>
         </div>
       </header>
+
+      <div className="mb-6">
+        <EnablePushPrompt
+          vapidPublicKey={vapidPublicKey}
+          initiallySubscribed={hasActivePushSubscription}
+        />
+      </div>
 
       {vendors.length === 0 ? (
         <EmptyState onAdd={() => setAddOpen(true)} />
