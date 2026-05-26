@@ -196,11 +196,11 @@ function IntegrationsIndexInner(): JSX.Element {
   }
 
   return (
-    <main className="max-w-5xl mx-auto px-6 py-8 text-sm text-zinc-200">
+    <main className="max-w-5xl mx-auto px-6 py-8 text-sm text-gray-900">
       <header className="mb-6 flex items-baseline justify-between">
         <div>
           <h1 className="text-xl font-semibold">Integrations</h1>
-          <p className="text-zinc-400 mt-1">
+          <p className="text-gray-600 mt-1">
             Connect external services your bots can call. Each connector
             declares which trust zones can use it; bots outside those
             zones are refused at the API gate.
@@ -209,62 +209,62 @@ function IntegrationsIndexInner(): JSX.Element {
       </header>
 
       {flash && (
-        <div className="mb-4 rounded border border-emerald-700/60 bg-emerald-900/30 px-3 py-2 text-emerald-200">
+        <div className="mb-4 rounded border border-green-200 bg-green-50 px-3 py-2 text-green-800">
           {flash}
         </div>
       )}
       {error && (
-        <div className="mb-4 rounded border border-rose-700/60 bg-rose-900/30 px-3 py-2 text-rose-200">
+        <div className="mb-4 rounded border border-red-200 bg-red-50 px-3 py-2 text-red-700">
           {error}
         </div>
       )}
 
       {connectors === null ? (
-        <p className="text-zinc-500">Loading…</p>
+        <p className="text-gray-500">Loading…</p>
       ) : (
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {cards.map((card) => (
             <div
               key={card.key}
-              className="rounded-lg border border-zinc-800 bg-zinc-950/60 p-4 flex flex-col gap-3"
+              className="rounded-lg border border-gray-200 bg-white p-4 flex flex-col gap-3"
             >
               <div className="flex items-start justify-between">
                 <Link href={card.href} className="group">
-                  <h2 className="font-semibold text-zinc-100 group-hover:text-indigo-300">
+                  <h2 className="font-semibold text-gray-900 group-hover:text-accent-600">
                     {card.displayLabel}
                   </h2>
-                  <p className="text-xs text-zinc-500 mt-0.5">
+                  <p className="text-xs text-gray-500 mt-0.5">
                     OAuth: {card.oauthProvider}
                   </p>
                 </Link>
                 {card.installed ? (
-                  <span className="rounded-full bg-emerald-900/50 text-emerald-300 text-xs px-2 py-0.5 border border-emerald-700/60">
+                  <span className="rounded-full bg-green-100 text-green-800 text-xs px-2 py-0.5 border border-green-200">
                     Connected
                   </span>
                 ) : (
-                  <span className="rounded-full bg-zinc-800 text-zinc-400 text-xs px-2 py-0.5 border border-zinc-700">
+                  <span className="rounded-full bg-gray-100 text-gray-600 text-xs px-2 py-0.5 border border-gray-200">
                     Not connected
                   </span>
                 )}
               </div>
 
-              <p className="text-zinc-400 text-xs leading-relaxed">
+              <p className="text-gray-600 text-xs leading-relaxed">
                 {card.summary}
               </p>
 
-              <div className="flex flex-wrap gap-1.5">
-                <span className="text-xs text-zinc-500 mr-1">Zones:</span>
+              <div className="flex flex-wrap gap-1.5 items-center">
+                <span className="text-xs text-gray-500 mr-1">Zones:</span>
                 {card.declaredZones.map((z) => (
                   <SensitivityChip key={z} level={z} size="sm" />
                 ))}
               </div>
 
               {card.installed && (
-                <div className="text-xs text-zinc-500 border-t border-zinc-800 pt-2">
+                <div className="text-xs text-gray-500 border-t border-gray-100 pt-2">
                   {card.installLabel ? (
                     <span>
                       Connected as{" "}
-                      <span className="text-zinc-300">{card.installLabel}</span>
+                      <span className="text-gray-800">{card.installLabel}</span>
                     </span>
                   ) : (
                     <span>Connected</span>
@@ -280,7 +280,7 @@ function IntegrationsIndexInner(): JSX.Element {
                   <>
                     <Link
                       href={card.href}
-                      className="rounded border border-zinc-700 px-3 py-1.5 text-xs hover:bg-zinc-800"
+                      className="rounded border border-gray-200 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-50"
                     >
                       Configure →
                     </Link>
@@ -296,7 +296,7 @@ function IntegrationsIndexInner(): JSX.Element {
                           : handleDisconnect(card.key)
                       }
                       disabled={busy === card.key}
-                      className="rounded border border-rose-800/70 text-rose-300 px-3 py-1.5 text-xs hover:bg-rose-900/30 disabled:opacity-50"
+                      className="rounded border border-red-200 text-red-700 px-3 py-1.5 text-xs hover:bg-red-50 disabled:opacity-50"
                     >
                       {busy === card.key ? "Working…" : "Disconnect"}
                     </button>
@@ -310,7 +310,7 @@ function IntegrationsIndexInner(): JSX.Element {
                         : handleConnectGoogle(card.key)
                     }
                     disabled={busy === card.key}
-                    className="rounded bg-indigo-600 hover:bg-indigo-500 px-3 py-1.5 text-xs text-white disabled:opacity-50"
+                    className="rounded bg-accent-600 hover:bg-accent-700 px-3 py-1.5 text-xs text-white disabled:opacity-50"
                   >
                     {busy === card.key ? "Redirecting…" : "Connect"}
                   </button>
