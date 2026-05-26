@@ -4981,26 +4981,45 @@ def me_end_user(
 def me_end_user_vendor(
     slug: str,
     auth: EndUserAuthResult = Depends(get_end_user),
+    session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    """Phase 26.2: resolve a vendor by its `vendor_slug` for the
-    consumer chat surface.
+    """Phase 26.2 + Phase 27.5: resolve a vendor by its `vendor_slug`
+    for the consumer chat surface.
 
     404 if no vendor has this slug OR the end user isn't linked to
     it. Same 404 shape for both so the response doesn't leak which
     slugs exist on Lightsei to a curious authenticated user.
+
+    Phase 27.5 extension: also returns the end user's per-vendor
+    link settings (`notification_pref`, `display_name_override`) so
+    the /c/{slug}/settings page can render the form pre-populated
+    in one fetch.
     """
-    for w in auth.linked_workspaces:
-        if w.vendor_slug == slug:
-            return _serialize_vendor_for_end_user(w)
-    raise HTTPException(
-        status_code=404,
-        detail={
-            "error": "vendor_not_found",
-            "message": (
-                f"no vendor with slug {slug!r} is linked to your account"
-            ),
-        },
+    vendor = next(
+        (w for w in auth.linked_workspaces if w.vendor_slug == slug),
+        None,
     )
+    if vendor is None:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "error": "vendor_not_found",
+                "message": (
+                    f"no vendor with slug {slug!r} is linked to your account"
+                ),
+            },
+        )
+    link = session.get(
+        EndUserVendorLink, (auth.end_user.id, vendor.id),
+    )
+    out = _serialize_vendor_for_end_user(vendor)
+    out["notification_pref"] = (
+        link.notification_pref if link else "all"
+    )
+    out["display_name_override"] = (
+        link.display_name_override if link else None
+    )
+    return out
 
 
 @app.get("/me/end-user/vendors/{slug}/conversations")

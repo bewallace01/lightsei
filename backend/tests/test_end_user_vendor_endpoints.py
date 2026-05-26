@@ -182,6 +182,31 @@ def test_get_vendor_by_slug_when_linked(client):
     body = r.json()
     assert body["id"] == ws_id
     assert body["vendor_slug"] == "halo"
+    # Phase 27.5: per-link settings included so the settings page
+    # can render the form pre-populated in one fetch. Defaults:
+    # notification_pref='all', display_name_override=None.
+    assert body["notification_pref"] == "all"
+    assert body["display_name_override"] is None
+
+
+def test_get_vendor_by_slug_returns_custom_link_settings(client):
+    """Phase 27.5: link settings reflect the end user's actual
+    notification_pref + display_name_override, not defaults."""
+    ws_id = _make_vendor(slug="custom")
+    euid, token = _make_end_user()
+    with session_scope() as s:
+        s.add(EndUserVendorLink(
+            end_user_id=euid, workspace_id=ws_id,
+            notification_pref="off",
+            display_name_override="Alice S.",
+        ))
+
+    r = client.get(
+        "/me/end-user/vendors/custom", headers=_eu_auth(token),
+    )
+    body = r.json()
+    assert body["notification_pref"] == "off"
+    assert body["display_name_override"] == "Alice S."
 
 
 def test_get_vendor_by_slug_404_when_unlinked(client):

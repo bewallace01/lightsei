@@ -2453,6 +2453,12 @@ export type EndUserVendor = {
   vendor_slug: string | null;
   widget_public_id: string | null;
   customer_facing_agent_name: string | null;
+  // Phase 27.5: the per-link settings are included when the source
+  // is /me/end-user/vendors/{slug} (so the settings page can render
+  // the form pre-populated in one fetch). Other surfaces that
+  // serialize a vendor projection may omit these fields.
+  notification_pref?: string;
+  display_name_override?: string | null;
 };
 
 export type EndUserMeResponse = {

@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 27 — 27.5 per-vendor end-user settings page at /c/{slug}/settings. End user manages display_name_override, notification_pref, unsubscribe (DELETE /me/end-user/vendors/{workspace_id}) for that vendor. Phase 25 + 26 closed. 27.1 schema + 27.2 endpoints + 27.3 operator UI + 27.4 /c my-bots index shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 27 — 27.6 tests + sweep (last sub-task). Backend tests cover invite code mint + redeem + revoke + soft-unsubscribe (already shipped in 27.2). Cross-vendor isolation tests extended for "unsubscribed end user still reads past conversations but can't send new" case. Dashboard tsc + next build. After 27.6, Phase 27 demo runs and phase closes. Phase 25 + 26 closed. 27.1 + 27.2 + 27.3 + 27.4 + 27.5 shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,30 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 27.5: per-vendor end-user settings page at /c/{slug}/settings
+
+End user can now manage display name, notification preference, and unsubscribe for each linked vendor. Backend endpoint extended to ship the per-link settings on the existing vendor-by-slug GET so the settings page renders pre-populated in one fetch.
+
+**What shipped**:
+
+- `backend/main.py`: `GET /me/end-user/vendors/{slug}` extended to include `notification_pref` + `display_name_override` from the end_user_vendor_links row for the calling end user. Loads the link via `session.get(EndUserVendorLink, (auth.end_user.id, vendor.id))`; defaults to `notification_pref='all'`, `display_name_override=None` if no link found (defensive — shouldn't happen since auth.linked_workspaces is the filter).
+- `backend/tests/test_end_user_vendor_endpoints.py`: existing happy-path test extended to assert the two new fields land with defaults; new `test_get_vendor_by_slug_returns_custom_link_settings` test confirms custom values (notification_pref='off', display_name_override='Alice S.') flow through.
+- `dashboard/app/api.ts`: `EndUserVendor` type extended with optional `notification_pref` + `display_name_override`. Other surfaces (vendor-list endpoints) that don't include per-link data continue to type-check via the optionality.
+- `dashboard/app/c/[slug]/settings/page.tsx`: new client page. Loads vendor via `fetchEndUserVendor(slug)`, pre-populates display-name input + notification-pref radio. Save button calls `patchEndUserVendor` (only the dirty fields visible in the form). Unsubscribe button with native `confirm()` calls `unlinkEndUserVendor` then `router.replace("/c")`. EndUserUnauthorizedError + 404 + generic error states all distinct. Back-link returns to /c/{slug} (the chat surface). Dirty-state tracking disables Save until something actually changed.
+
+**Spec deviations**: none. Spec said: "/c/{slug}/settings — end user manages display name override + notification pref + unsubscribe for that vendor." All three covered.
+
+**Design notes**:
+- Radio buttons (not select) for notification pref so all three options + their explanatory hints are visible at once. The "Mentions only" option ships with a "(Coming soon.)" hint because Phase 28's push delivery doesn't actually parse mentions in v1 — the value persists but behaves like 'all'.
+- Display name input has maxLength=128 matching the backend column. Empty string = clear (backend coerces empty → NULL); placeholder shows "(default)" so users know what empty means.
+- Unsubscribe uses native `window.confirm()` rather than a custom modal. Lower UI overhead for a confirm gate that doesn't need design polish.
+- Save button is dirty-gated: comparing the form state to the loaded vendor's values disables Save until something actually changed. Prevents no-op PATCHes that would surface a confusing "saved" flash with no real change.
+- The /c/[slug]/settings route uses the SAME `[slug]` param as the chat surface, so it inherits the same isolation guarantees (Phase 25.6 cross-vendor tests still apply).
+
+**Verification**: tsc clean. next build clean. New `/c/[slug]/settings` route at 3.18 kB. 15 backend tests across the vendor endpoints suite all pass (was 14, +1 new test for custom link settings).
+
+**What this enables**: 27.6 closes Phase 27 with a sweep + scripted demo of the full mint → redeem → settings → unsubscribe flow. After Phase 27, end users have a complete account-management surface for cross-vendor subscriptions.
 
 ### 2026-05-25 — Phase 27.4: end-user `/c` my-bots index + Add-vendor invite-code redeem modal
 
