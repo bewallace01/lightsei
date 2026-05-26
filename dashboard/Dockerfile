@@ -19,5 +19,11 @@ WORKDIR /app
 ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0.0.0.0
 COPY --from=build /app/.next/standalone ./
 COPY --from=build /app/.next/static ./.next/static
+# Phase 26.4 + retroactive 21.4 fix: Next.js standalone output does
+# NOT auto-include public/. Without this copy, /sw.js, /widget.js,
+# /apple-touch-icon.png, /icon-*.png all 404 in prod. The widget.js
+# bug has been latent since Phase 21.4; the PWA install path needs
+# all four icon paths + manifest + sw.js, which is what surfaced it.
+COPY --from=build /app/public ./public
 EXPOSE 3000
 CMD ["node", "server.js"]
