@@ -7,7 +7,7 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 28 — 28.1 schema: end_user_push_subscriptions. Alembic 0045 adds `end_user_push_subscriptions` (id pk, end_user_id fk cascade, endpoint text, p256dh text, auth text, created_at, last_used_at nullable, revoked_at nullable). Composite unique on (end_user_id, endpoint) so re-subscribing from the same device doesn't dup-row. Phase 25 + 26 + 27 closed 2026-05-25. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
+> **Phase 28 — 28.2 backend/push.py send module. Pure module wrapping py-vapid + pywebpush. Helper `send_to_end_user(end_user_id, title, body, deep_link_url)` finds all active subscriptions + sends. Cleans up 410 (Gone) responses. Env vars: LIGHTSEI_VAPID_PUBLIC_KEY + LIGHTSEI_VAPID_PRIVATE_KEY. Phase 25 + 26 + 27 closed. 28.1 schema shipped. Phase 25-29 spec locked 2026-05-25. Theme: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. Pivots Lightsei to include a B2C surface alongside the B2B operator dashboard. JYNI-customer-fit motivated.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -2038,6 +2038,28 @@ Ideas that are good but not now. Add freely. Do not work on these until their ph
 ## Done Log
 
 Move tasks here as they finish. Look at this when momentum dips.
+
+### 2026-05-25 — Phase 28.1: end_user_push_subscriptions schema
+
+Foundation for Phase 28 web push delivery. One alembic migration adds the table; no backfill needed (no pre-existing subscriptions to convert).
+
+**What shipped**:
+
+- `backend/alembic/versions/20260525_0045_end_user_push_subscriptions.py`: creates `end_user_push_subscriptions` (id pk, end_user_id fk CASCADE, endpoint text, p256dh text, auth text, created_at default now, last_used_at nullable, revoked_at nullable). Composite UniqueConstraint on `(end_user_id, endpoint)` named `uq_end_user_push_subscriptions_end_user_endpoint`. Partial index `ix_end_user_push_subscriptions_active` on `(end_user_id)` WHERE `revoked_at IS NULL` so the fan-out hot path (28.2's send loop) stays cheap as revoked rows accumulate.
+- `backend/models.py`: `EndUserPushSubscription` model class mirroring the schema, with the UniqueConstraint + partial Index in `__table_args__`.
+- `backend/tests/test_end_user_push_subscriptions_schema.py`: 7 tests. Roundtrip + server defaults, composite-unique rejects dup, same endpoint allowed for different end_users (shared-device case), FK CASCADE on end_user delete, last_used_at + revoked_at roundtrip, unique constraint landing, partial active index landing (asserts `revoked_at` appears in the indexdef).
+
+**Spec deviations**: none. Spec said the column list + composite unique on `(end_user_id, endpoint)`. All present. Added the partial-where active index on top because 28.2's send fan-out hits it on every push event.
+
+**Design notes**:
+- `endpoint` / `p256dh` / `auth` use `Text` (not `String(n)`) because the push-service URL length varies by browser vendor (Chrome FCM is ~150 chars, Firefox autopush ~200, Safari can go higher). Text is safer than picking an arbitrary cap.
+- `revoked_at` strategy (mark + skip, don't hard-delete): keeps the audit ledger of which subscriptions were ever real. The 28.2 send helper sets it on 410 Gone; a future cleanup job can prune rows older than N days.
+- CASCADE on end_user delete: per Phase 25 spec, deleting an EndUser blows away their entire identity surface. Subscriptions go with everything else.
+- The composite unique IS the upsert key for 28.5's subscribe endpoint: a re-subscribe from the same browser (permission revoked + re-granted) overwrites the existing row.
+
+**Test counts**: backend 1435 → **1442** (+7).
+
+**What this enables**: 28.2 builds `backend/push.py` (pure module wrapping `py-vapid` + `pywebpush`) against this schema. 28.3 wires `send_to_end_user` into the widget orchestrator + inbox operator-reply endpoint. 28.4 + 28.5 build the service-worker push handler + subscription UI.
 
 ### 2026-05-25 — Phase 27 closed: cross-vendor subscriptions end-to-end (mint → redeem → settings → soft-revoke read-only)
 

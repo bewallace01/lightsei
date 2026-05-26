@@ -2219,3 +2219,58 @@ class EndUserSigninToken(Base):
             "email", text("created_at DESC"),
         ),
     )
+
+
+class EndUserPushSubscription(Base):
+    """Phase 28.1: web-push subscription for one (end_user, device)
+    pair.
+
+    Stored on `PushManager.subscribe()` in the browser. The Phase
+    28.2 send helper fans out across active rows (revoked_at IS NULL)
+    for a given end_user; on 410 Gone from the push service, it
+    sets `revoked_at` so the row is skipped next time.
+
+    Composite unique on `(end_user_id, endpoint)`: a re-subscribe
+    from the same device updates an existing row rather than creating
+    duplicates. The Phase 28.5 subscribe endpoint uses upsert.
+
+    `last_used_at` is bumped on successful send so an audit can
+    distinguish active devices from stale rows.
+    """
+
+    __tablename__ = "end_user_push_subscriptions"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    end_user_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("end_users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    endpoint: Mapped[str] = mapped_column(Text, nullable=False)
+    p256dh: Mapped[str] = mapped_column(Text, nullable=False)
+    auth: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("now()"),
+    )
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "end_user_id", "endpoint",
+            name="uq_end_user_push_subscriptions_end_user_endpoint",
+        ),
+        # Partial index for the fan-out hot path: every push event
+        # scans WHERE end_user_id = ? AND revoked_at IS NULL.
+        Index(
+            "ix_end_user_push_subscriptions_active",
+            "end_user_id",
+            postgresql_where=text("revoked_at IS NULL"),
+        ),
+    )
