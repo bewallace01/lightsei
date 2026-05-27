@@ -143,22 +143,28 @@ private struct VendorRow: View {
     let vendor: EndUserVendor
 
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
+        HStack(alignment: .center, spacing: 14) {
+            // Solid indigo tile (matches the app icon shape) with
+            // the vendor's initial. Solid + white-on-indigo reads
+            // more brand-coherent than the prior tinted circle.
             ZStack {
-                Circle().fill(Color.accentColor.opacity(0.15))
-                Text(vendor.name.prefix(1).uppercased())
+                RoundedRectangle(cornerRadius: 11)
+                    .fill(Color.accentColor)
+                Text(initial(for: vendor.name))
                     .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(.tint)
+                    .foregroundStyle(.white)
             }
             .frame(width: 44, height: 44)
 
-            VStack(alignment: .leading, spacing: 2) {
+            VStack(alignment: .leading, spacing: 3) {
                 Text(vendor.name)
-                    .font(.system(size: 16, weight: .medium))
+                    .font(.system(size: 16, weight: .semibold))
+                    .lineLimit(1)
                 if let agent = vendor.customer_facing_agent_name {
                     Text("Chat with \(agent)")
                         .font(.system(size: 13))
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
             }
 
@@ -166,12 +172,22 @@ private struct VendorRow: View {
 
             if let count = vendor.unread_count, count > 0 {
                 Text("\(count)")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.white)
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
                     .background(Color.accentColor, in: Capsule())
-                    .foregroundStyle(.white)
             }
         }
+    }
+
+    // Use the first non-whitespace character; fall back to "?"
+    // for the (extremely unlikely) empty-name case.
+    private func initial(for name: String) -> String {
+        let trimmed = name.trimmingCharacters(
+            in: .whitespacesAndNewlines,
+        )
+        guard let first = trimmed.first else { return "?" }
+        return String(first).uppercased()
     }
 }

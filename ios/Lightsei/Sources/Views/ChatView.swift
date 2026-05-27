@@ -27,6 +27,14 @@ struct ChatView: View {
     var body: some View {
         VStack(spacing: 0) {
             messageList
+                .refreshable {
+                    // Pull-to-refresh re-fetches the full conversation
+                    // list (in case a new thread was started from
+                    // the web) + the active thread from scratch
+                    // (covers the case where the 3s poll missed
+                    // an in-between message).
+                    await loadInitial()
+                }
             composer
         }
         .navigationTitle(vendor.name)
@@ -216,11 +224,24 @@ struct ChatView: View {
     private var composer: some View {
         VStack(spacing: 6) {
             if let sendError {
-                Text(sendError)
-                    .font(.caption)
-                    .foregroundStyle(.red)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16)
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .foregroundStyle(.red)
+                    Text(sendError)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .lineLimit(2)
+                    Spacer()
+                    if !draft.isEmpty {
+                        Button("Retry") {
+                            Task { await send() }
+                        }
+                        .font(.caption.weight(.medium))
+                    }
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 4)
+                .background(Color.red.opacity(0.05))
             }
             HStack(spacing: 8) {
                 TextField("Message", text: $draft, axis: .vertical)

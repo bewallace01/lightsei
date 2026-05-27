@@ -29,12 +29,28 @@ private struct SplashView: View {
     var body: some View {
         ZStack {
             Color(.systemBackground).ignoresSafeArea()
-            VStack(spacing: 16) {
-                Image(systemName: "sparkle")
-                    .font(.system(size: 64, weight: .light))
-                    .foregroundStyle(.tint)
+            VStack(spacing: 14) {
+                // Indigo rounded square mirroring the home-screen
+                // icon so the first frame in-app reads as
+                // "the app I just tapped, loading."
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16)
+                        .fill(Color.accentColor)
+                    Text("L")
+                        .font(.system(
+                            size: 36, weight: .semibold,
+                        ))
+                        .foregroundStyle(.white)
+                }
+                .frame(width: 72, height: 72)
+
                 Text("Lightsei")
-                    .font(.system(size: 28, weight: .semibold, design: .serif))
+                    .font(.system(
+                        size: 22, weight: .semibold, design: .serif,
+                    ))
+                ProgressView()
+                    .controlSize(.small)
+                    .padding(.top, 4)
             }
         }
     }
