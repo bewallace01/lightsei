@@ -146,8 +146,13 @@ struct SignInView: View {
             Button {
                 Task { await requestLink() }
             } label: {
-                HStack {
-                    if sending { ProgressView().tint(.white) }
+                HStack(spacing: 8) {
+                    if sending {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                            .tint(.white)
+                            .scaleEffect(0.8)
+                    }
                     Text(sending ? "Sending…" : "Send magic link")
                         .fontWeight(.medium)
                 }
@@ -156,10 +161,15 @@ struct SignInView: View {
                 .foregroundStyle(.white)
                 .background(Color.accentColor)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
+                .opacity(canSendLink ? 1 : 0.6)
             }
-            .disabled(sending || email.trimmingCharacters(
-                in: .whitespacesAndNewlines).isEmpty)
+            .disabled(!canSendLink)
         }
+    }
+
+    private var canSendLink: Bool {
+        !sending && !email.trimmingCharacters(
+            in: .whitespacesAndNewlines).isEmpty
     }
 
     private var divider: some View {

@@ -91,14 +91,27 @@ struct ChatView: View {
     private var messageList: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 8) {
+                LazyVStack(spacing: 4) {
                     if !loaded {
                         ProgressView().padding(.top, 24)
                     } else if messages.isEmpty {
                         emptyThread
                     } else {
-                        ForEach(messages) { m in
-                            ChatBubble(message: m).id(m.id)
+                        ForEach(decorated(messages)) { item in
+                            if let stamp = item.timestampHeader {
+                                Text(stamp)
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.top, 12)
+                                    .padding(.bottom, 4)
+                                    .id("ts-\(item.message.id)")
+                            }
+                            ChatBubble(
+                                message: item.message,
+                                isPending: item.message.id == pendingMessageID,
+                            )
+                            .id(item.message.id)
                         }
                     }
                     if let loadError {
@@ -122,17 +135,80 @@ struct ChatView: View {
         }
     }
 
+    // Group consecutive messages + decide which ones need a
+    // timestamp header above them. Pattern matches iOS Messages:
+    // first message of the day gets a "Mon · 3:14 PM" stamp; later
+    // messages within 5 minutes inherit the stamp from above (no
+    // repetition). Reduces visual clutter on a chatty thread.
+    private func decorated(
+        _ msgs: [WidgetMessage],
+    ) -> [ChatItem] {
+        let gap: TimeInterval = 5 * 60
+        let fmt = ISO8601DateFormatter()
+        var out: [ChatItem] = []
+        var lastTs: Date?
+        for m in msgs {
+            let ts = fmt.date(from: m.sent_at)
+            let needsHeader: Bool = {
+                guard let ts else { return false }
+                guard let last = lastTs else { return true }
+                return ts.timeIntervalSince(last) > gap
+            }()
+            out.append(ChatItem(
+                message: m,
+                timestampHeader: needsHeader
+                    ? Self.formatStamp(ts ?? Date())
+                    : nil,
+            ))
+            if let ts { lastTs = ts }
+        }
+        return out
+    }
+
+    private static func formatStamp(_ d: Date) -> String {
+        let cal = Calendar.current
+        let f = DateFormatter()
+        if cal.isDateInToday(d) {
+            f.dateFormat = "h:mm a"
+        } else if cal.isDateInYesterday(d) {
+            f.dateFormat = "'Yesterday' h:mm a"
+        } else {
+            f.dateFormat = "EEE MMM d · h:mm a"
+        }
+        return f.string(from: d)
+    }
+
+    // The optimistic message id from send(). When non-nil, the
+    // bubble at that id renders faded until a real reply lands.
+    private var pendingMessageID: Int? {
+        if sending, let last = messages.last, last.role == "user" {
+            return last.id
+        }
+        return nil
+    }
+
     private var emptyThread: some View {
-        VStack(spacing: 6) {
+        VStack(spacing: 10) {
+            ZStack {
+                Circle()
+                    .fill(Color.accentColor.opacity(0.12))
+                Image(systemName: "bubble.left.and.bubble.right")
+                    .font(.system(size: 28))
+                    .foregroundStyle(.tint)
+            }
+            .frame(width: 72, height: 72)
+
             Text("Say hi")
-                .font(.system(size: 16, weight: .medium))
+                .font(.system(size: 18, weight: .semibold))
+
             if let agent = vendor.customer_facing_agent_name {
-                Text("Chatting with \(agent)")
+                Text("\(agent) is ready to help.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
         }
         .padding(.top, 80)
+        .padding(.bottom, 20)
     }
 
     // ---------- composer ----------
@@ -288,8 +364,26 @@ struct ChatView: View {
 
 // ---------- bubble ----------
 
+// Decorated row used by the scroll list. A `timestampHeader` carries
+// a "Mon · 3:14 PM" string that renders above the bubble when the
+// row starts a new time chunk.
+private struct ChatItem: Identifiable {
+    let message: WidgetMessage
+    let timestampHeader: String?
+    var id: Int { message.id }
+}
+
 private struct ChatBubble: View {
     let message: WidgetMessage
+    /// When true (set by ChatView for an optimistic user-side row
+    /// that hasn't yet round-tripped to the backend), the bubble
+    /// renders faded so the user knows the send is in flight.
+    let isPending: Bool
+
+    init(message: WidgetMessage, isPending: Bool = false) {
+        self.message = message
+        self.isPending = isPending
+    }
 
     var body: some View {
         HStack {
@@ -307,6 +401,7 @@ private struct ChatBubble: View {
                     .foregroundStyle(textColor)
                     .background(bubbleBackground)
                     .clipShape(RoundedRectangle(cornerRadius: 14))
+                    .opacity(isPending ? 0.55 : 1)
             }
             if !alignRight { Spacer(minLength: 40) }
         }
