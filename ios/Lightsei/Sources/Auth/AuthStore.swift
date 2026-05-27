@@ -52,6 +52,7 @@ final class AuthStore: ObservableObject {
         try Keychain.write(resp.session_token)
         api.bearer = resp.session_token
         state = .ok(resp.end_user)
+        PushRegistration.shared.request()
     }
 
     func signOut() {
@@ -71,5 +72,6 @@ final class AuthStore: ObservableObject {
         try Keychain.write(token)
         api.bearer = token
         state = .ok(endUser)
+        PushRegistration.shared.request()
     }
 }

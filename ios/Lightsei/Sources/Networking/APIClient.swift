@@ -11,6 +11,7 @@ import Foundation
 enum APIError: Error, LocalizedError {
     case badStatus(Int, String?)
     case decode(Error)
+    case invalidURL(String)
     case transport(Error)
     case unauthorized
 
@@ -20,6 +21,7 @@ enum APIError: Error, LocalizedError {
             if let body, !body.isEmpty { return body }
             return "Request failed (HTTP \(code))."
         case .decode(let e): return "Couldn't read response: \(e.localizedDescription)"
+        case .invalidURL(let path): return "Couldn't build request URL for \(path)."
         case .transport(let e): return e.localizedDescription
         case .unauthorized: return "Sign-in expired. Please sign in again."
         }
@@ -41,9 +43,13 @@ struct APIClient {
         _ path: String,
         method: String = "GET",
         body: Encodable? = nil,
+        queryItems: [URLQueryItem] = [],
         as: Out.Type = Out.self,
     ) async throws -> Out {
-        var req = URLRequest(url: baseURL.appendingPathComponent(path))
+        guard let url = url(for: path, queryItems: queryItems) else {
+            throw APIError.invalidURL(path)
+        }
+        var req = URLRequest(url: url)
         req.httpMethod = method
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         if let bearer {
@@ -79,6 +85,20 @@ struct APIClient {
         } catch {
             throw APIError.decode(error)
         }
+    }
+
+    private func url(
+        for path: String,
+        queryItems: [URLQueryItem],
+    ) -> URL? {
+        var url = baseURL
+        for segment in path.split(separator: "/") {
+            url = url.appendingPathComponent(String(segment))
+        }
+        guard !queryItems.isEmpty else { return url }
+        var components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        components?.queryItems = queryItems
+        return components?.url
     }
 }
 
