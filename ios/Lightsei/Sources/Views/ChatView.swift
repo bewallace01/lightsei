@@ -28,6 +28,13 @@ struct ChatView: View {
     // chip when the 3s poll fails repeatedly so the user doesn't
     // wonder why no new replies are landing.
     @State private var consecutivePollFailures: Int = 0
+    // Phase 29.3 polish: track whether the bottom of the thread
+    // is currently in the viewport so that auto-scroll only fires
+    // when the user is following the conversation. When the user
+    // has scrolled up + new messages arrive, surface a floating
+    // "jump to bottom" button instead of yanking them down.
+    @State private var bottomVisible: Bool = true
+    @State private var unseenIncoming: Int = 0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -163,49 +170,116 @@ struct ChatView: View {
 
     private var messageList: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(spacing: 4) {
-                    if !loaded {
-                        ThreadSkeleton()
-                    } else if messages.isEmpty {
-                        emptyThread
-                    } else {
-                        ForEach(decorated(messages)) { item in
-                            if let stamp = item.timestampHeader {
-                                Text(stamp)
-                                    .font(.caption2)
-                                    .foregroundStyle(.tertiary)
-                                    .frame(maxWidth: .infinity)
-                                    .padding(.top, 12)
-                                    .padding(.bottom, 4)
-                                    .id("ts-\(item.message.id)")
+            ZStack(alignment: .bottom) {
+                ScrollView {
+                    LazyVStack(spacing: 4) {
+                        if !loaded {
+                            ThreadSkeleton()
+                        } else if messages.isEmpty {
+                            emptyThread
+                        } else {
+                            ForEach(decorated(messages)) { item in
+                                if let stamp = item.timestampHeader {
+                                    Text(stamp)
+                                        .font(.caption2)
+                                        .foregroundStyle(.tertiary)
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.top, 12)
+                                        .padding(.bottom, 4)
+                                        .id("ts-\(item.message.id)")
+                                }
+                                ChatBubble(
+                                    message: item.message,
+                                    isPending: item.message.id == pendingMessageID,
+                                )
+                                .id(item.message.id)
                             }
-                            ChatBubble(
-                                message: item.message,
-                                isPending: item.message.id == pendingMessageID,
-                            )
-                            .id(item.message.id)
+                            // Invisible sentinel after the last
+                            // bubble. iOS fires .onAppear /
+                            // .onDisappear as it scrolls into +
+                            // out of the viewport, which we use
+                            // as a proxy for "the user is at the
+                            // bottom following the thread."
+                            Color.clear
+                                .frame(height: 1)
+                                .id("__bottom__")
+                                .onAppear {
+                                    bottomVisible = true
+                                    unseenIncoming = 0
+                                }
+                                .onDisappear {
+                                    bottomVisible = false
+                                }
+                        }
+                        if let loadError {
+                            Text(loadError)
+                                .font(.caption)
+                                .foregroundStyle(.red)
                         }
                     }
-                    if let loadError {
-                        Text(loadError)
-                            .font(.caption)
-                            .foregroundStyle(.red)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
+                }
+                // iOS 16-compatible single-arg form. Deployment
+                // target is 16.0; the two-arg form lands in 17+.
+                .onChange(of: messages.count) { _ in
+                    guard let last = messages.last?.id else { return }
+                    if bottomVisible {
+                        // User is following along — slide them to
+                        // the new message.
+                        withAnimation {
+                            proxy.scrollTo(last, anchor: .bottom)
+                        }
+                    } else if let role = messages.last?.role,
+                              role != "user" {
+                        // User is reading older messages + a new
+                        // bot/operator reply landed. Don't yank
+                        // their place; surface a chip instead.
+                        unseenIncoming += 1
                     }
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 12)
-            }
-            // iOS 16-compatible single-arg form. Deployment target
-            // is 16.0 per project.yml; the two-arg form lands in 17+.
-            .onChange(of: messages.count) { _ in
-                if let last = messages.last?.id {
-                    withAnimation {
-                        proxy.scrollTo(last, anchor: .bottom)
+
+                if !bottomVisible && unseenIncoming > 0 {
+                    jumpToBottomChip {
+                        withAnimation {
+                            proxy.scrollTo(
+                                "__bottom__", anchor: .bottom,
+                            )
+                        }
+                        unseenIncoming = 0
                     }
+                    .padding(.bottom, 12)
+                    .transition(
+                        .move(edge: .bottom).combined(with: .opacity),
+                    )
                 }
             }
         }
+    }
+
+    private func jumpToBottomChip(_ action: @escaping () -> Void)
+        -> some View
+    {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.down")
+                    .font(.system(size: 12, weight: .semibold))
+                Text(
+                    unseenIncoming == 1
+                        ? "1 new message"
+                        : "\(unseenIncoming) new messages",
+                )
+                .font(.system(size: 13, weight: .medium))
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .foregroundStyle(.white)
+            .background(Color.accentColor, in: Capsule())
+            .shadow(color: .black.opacity(0.18), radius: 6, y: 2)
+        }
+        .accessibilityLabel(
+            "Jump to bottom (\(unseenIncoming) new)",
+        )
     }
 
     // Group consecutive messages + decide which ones need a

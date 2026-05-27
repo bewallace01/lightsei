@@ -13,7 +13,12 @@ struct EndUserVendor: Codable, Identifiable, Equatable, Hashable {
     let widget_public_id: String?
     let customer_facing_agent_name: String?
     let unread_count: Int?
+    // Phase 27.5 backend extension: included on the slug endpoint
+    // (GET /me/end-user/vendors/{slug}) but omitted from the list
+    // endpoint (GET /me/end-user/vendors). VendorSettingsView
+    // fetches the slug variant on mount to populate these.
     let notification_pref: String?
+    let display_name_override: String?
 }
 
 struct VendorsResponse: Codable {
@@ -71,6 +76,14 @@ extension APIClient {
         try await request(
             "me/end-user/vendors/\(slug)/conversations",
         )
+    }
+
+    /// Phase 27.5 endpoint: returns the vendor + per-link settings
+    /// (notification_pref + display_name_override). Used by
+    /// VendorSettingsView to hydrate the form with real values
+    /// rather than the trimmed shape from the vendor list.
+    func fetchVendor(slug: String) async throws -> EndUserVendor {
+        try await request("me/end-user/vendors/\(slug)")
     }
 
     func redeemInvite(code: String) async throws -> RedeemInviteResponse {

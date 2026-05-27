@@ -1,9 +1,9 @@
 // Phase 29.3 polish: per-vendor settings sheet.
 //
 // Mirrors /c/[slug]/settings on the web: notification pref +
-// unsubscribe. Display-name override is parked here (the web has
-// it but it's lower-leverage; revisit when the conversation
-// surface starts showing the chosen name).
+// display-name override + unsubscribe. Hydrates from the
+// /me/end-user/vendors/{slug} endpoint on mount so the real
+// link settings render (the list endpoint omits them).
 
 import SwiftUI
 
@@ -22,33 +22,65 @@ struct VendorSettingsView: View {
     /// refresh + pop back.
     var onChanged: () -> Void
 
-    @State private var notificationPref: String
-    @State private var saving: Bool = false
+    // Live state, hydrated by load() on mount. Picker / TextField
+    // bind to these; auto-save fires on commit.
+    @State private var notificationPref: String = "all"
+    @State private var displayName: String = ""
+    @State private var savedDisplayName: String = ""
+
+    @State private var loaded: Bool = false
+    @State private var savingPref: Bool = false
+    @State private var savingName: Bool = false
     @State private var error: String?
     @State private var confirmUnlink: Bool = false
     @State private var unlinking: Bool = false
-
-    init(vendor: EndUserVendor, onChanged: @escaping () -> Void) {
-        self.vendor = vendor
-        self.onChanged = onChanged
-        self._notificationPref = State(
-            initialValue: vendor.notification_pref ?? "all",
-        )
-    }
 
     var body: some View {
         NavigationStack {
             Form {
                 Section("Notifications") {
-                    Picker("When to notify", selection: $notificationPref) {
+                    Picker(
+                        "When to notify", selection: $notificationPref,
+                    ) {
                         ForEach(notificationOptions, id: \.value) { opt in
                             Text(opt.label).tag(opt.value)
                         }
                     }
-                    .disabled(saving)
-                    .onChange(of: notificationPref) { _ in
-                        Task { await save() }
+                    .disabled(!loaded || savingPref)
+                    .onChange(of: notificationPref) { newValue in
+                        guard loaded else { return }
+                        Task { await savePref(newValue) }
                     }
+                }
+
+                Section {
+                    HStack {
+                        TextField(
+                            "How the bot should address you",
+                            text: $displayName,
+                        )
+                        .textInputAutocapitalization(.words)
+                        .disabled(!loaded || savingName)
+                        if savingName {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
+                    .onSubmit {
+                        Task { await saveName() }
+                    }
+                    Button("Save name") {
+                        Task { await saveName() }
+                    }
+                    .disabled(
+                        !loaded || savingName
+                            || displayName == savedDisplayName,
+                    )
+                } header: {
+                    Text("Display name")
+                } footer: {
+                    Text(
+                        "What \(vendor.customer_facing_agent_name ?? "the bot") will call you.",
+                    )
                 }
 
                 if let error {
@@ -69,9 +101,11 @@ struct VendorSettingsView: View {
                             Text("Unsubscribe from \(vendor.name)")
                         }
                     }
-                    .disabled(unlinking || saving)
+                    .disabled(unlinking || savingPref || savingName)
                 } footer: {
-                    Text("Past conversations stay readable; you won't get new replies until you re-link via a fresh invite code.")
+                    Text(
+                        "Past conversations stay readable; you won't get new replies until you re-link via a fresh invite code.",
+                    )
                 }
             }
             .navigationTitle(vendor.name)
@@ -81,6 +115,7 @@ struct VendorSettingsView: View {
                     Button("Done") { dismiss() }
                 }
             }
+            .task { await load() }
             .confirmationDialog(
                 "Unsubscribe from \(vendor.name)?",
                 isPresented: $confirmUnlink,
@@ -94,15 +129,63 @@ struct VendorSettingsView: View {
         }
     }
 
-    private func save() async {
-        saving = true
+    private func load() async {
+        guard let slug = vendor.vendor_slug else {
+            loaded = true
+            return
+        }
+        do {
+            let full = try await auth.client.fetchVendor(slug: slug)
+            notificationPref = full.notification_pref ?? "all"
+            displayName = full.display_name_override ?? ""
+            savedDisplayName = displayName
+            loaded = true
+        } catch APIError.unauthorized {
+            auth.signOut()
+        } catch {
+            self.error = (error as? LocalizedError)?
+                .errorDescription ?? "\(error)"
+            loaded = true
+        }
+    }
+
+    private func savePref(_ pref: String) async {
+        savingPref = true
         error = nil
-        defer { saving = false }
+        defer { savingPref = false }
         do {
             _ = try await auth.client.patchVendorSettings(
                 workspaceID: vendor.id,
-                notificationPref: notificationPref,
+                notificationPref: pref,
             )
+            onChanged()
+        } catch APIError.unauthorized {
+            auth.signOut()
+        } catch {
+            self.error = (error as? LocalizedError)?
+                .errorDescription ?? "\(error)"
+        }
+    }
+
+    private func saveName() async {
+        let trimmed = displayName.trimmingCharacters(
+            in: .whitespacesAndNewlines,
+        )
+        guard trimmed != savedDisplayName else { return }
+        savingName = true
+        error = nil
+        defer { savingName = false }
+        do {
+            // Empty string clears the override per backend's
+            // PATCH /me/end-user/vendors/{id} contract; nil leaves
+            // it unchanged. Send empty when the user clears the
+            // field.
+            _ = try await auth.client.patchVendorSettings(
+                workspaceID: vendor.id,
+                displayName: trimmed,
+            )
+            displayName = trimmed
+            savedDisplayName = trimmed
             onChanged()
         } catch APIError.unauthorized {
             auth.signOut()
