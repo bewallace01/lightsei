@@ -24,9 +24,16 @@ struct ChatView: View {
     @State private var pollTask: Task<Void, Never>?
     @State private var showSettings: Bool = false
     @State private var showConversations: Bool = false
+    // Phase 29.3 polish: surface a discreet "reconnecting"
+    // chip when the 3s poll fails repeatedly so the user doesn't
+    // wonder why no new replies are landing.
+    @State private var consecutivePollFailures: Int = 0
 
     var body: some View {
         VStack(spacing: 0) {
+            if consecutivePollFailures >= 3 {
+                reconnectingChip
+            }
             messageList
                 .refreshable {
                     // Pull-to-refresh re-fetches the full conversation
@@ -253,6 +260,19 @@ struct ChatView: View {
         return nil
     }
 
+    private var reconnectingChip: some View {
+        HStack(spacing: 8) {
+            ProgressView().controlSize(.mini)
+            Text("Reconnecting…")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .frame(maxWidth: .infinity)
+        .background(Color(.secondarySystemBackground))
+    }
+
     private var emptyThread: some View {
         VStack(spacing: 10) {
             ZStack {
@@ -395,10 +415,17 @@ struct ChatView: View {
             )
             if !thread.messages.isEmpty {
                 messages.append(contentsOf: thread.messages)
+                // New message arrival → light haptic + clear any
+                // reconnecting chip from prior failed ticks.
+                UIImpactFeedbackGenerator(style: .light)
+                    .impactOccurred()
             }
+            consecutivePollFailures = 0
         } catch {
-            // Poll-tick errors are silent (matches web /c). A
-            // persistent failure surfaces on the next send.
+            // Poll-tick errors silent in logs (matches web /c) but
+            // bump the counter so the UI surfaces a "reconnecting"
+            // chip after a few consecutive failures.
+            consecutivePollFailures += 1
         }
     }
 
@@ -412,6 +439,11 @@ struct ChatView: View {
         sending = true
         sendError = nil
         defer { sending = false }
+        // Tactile feedback the moment the tap registers; the
+        // request is async + the optimistic message appears below
+        // but a light tap-confirmation reads faster than waiting
+        // for the bubble to draw.
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
         do {
             let resp = try await auth.client.postWidgetMessage(
                 publicId: publicId,
@@ -481,6 +513,23 @@ private struct ChatBubble: View {
                     .background(bubbleBackground)
                     .clipShape(RoundedRectangle(cornerRadius: 14))
                     .opacity(isPending ? 0.55 : 1)
+                    // iOS native long-press bubble menu. iOS surfaces
+                    // Copy automatically + we add Share for sending
+                    // a bot reply elsewhere. Matches the affordance
+                    // every iOS user expects on a chat bubble.
+                    .contextMenu {
+                        Button {
+                            UIPasteboard.general.string = message.text
+                        } label: {
+                            Label("Copy", systemImage: "doc.on.doc")
+                        }
+                        ShareLink(item: message.text) {
+                            Label(
+                                "Share", systemImage:
+                                    "square.and.arrow.up",
+                            )
+                        }
+                    }
             }
             if !alignRight { Spacer(minLength: 40) }
         }
