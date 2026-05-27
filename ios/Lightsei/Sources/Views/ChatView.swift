@@ -166,7 +166,7 @@ struct ChatView: View {
             ScrollView {
                 LazyVStack(spacing: 4) {
                     if !loaded {
-                        ProgressView().padding(.top, 24)
+                        ThreadSkeleton()
                     } else if messages.isEmpty {
                         emptyThread
                     } else {
@@ -469,6 +469,35 @@ struct ChatView: View {
             auth.signOut()
         } catch {
             sendError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+        }
+    }
+}
+
+// Skeleton thread: 4 alternating bubble shapes with shimmer.
+// Bubble widths are deterministic per-index so the placeholder
+// reads as "a real thread, just unloaded" rather than a single
+// repeating block.
+private struct ThreadSkeleton: View {
+    var body: some View {
+        VStack(spacing: 10) {
+            ForEach(0..<4) { idx in
+                row(at: idx)
+            }
+        }
+        .padding(.top, 12)
+        .shimmering()
+    }
+
+    @ViewBuilder
+    private func row(at idx: Int) -> some View {
+        let rightAligned = idx == 1 || idx == 3
+        let widths: [CGFloat] = [220, 180, 260, 140]
+        HStack {
+            if rightAligned { Spacer(minLength: 40) }
+            RoundedRectangle(cornerRadius: 14)
+                .fill(Color(.tertiarySystemFill))
+                .frame(width: widths[idx], height: 36)
+            if !rightAligned { Spacer(minLength: 40) }
         }
     }
 }

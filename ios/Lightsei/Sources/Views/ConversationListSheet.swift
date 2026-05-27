@@ -46,8 +46,11 @@ struct ConversationListSheet: View {
     private var content: some View {
         switch state {
         case .loading:
-            ProgressView()
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            List(0..<4, id: \.self) { _ in
+                ConversationRowSkeleton()
+            }
+            .listStyle(.insetGrouped)
+            .allowsHitTesting(false)
         case .error(let msg):
             VStack(spacing: 12) {
                 Text(msg)
@@ -115,6 +118,24 @@ struct ConversationListSheet: View {
                     ?? "\(error)",
             )
         }
+    }
+}
+
+private struct ConversationRowSkeleton: View {
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            VStack(alignment: .leading, spacing: 5) {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color(.tertiarySystemFill))
+                    .frame(width: 120, height: 13)
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color(.tertiarySystemFill))
+                    .frame(width: 60, height: 10)
+            }
+            Spacer()
+        }
+        .padding(.vertical, 2)
+        .shimmering()
     }
 }
 

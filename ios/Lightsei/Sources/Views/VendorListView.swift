@@ -59,7 +59,7 @@ struct VendorListView: View {
     private var content: some View {
         switch state {
         case .loading:
-            ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+            skeletonList
         case .error(let msg):
             VStack(spacing: 12) {
                 Text(msg)
@@ -108,6 +108,20 @@ struct VendorListView: View {
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    // Skeleton placeholder: 5 vendor-row shapes with shimmering
+    // gray blocks. Renders in the same List layout as real data
+    // so the transition is just a content swap (no resize jolt).
+    private var skeletonList: some View {
+        List(0..<5, id: \.self) { _ in
+            VendorRowSkeleton()
+                .listRowInsets(EdgeInsets(
+                    top: 12, leading: 16, bottom: 12, trailing: 16,
+                ))
+        }
+        .listStyle(.plain)
+        .allowsHitTesting(false)
     }
 
     private func vendorList(_ vendors: [EndUserVendor]) -> some View {
@@ -189,5 +203,26 @@ private struct VendorRow: View {
         )
         guard let first = trimmed.first else { return "?" }
         return String(first).uppercased()
+    }
+}
+
+private struct VendorRowSkeleton: View {
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            RoundedRectangle(cornerRadius: 11)
+                .fill(Color(.tertiarySystemFill))
+                .frame(width: 44, height: 44)
+
+            VStack(alignment: .leading, spacing: 6) {
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color(.tertiarySystemFill))
+                    .frame(width: 140, height: 14)
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(Color(.tertiarySystemFill))
+                    .frame(width: 90, height: 11)
+            }
+            Spacer()
+        }
+        .shimmering()
     }
 }
