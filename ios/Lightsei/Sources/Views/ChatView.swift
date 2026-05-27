@@ -23,6 +23,7 @@ struct ChatView: View {
     @State private var loaded: Bool = false
     @State private var pollTask: Task<Void, Never>?
     @State private var showSettings: Bool = false
+    @State private var showConversations: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -40,6 +41,17 @@ struct ChatView: View {
         .navigationTitle(vendor.name)
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
+            // Leading: conversation list drawer. Tap a row to
+            // switch threads; long-press the chat menu later for
+            // bulk actions (parking lot).
+            ToolbarItem(placement: .topBarLeading) {
+                Button {
+                    showConversations = true
+                } label: {
+                    Image(systemName: "list.bullet.rectangle")
+                }
+                .accessibilityLabel("Conversations")
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
                     Button {
@@ -79,6 +91,14 @@ struct ChatView: View {
                 // itself on next .refreshable.
             }
         }
+        .sheet(isPresented: $showConversations) {
+            ConversationListSheet(
+                vendor: vendor,
+                activeID: conversationId,
+                onPick: { id in switchTo(conversationID: id) },
+                onNew: { startNewConversation() },
+            )
+        }
         .background(Color(.systemBackground).ignoresSafeArea())
     }
 
@@ -92,6 +112,44 @@ struct ChatView: View {
         messages = []
         sendError = nil
         startPolling()
+    }
+
+    private func switchTo(conversationID id: String) {
+        guard id != conversationId else { return }
+        pollTask?.cancel()
+        pollTask = nil
+        conversationId = id
+        messages = []
+        sendError = nil
+        loaded = false
+        Task {
+            await loadConversation(id: id)
+            startPolling()
+        }
+    }
+
+    /// Load a specific conversation by id (vs. the auto-pick on
+    /// initial mount). Used by the conversation drawer.
+    private func loadConversation(id: String) async {
+        guard let publicId = vendor.widget_public_id else {
+            loadError = "This vendor isn't fully set up yet."
+            loaded = true
+            return
+        }
+        do {
+            let thread = try await auth.client.fetchWidgetThread(
+                publicId: publicId,
+                conversationId: id,
+            )
+            messages = thread.messages
+            loaded = true
+        } catch APIError.unauthorized {
+            auth.signOut()
+        } catch {
+            loadError = (error as? LocalizedError)?
+                .errorDescription ?? "\(error)"
+            loaded = true
+        }
     }
 
     // ---------- messages pane ----------

@@ -32,6 +32,11 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lightsei.app
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        # Launch screen background → AccentColor so the cold-launch
+        # frame matches the in-app splash (indigo) instead of a
+        # white flash. iOS reads UILaunchScreen.UIColorName from
+        # the asset catalog at boot before our SwiftUI body runs.
+        INFOPLIST_KEY_UILaunchScreen_UIColorName: AccentColor
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone: "UIInterfaceOrientationPortrait"
         INFOPLIST_KEY_UISupportedInterfaceOrientations_iPad: "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
         INFOPLIST_KEY_UIApplicationSceneManifest_Generation: YES
