@@ -56,10 +56,12 @@ extension APIClient {
         conversationId: String,
         since: Int? = nil,
     ) async throws -> WidgetThread {
-        var path = "widget/\(publicId)/conversations/\(conversationId)"
-        if let since {
-            path += "?since=\(since)"
-        }
-        return try await request(path)
+        let queryItems = since.map {
+            [URLQueryItem(name: "since", value: String($0))]
+        } ?? []
+        return try await request(
+            "widget/\(publicId)/conversations/\(conversationId)",
+            queryItems: queryItems,
+        )
     }
 }

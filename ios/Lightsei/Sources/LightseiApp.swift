@@ -39,9 +39,9 @@ struct LightseiApp: App {
                 .tint(Color("AccentColor"))
                 .environmentObject(auth)
                 .task {
-                    await auth.restore()
                     PushRegistration.shared.attach(authStore: auth)
-                    // Only ask once we know who the user is —
+                    await auth.restore()
+                    // Only ask once we know who the user is,
                     // pre-signin the request would block the
                     // sign-in surface for no benefit.
                     if case .ok = auth.state {
