@@ -22,6 +22,7 @@ struct ChatView: View {
     @State private var sendError: String?
     @State private var loaded: Bool = false
     @State private var pollTask: Task<Void, Never>?
+    @State private var showSettings: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -30,6 +31,31 @@ struct ChatView: View {
         }
         .navigationTitle(vendor.name)
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Menu {
+                    Button {
+                        startNewConversation()
+                    } label: {
+                        Label(
+                            "New conversation",
+                            systemImage: "square.and.pencil",
+                        )
+                    }
+                    Button {
+                        showSettings = true
+                    } label: {
+                        Label(
+                            "Vendor settings",
+                            systemImage: "gearshape",
+                        )
+                    }
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .accessibilityLabel("Chat menu")
+            }
+        }
         .task {
             await loadInitial()
             startPolling()
@@ -38,7 +64,26 @@ struct ChatView: View {
             pollTask?.cancel()
             pollTask = nil
         }
+        .sheet(isPresented: $showSettings) {
+            VendorSettingsView(vendor: vendor) {
+                // Settings changes don't affect thread state, so
+                // no reload needed here. The vendor list refreshes
+                // itself on next .refreshable.
+            }
+        }
         .background(Color(.systemBackground).ignoresSafeArea())
+    }
+
+    private func startNewConversation() {
+        // Bail polling on the old thread + reset state so the
+        // composer sends as a fresh conversation. The empty-thread
+        // copy renders until the first send + reply pair lands.
+        pollTask?.cancel()
+        pollTask = nil
+        conversationId = nil
+        messages = []
+        sendError = nil
+        startPolling()
     }
 
     // ---------- messages pane ----------

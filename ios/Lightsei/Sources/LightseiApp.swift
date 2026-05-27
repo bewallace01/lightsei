@@ -30,6 +30,13 @@ struct LightseiApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                // Force the asset-catalog accent at the root. The
+                // ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME
+                // build setting wires the catalog but SwiftUI's
+                // Color.accentColor still falls back to systemBlue
+                // in some places (notably buttons + .tint shorthand)
+                // unless we explicitly inject our color.
+                .tint(Color("AccentColor"))
                 .environmentObject(auth)
                 .task {
                     await auth.restore()

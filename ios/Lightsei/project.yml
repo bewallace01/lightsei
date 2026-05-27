@@ -20,8 +20,14 @@ targets:
     platform: iOS
     sources:
       - path: Sources
-    resources:
+      # Asset catalog as a source entry (not resources/) so
+      # xcodegen routes it through the actool compile phase + the
+      # resulting Assets.car lands in the bundle. The resources/
+      # entry alone added it as a folder reference but didn't
+      # trigger the compile phase, so AccentColor + AppIcon
+      # weren't actually shipping.
       - path: Resources/Assets.xcassets
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.lightsei.app

@@ -34,6 +34,31 @@ struct ConversationsResponse: Codable {
     let conversations: [EndUserVendorConversation]
 }
 
+struct RedeemInviteRequest: Encodable {
+    let code: String
+}
+
+struct RedeemInviteResponse: Codable {
+    let linked: Bool
+    let vendor: EndUserVendor?
+}
+
+struct VendorPatchRequest: Encodable {
+    let notification_pref: String?
+    let display_name_override: String?
+}
+
+struct VendorPatchResponse: Codable {
+    let workspace_id: String
+    let notification_pref: String
+    let display_name_override: String?
+}
+
+struct VendorUnlinkResponse: Codable {
+    let unlinked: Bool
+    let workspace_id: String
+}
+
 extension APIClient {
     func fetchVendors() async throws -> [EndUserVendor] {
         let resp: VendorsResponse = try await request("me/end-user/vendors")
@@ -45,6 +70,38 @@ extension APIClient {
     ) async throws -> ConversationsResponse {
         try await request(
             "me/end-user/vendors/\(slug)/conversations",
+        )
+    }
+
+    func redeemInvite(code: String) async throws -> RedeemInviteResponse {
+        try await request(
+            "me/end-user/redeem-invite",
+            method: "POST",
+            body: RedeemInviteRequest(code: code),
+        )
+    }
+
+    func patchVendorSettings(
+        workspaceID: String,
+        notificationPref: String? = nil,
+        displayName: String? = nil,
+    ) async throws -> VendorPatchResponse {
+        try await request(
+            "me/end-user/vendors/\(workspaceID)",
+            method: "PATCH",
+            body: VendorPatchRequest(
+                notification_pref: notificationPref,
+                display_name_override: displayName,
+            ),
+        )
+    }
+
+    func unlinkVendor(
+        workspaceID: String,
+    ) async throws -> VendorUnlinkResponse {
+        try await request(
+            "me/end-user/vendors/\(workspaceID)",
+            method: "DELETE",
         )
     }
 }

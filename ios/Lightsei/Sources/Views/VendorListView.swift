@@ -13,6 +13,7 @@ struct VendorListView: View {
     let endUser: EndUser
 
     @State private var state: LoadState = .loading
+    @State private var showAddVendor: Bool = false
 
     enum LoadState {
         case loading
@@ -25,14 +26,32 @@ struct VendorListView: View {
             content
                 .navigationTitle("Your chats")
                 .toolbar {
-                    ToolbarItem(placement: .topBarTrailing) {
-                        Button("Sign out", role: .destructive) {
-                            auth.signOut()
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            showAddVendor = true
+                        } label: {
+                            Image(systemName: "plus")
                         }
+                        .accessibilityLabel("Add vendor")
+                    }
+                    ToolbarItem(placement: .topBarTrailing) {
+                        Menu {
+                            Button("Sign out", role: .destructive) {
+                                auth.signOut()
+                            }
+                        } label: {
+                            Image(systemName: "ellipsis.circle")
+                        }
+                        .accessibilityLabel("Account menu")
                     }
                 }
                 .task { await load() }
                 .refreshable { await load() }
+                .sheet(isPresented: $showAddVendor) {
+                    AddVendorView {
+                        Task { await load() }
+                    }
+                }
         }
     }
 
@@ -61,15 +80,31 @@ struct VendorListView: View {
     }
 
     private var emptyState: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 16) {
+            Image(systemName: "tray")
+                .font(.system(size: 48))
+                .foregroundStyle(.tertiary)
             Text("No vendors yet")
                 .font(.system(size: 18, weight: .medium))
             Text(
-                "When a vendor invites you, their chat will appear here.",
+                "Got an invite code from a vendor? Add it to link their chat.",
             )
             .font(.callout)
             .foregroundStyle(.secondary)
             .multilineTextAlignment(.center)
+            .padding(.horizontal, 32)
+            Button {
+                showAddVendor = true
+            } label: {
+                Text("Enter invite code")
+                    .fontWeight(.medium)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 10)
+                    .background(Color("AccentColor"))
+                    .foregroundStyle(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            .padding(.top, 8)
         }
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
