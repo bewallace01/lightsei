@@ -24,7 +24,14 @@ from sqlalchemy import select
 
 import email_provider as ep
 from db import session_scope
-from models import EndUser, EndUserSession, EndUserSigninToken
+from models import (
+    EndUser,
+    EndUserSession,
+    EndUserSigninToken,
+    EndUserVendorLink,
+    VendorInviteCode,
+)
+from tests.conftest import auth_headers, signup
 
 
 @pytest.fixture(autouse=True)
@@ -325,6 +332,42 @@ def test_consume_falls_back_to_request_side_when_body_omits_code(client):
         "/auth/end-user/magic-link/consume", json={"token": token},
     )
     assert r.json()["vendor_invite_code"] == "inv-fb-1"
+
+
+def test_consume_redeems_valid_request_side_vendor_invite_code(client):
+    operator = signup(
+        client,
+        email="invite-owner@example.com",
+        workspace_name="Invite Co",
+    )
+    mint = client.post(
+        "/workspaces/me/end-user-invites",
+        headers=auth_headers(operator["session_token"]),
+        json={"count": 1},
+    )
+    code = mint.json()["codes"][0]["code"]
+
+    token = _request_and_grab_token(
+        client, "autolink@example.com", invite_code=code,
+    )
+    r = client.post(
+        "/auth/end-user/magic-link/consume", json={"token": token},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["linked_vendors"][0]["id"] == operator["workspace"]["id"]
+
+    end_user_id = body["end_user"]["id"]
+    with session_scope() as s:
+        link = s.get(
+            EndUserVendorLink, (end_user_id, operator["workspace"]["id"]),
+        )
+        assert link is not None
+        assert link.removed_at is None
+
+        code_row = s.get(VendorInviteCode, code)
+        assert code_row.consumed_at is not None
+        assert code_row.consumed_by_end_user_id == end_user_id
 
 
 def test_consume_is_single_use(client):

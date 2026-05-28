@@ -35,4 +35,17 @@ enum MagicLink {
         }
         return nil
     }
+
+    static func extractVendorInviteCode(from raw: String) -> String? {
+        guard let url = URL(string: raw),
+              let comps = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let code = comps.queryItems?.first(
+                where: { $0.name == "vendor_invite_code" }
+              )?.value,
+              !code.isEmpty
+        else {
+            return nil
+        }
+        return code
+    }
 }

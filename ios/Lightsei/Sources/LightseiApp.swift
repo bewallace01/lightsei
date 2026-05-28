@@ -39,8 +39,8 @@ struct LightseiApp: App {
                 .tint(Color("AccentColor"))
                 .environmentObject(auth)
                 .task {
-                    await auth.restore()
                     PushRegistration.shared.attach(authStore: auth)
+                    await auth.restore()
                     // Only ask once we know who the user is —
                     // pre-signin the request would block the
                     // sign-in surface for no benefit.
@@ -68,7 +68,13 @@ struct LightseiApp: App {
         }
         Task {
             do {
-                try await auth.signIn(magicLinkToken: token)
+                try await auth.signIn(
+                    magicLinkToken: token,
+                    vendorInviteCode:
+                        MagicLink.extractVendorInviteCode(
+                            from: url.absoluteString,
+                        ),
+                )
             } catch {
                 // NSLog over print so it surfaces in `xcrun simctl
                 // log show` + Console.app without attaching Xcode.

@@ -114,7 +114,9 @@ def is_valid_workspace_member_role(role: object) -> bool:
 # Google OAuth deferred to 25B. Distinct from `_VALID_AUTH_PROVIDERS`
 # (operator) because the two surfaces have different supported flows
 # and the 'apikey' value never applies to end users.
-_VALID_END_USER_AUTH_PROVIDERS: frozenset[str] = frozenset({"magic_link"})
+_VALID_END_USER_AUTH_PROVIDERS: frozenset[str] = frozenset(
+    {"magic_link", "siwa"}
+)
 DEFAULT_END_USER_AUTH_PROVIDER = "magic_link"
 
 
@@ -1984,6 +1986,9 @@ class EndUser(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    apple_sub: Mapped[Optional[str]] = mapped_column(
+        String(128), nullable=True, unique=True,
+    )
     display_name: Mapped[Optional[str]] = mapped_column(
         String(128), nullable=True,
     )
