@@ -603,27 +603,10 @@ export default function Constellation() {
               <path d={sparklePath(420, 300, 5, 0.30)} />
               <path d={sparklePath(580, 300, 5, 0.30)} />
             </g>
-            <text
-              x={500}
-              y={380}
-              textAnchor="middle"
-              className="font-serif"
-              fill="rgb(224 231 255)"
-              opacity={0.95}
-              fontSize={22}
-            >
-              Sky empty.
-            </text>
-            <text
-              x={500}
-              y={408}
-              textAnchor="middle"
-              fill="rgb(165 180 252)"
-              opacity={0.75}
-              fontSize={13}
-            >
-              Deploy your first agent →
-            </text>
+            {/* No empty-state text here: the page's Hero overlay already
+                renders "Sky empty." + "Deploy your first agent →" and the
+                two collide on narrow viewports. Keep only the decorative
+                constellation so the canvas reads as empty-but-alive. */}
           </g>
         )}
       </svg>
