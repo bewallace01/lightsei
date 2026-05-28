@@ -63,16 +63,17 @@ struct LightseiApp: App {
 
     private func handleIncomingURL(_ url: URL) {
         guard let token = MagicLink.extractToken(from: url.absoluteString) else {
-            // Unknown URL shape: log + ignore. Better than crashing
-            // or silently signing the user out.
-            print("[Lightsei] unhandled URL: \(url.absoluteString)")
+            NSLog("[Lightsei] unhandled URL: %@", url.absoluteString)
             return
         }
         Task {
             do {
                 try await auth.signIn(magicLinkToken: token)
             } catch {
-                print("[Lightsei] consume failed: \(error)")
+                // NSLog over print so it surfaces in `xcrun simctl
+                // log show` + Console.app without attaching Xcode.
+                NSLog("[Lightsei] magic-link consume failed: %@",
+                      String(describing: error))
             }
         }
     }

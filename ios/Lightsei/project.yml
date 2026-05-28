@@ -82,3 +82,10 @@ targets:
         com.apple.developer.applesignin:
           - Default
         aps-environment: development
+        # Without this, SecItemAdd returns errSecMissingEntitlement
+        # (-34018) on simulator + on real devices once code-signed,
+        # which silently breaks the signed-in session: Keychain.write
+        # throws, AuthStore.state stays .signedOut, the app loops
+        # back to SignInView after every magic-link consume.
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.lightsei.app
