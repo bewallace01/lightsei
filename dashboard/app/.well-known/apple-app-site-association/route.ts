@@ -21,10 +21,13 @@
 
 import { NextResponse } from "next/server";
 
-// Force this route to be statically rendered so it's cacheable.
-// AASA changes only when Team ID or path patterns change; both
-// are infrequent.
-export const dynamic = "force-static";
+// Read LIGHTSEI_APPLE_TEAM_ID at request time, not build time.
+// force-static would bake the env var into the build artifact +
+// require a rebuild on every Team ID change; force-dynamic reads
+// per-request so a `railway variable set` propagates immediately
+// on the next request. Cache-Control below still gets Apple's
+// CDN to hold the response for an hour, so traffic stays low.
+export const dynamic = "force-dynamic";
 
 export async function GET() {
   const teamId = process.env.LIGHTSEI_APPLE_TEAM_ID || "";
