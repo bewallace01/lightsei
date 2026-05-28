@@ -18,6 +18,7 @@
 // prompt + registerForRemoteNotifications returns the error path
 // without crashing.
 
+import Security
 import UIKit
 
 @MainActor
@@ -59,13 +60,7 @@ final class PushRegistration: ObservableObject {
         guard let auth else { return }
         let hex = data.map { String(format: "%02x", $0) }.joined()
         let bundleID = Bundle.main.bundleIdentifier ?? "com.lightsei.app"
-        // Sandbox vs production: simulator always gets sandbox; a
-        // real device on a non-AppStore build (TestFlight / Xcode
-        // run) also gets sandbox. Production tokens arrive only on
-        // App Store builds. We don't have a way to tell at runtime,
-        // so default to sandbox; the deploy-time APNS_ENVIRONMENT
-        // env var on the iOS bundle would let us flip later.
-        let environment = "sandbox"
+        let environment = apnsEnvironment()
         Task {
             do {
                 _ = try await auth.client.registerAPNSToken(
@@ -77,5 +72,19 @@ final class PushRegistration: ObservableObject {
                 print("[Lightsei] APNS register failed: \(error)")
             }
         }
+    }
+
+    private func apnsEnvironment() -> String {
+        guard let task = SecTaskCreateFromSelf(nil),
+              let value = SecTaskCopyValueForEntitlement(
+                task,
+                "aps-environment" as CFString,
+                nil,
+              ) as? String,
+              value == "production"
+        else {
+            return "sandbox"
+        }
+        return "production"
     }
 }

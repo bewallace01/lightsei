@@ -408,6 +408,7 @@ def test_expected_index_landed(table: str, index: str):
 
 def test_auth_provider_validator():
     assert is_valid_end_user_auth_provider("magic_link")
+    assert is_valid_end_user_auth_provider("siwa")
     for bad in ("MAGIC_LINK", "google_oauth", "apikey", "", None, 1):
         assert not is_valid_end_user_auth_provider(bad)
 
@@ -422,7 +423,7 @@ def test_link_via_validator():
 def test_defaults_match_frozensets():
     assert DEFAULT_END_USER_AUTH_PROVIDER in _VALID_END_USER_AUTH_PROVIDERS
     assert DEFAULT_END_USER_VENDOR_LINK_VIA in _VALID_END_USER_VENDOR_LINK_VIA
-    assert _VALID_END_USER_AUTH_PROVIDERS == {"magic_link"}
+    assert _VALID_END_USER_AUTH_PROVIDERS == {"magic_link", "siwa"}
     assert _VALID_END_USER_VENDOR_LINK_VIA == {
         "invite_code", "direct_invite", "public_discovery",
     }

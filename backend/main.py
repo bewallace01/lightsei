@@ -4956,6 +4956,13 @@ def consume_end_user_magic_link(
     # so a user who skipped the field at request time can supply it
     # at consume time without re-issuing the magic link.
     invite_code = body.vendor_invite_code or row.vendor_invite_code
+    linked_vendors = []
+    if invite_code:
+        linked = _redeem_invite_for_end_user_if_valid(
+            session, end_user, invite_code, now,
+        )
+        if linked is not None:
+            linked_vendors.append(linked)
 
     return {
         "end_user": _serialize_end_user(end_user),
@@ -4963,11 +4970,7 @@ def consume_end_user_magic_link(
         "session_expires_at": sess_row.expires_at.isoformat(),
         "is_new_end_user": is_new_end_user,
         "vendor_invite_code": invite_code,
-        # Phase 27.2 will replace this stub with the real linked
-        # workspaces list once the invite-code table lands. Empty
-        # list keeps the response shape stable for the dashboard
-        # to consume now.
-        "linked_vendors": [],
+        "linked_vendors": linked_vendors,
     }
 
 
@@ -5000,6 +5003,50 @@ def _serialize_vendor_for_end_user(w: Workspace) -> dict[str, Any]:
         # in the per-vendor header).
         "customer_facing_agent_name": w.customer_facing_agent_name,
     }
+
+
+def _redeem_invite_for_end_user_if_valid(
+    session: Session,
+    end_user: EndUser,
+    code: str,
+    now: datetime,
+) -> Optional[dict[str, Any]]:
+    code_row = session.get(VendorInviteCode, code)
+    if (
+        code_row is None
+        or code_row.consumed_at is not None
+        or code_row.expires_at <= now
+    ):
+        return None
+
+    code_row.consumed_at = now
+    code_row.consumed_by_end_user_id = end_user.id
+    session.flush()
+
+    existing = session.get(
+        EndUserVendorLink, (end_user.id, code_row.workspace_id),
+    )
+    if existing is not None:
+        if existing.removed_at is not None:
+            existing.removed_at = None
+        link = existing
+    else:
+        link = EndUserVendorLink(
+            end_user_id=end_user.id,
+            workspace_id=code_row.workspace_id,
+            linked_via="invite_code",
+            linked_at=now,
+        )
+        session.add(link)
+        session.flush()
+
+    ws = session.get(Workspace, code_row.workspace_id)
+    if ws is None:
+        return None
+    out = _serialize_vendor_for_end_user(ws)
+    out["notification_pref"] = link.notification_pref
+    out["display_name_override"] = link.display_name_override
+    return out
 
 
 @app.get("/me/end-user")
@@ -5647,34 +5694,50 @@ def sign_in_with_apple(
             },
         ) from None
 
-    # Apple sends email only on the FIRST sign-in per Apple ID.
-    # Subsequent signs-in carry just sub; the iOS app caches the
-    # original email + forwards it via body.email so the backend
-    # can keep keying off email. If neither, the caller didn't
-    # cache properly — fail loud.
+    # Apple sends email only on the first sign-in per Apple ID, so
+    # repeat sign-ins must key off Apple's stable subject claim.
+    apple_sub = claim.sub.strip()
     email = (claim.email or body.email or "").strip().lower()
-    if not email:
+    existing_by_sub = session.scalar(
+        select(EndUser).where(EndUser.apple_sub == apple_sub)
+    )
+    existing = existing_by_sub
+    if existing is None and email:
+        existing = session.scalar(
+            select(EndUser).where(EndUser.email == email)
+        )
+        if (
+            existing is not None
+            and existing.apple_sub is not None
+            and existing.apple_sub != apple_sub
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "siwa_account_conflict",
+                    "message": "Email is already linked to another Apple account.",
+                },
+            )
+    if existing is None and not email:
         raise HTTPException(
             status_code=422,
             detail={
                 "error": "siwa_missing_email",
                 "message": (
-                    "Apple did not send an email + the request did "
-                    "not carry one. Re-sign on the device to refresh."
+                    "Apple did not send an email and this Apple account "
+                    "is not linked yet. Sign in once with email scope."
                 ),
             },
         )
 
     now = utcnow()
 
-    existing = session.scalar(
-        select(EndUser).where(EndUser.email == email)
-    )
     is_new = existing is None
     if existing is None:
         end_user = EndUser(
             id=str(uuid.uuid4()),
             email=email,
+            apple_sub=apple_sub,
             display_name=body.display_name,
             email_verified=claim.email_verified,
             auth_provider="siwa",
@@ -5684,10 +5747,14 @@ def sign_in_with_apple(
         session.flush()
     else:
         end_user = existing
+        if end_user.apple_sub is None:
+            end_user.apple_sub = apple_sub
+            end_user.updated_at = now
         # If the original account was magic-link only and Apple
         # vouches for the email, mark it verified going forward.
         if claim.email_verified and not end_user.email_verified:
             end_user.email_verified = True
+            end_user.updated_at = now
 
     sess_row, plaintext = _create_end_user_session(session, end_user)
 

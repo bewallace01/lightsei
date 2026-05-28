@@ -32,26 +32,34 @@ final class AuthStore: ObservableObject {
         client.bearer = token
         do {
             let me = try await client.fetchEndUserMe()
+            guard Keychain.read() == token else { return }
             api.bearer = token
             state = .ok(me.end_user)
         } catch APIError.unauthorized {
-            Keychain.clear()
-            state = .signedOut
+            if Keychain.read() == token {
+                Keychain.clear()
+                state = .signedOut
+            }
         } catch {
-            // Network blip on launch: keep the token (don't clear)
-            // and treat as signed-out for now. Next call will
-            // either succeed or surface a clearer error.
-            state = .signedOut
+            if Keychain.read() == token {
+                // Network blip on launch: keep the token for the
+                // next restore attempt.
+                state = .signedOut
+            }
         }
     }
 
     /// Sign in by consuming a magic-link token. Persists the
     /// resulting session token + flips state.
-    func signIn(magicLinkToken: String) async throws {
-        let resp = try await api.consumeMagicLink(token: magicLinkToken)
-        try Keychain.write(resp.session_token)
-        api.bearer = resp.session_token
-        state = .ok(resp.end_user)
+    func signIn(
+        magicLinkToken: String,
+        vendorInviteCode: String? = nil,
+    ) async throws {
+        let resp = try await api.consumeMagicLink(
+            token: magicLinkToken,
+            vendorInviteCode: vendorInviteCode,
+        )
+        try acceptSession(token: resp.session_token, endUser: resp.end_user)
     }
 
     func signOut() {
@@ -71,5 +79,6 @@ final class AuthStore: ObservableObject {
         try Keychain.write(token)
         api.bearer = token
         state = .ok(endUser)
+        PushRegistration.shared.request()
     }
 }
