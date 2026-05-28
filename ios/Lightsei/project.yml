@@ -12,7 +12,11 @@ settings:
     GENERATE_INFOPLIST_FILE: YES
     MARKETING_VERSION: "0.1.0"
     CURRENT_PROJECT_VERSION: "1"
-    DEVELOPMENT_TEAM: ""
+    # Phase 29.2c: Bailey's Apple Developer Team ID. Needed for
+    # code signing on real devices + matches the AppID + AASA
+    # appIDs configured on app.lightsei.com.
+    DEVELOPMENT_TEAM: "25ZQDZQ92C"
+    CODE_SIGN_STYLE: Automatic
 
 targets:
   Lightsei:
@@ -57,14 +61,24 @@ targets:
             CFBundleURLName: com.lightsei.app
             CFBundleURLSchemes:
               - lightsei
-    # Phase 29.2b: universal links. The `?mode=developer` query lets
-    # the simulator bypass Apple's AASA verification (which would
-    # otherwise need an Apple Developer Team ID + provisioning
-    # profile). Drop the query when shipping to a real device after
-    # the Developer account is set up + LIGHTSEI_APPLE_TEAM_ID is
-    # populated on prod.
+    # Phase 29.2b/c/29.4: entitlements wired live now that the
+    # Apple Developer account is provisioned + the App ID has the
+    # three capabilities registered (Associated Domains, Push
+    # Notifications, Sign in with Apple).
+    #
+    # Dropped `?mode=developer` from the AASA opt-in so iOS does
+    # the real verification against /.well-known/apple-app-site-association
+    # using LIGHTSEI_APPLE_TEAM_ID on the prod backend.
+    #
+    # aps-environment: development → APNS sandbox gateway for
+    # debug / TestFlight builds (matches the sandbox APNS key
+    # config). Xcode flips it to "production" automatically for
+    # App Store archives.
     entitlements:
       path: Resources/Lightsei.entitlements
       properties:
         com.apple.developer.associated-domains:
-          - applinks:app.lightsei.com?mode=developer
+          - applinks:app.lightsei.com
+        com.apple.developer.applesignin:
+          - Default
+        aps-environment: development

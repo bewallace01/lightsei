@@ -24,3 +24,12 @@ croniter==3.0.3
 # Chrome/Firefox/Safari expect. Lazy-imported inside push.send so the
 # test suite stays network-free without it installed locally.
 pywebpush==2.0.3
+# Phase 29.2c + 29.4: Sign in with Apple identity-token verification
+# (JWKS fetch + JWT signature check) + APNS JWT signing for the
+# Apple-provider auth token the HTTP/2 gateway expects.
+PyJWT==2.9.0
+# Phase 29.4: HTTP/2 support for httpx. Apple's APNS gateway
+# (api.push.apple.com / api.sandbox.push.apple.com) requires
+# HTTP/2; without this extra httpx falls back to HTTP/1.1 and
+# APNS rejects the request.
+h2==4.1.0

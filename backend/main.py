@@ -5611,24 +5611,25 @@ def sign_in_with_apple(
     body: EndUserSignInWithAppleIn,
     session: Session = Depends(get_session),
 ) -> dict[str, Any]:
-    """Phase 29.2c stub: exchange an Apple identity token for a
+    """Phase 29.2c live: exchange an Apple identity token for a
     Lightsei session.
 
-    The live path (TODO): verify the identity token via
-    `apple_signin.verify_identity_token`, look up or create an
-    EndUser keyed by the Apple `sub` (preferred) or `email`,
-    create an EndUserSession, return the same shape as the
-    magic-link consume endpoint.
+    Verifies the identity token via apple_signin.verify_identity_token,
+    keys account lookup by email (claim.email when Apple sent it on
+    first sign-in, else body.email forwarded by the iOS app from
+    its first-signin cache), upserts an EndUser, creates an
+    EndUserSession, returns the same shape as magic-link consume.
 
-    Today returns 501 until LIGHTSEI_APPLE_SIWA_REQUIRE_LIVE is
-    set AND the JWKS verification is implemented in
-    apple_signin.py. The 501 is on purpose — failing-loud here
-    prevents silent account creation while the verifier is a stub.
+    Returns:
+      501 siwa_not_configured  → REQUIRE_LIVE not set, no verify
+      401 siwa_invalid_token   → JWT signature/claim validation
+      422 siwa_missing_email   → no email anywhere (caller bug)
+      200 success
     """
     import apple_signin as _siwa
 
     try:
-        _claim = _siwa.verify_identity_token(body.identity_token)
+        claim = _siwa.verify_identity_token(body.identity_token)
     except _siwa.SiwaNotConfiguredError as e:
         raise HTTPException(
             status_code=501,
@@ -5646,25 +5647,56 @@ def sign_in_with_apple(
             },
         ) from None
 
-    # Live-path TODO. Once apple_signin.verify_identity_token
-    # returns a real AppleIdentityClaim:
-    #
-    #   1. Look up EndUser by claim.sub (need a new column on
-    #      end_users or a separate end_user_apple_links table —
-    #      decide before flipping live).
-    #   2. If not found, look up by claim.email (Apple sends email
-    #      only on first sign-in; iOS app caches + forwards on
-    #      subsequent calls via body.email).
-    #   3. If still not found, create EndUser.
-    #   4. Create EndUserSession (parallel to magic-link consume).
-    #   5. Return {session_token, end_user, is_new_end_user, ...}.
-    raise HTTPException(
-        status_code=501,
-        detail={
-            "error": "siwa_not_implemented",
-            "message": "Sign in with Apple is stubbed pending Apple Developer account setup",
-        },
+    # Apple sends email only on the FIRST sign-in per Apple ID.
+    # Subsequent signs-in carry just sub; the iOS app caches the
+    # original email + forwards it via body.email so the backend
+    # can keep keying off email. If neither, the caller didn't
+    # cache properly — fail loud.
+    email = (claim.email or body.email or "").strip().lower()
+    if not email:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": "siwa_missing_email",
+                "message": (
+                    "Apple did not send an email + the request did "
+                    "not carry one. Re-sign on the device to refresh."
+                ),
+            },
+        )
+
+    now = utcnow()
+
+    existing = session.scalar(
+        select(EndUser).where(EndUser.email == email)
     )
+    is_new = existing is None
+    if existing is None:
+        end_user = EndUser(
+            id=str(uuid.uuid4()),
+            email=email,
+            display_name=body.display_name,
+            email_verified=claim.email_verified,
+            auth_provider="siwa",
+            created_at=now,
+        )
+        session.add(end_user)
+        session.flush()
+    else:
+        end_user = existing
+        # If the original account was magic-link only and Apple
+        # vouches for the email, mark it verified going forward.
+        if claim.email_verified and not end_user.email_verified:
+            end_user.email_verified = True
+
+    sess_row, plaintext = _create_end_user_session(session, end_user)
+
+    return {
+        "session_token": plaintext,
+        "end_user": _serialize_end_user(end_user),
+        "is_new_end_user": is_new,
+        "session_expires_at": sess_row.expires_at.isoformat(),
+    }
 
 
 # ---------- Phase 17.3: Google OAuth ---------- #
