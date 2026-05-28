@@ -538,7 +538,7 @@ export default function AccountPage() {
           </button>
         </form>
 
-        <div className="rounded-lg border border-gray-200 overflow-hidden">
+        <div className="rounded-lg border border-gray-200 overflow-x-auto">
         <table className="w-full text-left text-sm">
           <thead className="bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500">
             <tr>
@@ -742,7 +742,7 @@ export default function AccountPage() {
           </div>
         </form>
 
-        <div className="rounded-lg border border-gray-200 overflow-hidden">
+        <div className="rounded-lg border border-gray-200 overflow-x-auto">
           <table className="w-full text-left text-sm">
             <thead className="bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500">
               <tr>
@@ -795,7 +795,7 @@ export default function AccountPage() {
         <h2 className="text-[11px] font-semibold text-gray-500 mb-4 uppercase tracking-wider">
           Browser sessions
         </h2>
-        <div className="rounded-lg border border-gray-200 overflow-hidden">
+        <div className="rounded-lg border border-gray-200 overflow-x-auto">
         <table className="w-full text-left text-sm">
           <thead className="bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500">
             <tr>

@@ -285,7 +285,7 @@ export default function RunDetail({ params }: { params: { id: string } }) {
       ) : events.length === 0 ? (
         <div className="text-gray-400 text-sm">no events</div>
       ) : (
-        <div className="rounded-lg border border-gray-200 overflow-hidden">
+        <div className="rounded-lg border border-gray-200 overflow-x-auto">
         <table className="w-full text-left text-sm">
           <thead className="bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500">
             <tr>

@@ -288,6 +288,7 @@ export default function Header() {
   const [user, setUser] = useState<SessionUser | null>(null);
   const [workspace, setWorkspace] = useState<SessionWorkspace | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [mobileOpen, setMobileOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -316,6 +317,7 @@ export default function Header() {
   // Close on route change so the menu doesn't linger after a nav.
   useEffect(() => {
     setMenuOpen(false);
+    setMobileOpen(false);
   }, [pathname]);
 
   // Login/signup pages have their own chrome — skip rendering here so we
@@ -357,7 +359,7 @@ export default function Header() {
 
   return (
     <header className="sticky top-0 z-20 bg-white/95 backdrop-blur border-b border-gray-100">
-      <div className="max-w-6xl mx-auto px-6 sm:px-8 h-14 flex items-center justify-between">
+      <div className="max-w-6xl mx-auto px-4 sm:px-8 h-14 flex items-center justify-between">
         <Link
           href="/"
           title="Go to dashboard home"
@@ -368,7 +370,11 @@ export default function Header() {
         </Link>
 
         {user ? (
-          <div className="flex items-center gap-6 text-sm">
+          <>
+          {/* Desktop nav: the full row of nav groups + workspace chip
+              only fits from md up. Below that it would overflow the
+              viewport, so it collapses into the hamburger drawer. */}
+          <div className="hidden md:flex items-center gap-6 text-sm">
             <nav className="flex items-center gap-6">
               {NAV.map((n) =>
                 n.kind === "link" ? (
@@ -473,6 +479,34 @@ export default function Header() {
               )}
             </div>
           </div>
+
+          {/* Mobile: hamburger toggles the full-width drawer below. */}
+          <button
+            type="button"
+            onClick={() => setMobileOpen((o) => !o)}
+            aria-expanded={mobileOpen}
+            aria-label={mobileOpen ? "Close menu" : "Open menu"}
+            className="md:hidden -mr-2 p-2 rounded-md text-gray-600 hover:bg-gray-100 transition-colors"
+          >
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              {mobileOpen ? (
+                <path
+                  d="M6 6 L18 18 M18 6 L6 18"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                />
+              ) : (
+                <path
+                  d="M4 7 H20 M4 12 H20 M4 17 H20"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                />
+              )}
+            </svg>
+          </button>
+          </>
         ) : (
           <nav className="flex items-center gap-6 text-sm">
             <Link
@@ -490,6 +524,87 @@ export default function Header() {
           </nav>
         )}
       </div>
+
+      {/* Mobile drawer: the full nav expanded vertically + workspace
+          actions. Only mounts when signed in + toggled open; the
+          md:hidden keeps it off desktop where the inline nav shows. */}
+      {user && mobileOpen && (
+        <div className="md:hidden border-t border-gray-100 bg-white max-h-[calc(100vh-3.5rem)] overflow-y-auto">
+          <nav className="px-4 py-3 flex flex-col gap-1 text-sm">
+            {NAV.map((n) =>
+              n.kind === "link" ? (
+                <Link
+                  key={n.href}
+                  href={n.href}
+                  className={
+                    "block px-2 py-2 rounded-md no-underline " +
+                    (isActive(n.href)
+                      ? "text-gray-900 font-medium bg-gray-50"
+                      : "text-gray-600 hover:bg-gray-50")
+                  }
+                >
+                  {n.label}
+                </Link>
+              ) : (
+                <div key={n.label} className="mt-2">
+                  <div className="px-2 text-[11px] uppercase tracking-wider text-gray-400">
+                    {n.label}
+                  </div>
+                  {n.children.map((c) => (
+                    <Link
+                      key={c.href}
+                      href={c.href}
+                      className={
+                        "block px-2 py-2 rounded-md no-underline " +
+                        (isActive(c.href)
+                          ? "text-gray-900 font-medium bg-gray-50"
+                          : "text-gray-600 hover:bg-gray-50")
+                      }
+                    >
+                      {c.label}
+                    </Link>
+                  ))}
+                </div>
+              ),
+            )}
+          </nav>
+
+          <div className="border-t border-gray-100 px-4 py-3">
+            <div className="px-2 text-[11px] uppercase tracking-wider text-gray-400">
+              Workspace
+            </div>
+            <div className="px-2 text-sm font-medium text-gray-900 truncate">
+              {workspace?.name ?? "—"}
+            </div>
+            <div className="px-2 text-xs text-gray-500 truncate mb-1">
+              {user.email}
+            </div>
+            <WorkspaceSwitcher
+              onClose={() => setMobileOpen(false)}
+              onWorkspaceChanged={(ws) => setWorkspace(ws)}
+            />
+            <Link
+              href="/workspace-settings"
+              className="block px-2 py-2 rounded-md text-sm text-gray-700 hover:bg-gray-50 no-underline"
+            >
+              Workspace settings
+            </Link>
+            <Link
+              href="/account"
+              className="block px-2 py-2 rounded-md text-sm text-gray-700 hover:bg-gray-50 no-underline"
+            >
+              Account settings
+            </Link>
+            <button
+              type="button"
+              onClick={onLogout}
+              className="block w-full text-left px-2 py-2 rounded-md text-sm text-gray-700 hover:bg-gray-50"
+            >
+              Log out
+            </button>
+          </div>
+        </div>
+      )}
     </header>
   );
 }
