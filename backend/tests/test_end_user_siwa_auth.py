@@ -107,7 +107,7 @@ def test_siwa_binds_first_verified_claim_then_uses_sub_on_later_signin(
 
     assert r1.status_code == 200, r1.text
     body1 = r1.json()
-    assert body1["is_new"] is True
+    assert body1["is_new_end_user"] is True
     end_user_id = body1["end_user"]["id"]
     assert body1["end_user"]["email"] == "legit@example.com"
 
@@ -126,7 +126,7 @@ def test_siwa_binds_first_verified_claim_then_uses_sub_on_later_signin(
 
     assert r2.status_code == 200, r2.text
     body2 = r2.json()
-    assert body2["is_new"] is False
+    assert body2["is_new_end_user"] is False
     assert body2["end_user"]["id"] == end_user_id
     assert body2["end_user"]["email"] == "legit@example.com"
     with session_scope() as s:
