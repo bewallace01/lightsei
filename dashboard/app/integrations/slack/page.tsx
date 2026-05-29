@@ -139,7 +139,7 @@ export default function SlackIntegrationPage(): JSX.Element {
   }, [channels]);
 
   return (
-    <main className="px-8 py-10 max-w-4xl mx-auto">
+    <main className="px-4 py-6 sm:px-8 sm:py-10 max-w-4xl mx-auto">
       <div className="mb-2">
         <Link href="/account" className="text-sm text-gray-500 hover:text-gray-900">
           ← integrations

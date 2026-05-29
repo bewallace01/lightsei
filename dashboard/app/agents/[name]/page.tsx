@@ -157,7 +157,7 @@ export default function AgentPage({ params }: { params: { name: string } }) {
   const recent = commands.filter((c) => c.status !== "pending");
 
   return (
-    <main className="px-8 py-10 max-w-5xl mx-auto">
+    <main className="px-4 py-6 sm:px-8 sm:py-10 max-w-5xl mx-auto">
 
       <Link
         href="/"

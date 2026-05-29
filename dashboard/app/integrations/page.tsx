@@ -196,7 +196,7 @@ function IntegrationsIndexInner(): JSX.Element {
   }
 
   return (
-    <main className="max-w-5xl mx-auto px-6 py-8 text-sm text-gray-900">
+    <main className="max-w-5xl mx-auto px-4 py-6 sm:px-6 sm:py-8 text-sm text-gray-900">
       <header className="mb-6 flex items-baseline justify-between">
         <div>
           <h1 className="text-xl font-semibold">Integrations</h1>

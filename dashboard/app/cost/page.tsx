@@ -5,7 +5,7 @@ import CostPanel from "../CostPanel";
 
 export default function CostPage() {
   return (
-    <main className="px-8 py-10 max-w-4xl mx-auto">
+    <main className="px-4 py-6 sm:px-8 sm:py-10 max-w-4xl mx-auto">
       <div className="flex items-baseline justify-between mb-6">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Cost</h1>

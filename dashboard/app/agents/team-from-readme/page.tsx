@@ -580,7 +580,7 @@ export default function TeamFromReadmePage() {
   };
 
   return (
-    <main className="px-8 py-10 max-w-6xl mx-auto">
+    <main className="px-4 py-6 sm:px-8 sm:py-10 max-w-6xl mx-auto">
       <div className="mb-2">
         <Link
           href="/agents"

@@ -24,7 +24,7 @@ export default function RunsPage() {
   // useSearchParams forces client-side bailout; Next requires it
   // to live inside a Suspense boundary at build time.
   return (
-    <Suspense fallback={<main className="px-8 py-10 text-gray-400 text-sm">loading…</main>}>
+    <Suspense fallback={<main className="px-4 py-6 sm:px-8 sm:py-10 text-gray-400 text-sm">loading…</main>}>
       <RunsPageInner />
     </Suspense>
   );
@@ -69,7 +69,7 @@ function RunsPageInner() {
     triggerId && rows.length > 0 ? (rows[0].trigger_name ?? null) : null;
 
   return (
-    <main className="px-8 py-10 max-w-6xl mx-auto">
+    <main className="px-4 py-6 sm:px-8 sm:py-10 max-w-6xl mx-auto">
       <div className="flex items-baseline justify-between mb-8">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Runs</h1>

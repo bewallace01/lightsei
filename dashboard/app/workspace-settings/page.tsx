@@ -69,14 +69,14 @@ export default function WorkspaceSettingsPage() {
 
   if (rows === null) {
     return (
-      <main className="px-8 py-10 max-w-3xl mx-auto text-gray-400 text-sm">
+      <main className="px-4 py-6 sm:px-8 sm:py-10 max-w-3xl mx-auto text-gray-400 text-sm">
         loading…
       </main>
     );
   }
   if (!active) {
     return (
-      <main className="px-8 py-10 max-w-3xl mx-auto">
+      <main className="px-4 py-6 sm:px-8 sm:py-10 max-w-3xl mx-auto">
         <div className="text-sm text-gray-600">
           No active workspace. Open the workspace dropdown to pick one or
           create a new one.
@@ -89,7 +89,7 @@ export default function WorkspaceSettingsPage() {
   const isOnlyWorkspace = rows.length <= 1;
 
   return (
-    <main className="px-8 py-10 max-w-3xl mx-auto">
+    <main className="px-4 py-6 sm:px-8 sm:py-10 max-w-3xl mx-auto">
       <div className="mb-8">
         <h1 className="text-2xl font-semibold tracking-tight">
           Workspace settings

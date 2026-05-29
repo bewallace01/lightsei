@@ -254,7 +254,7 @@ export default function AgentsPage() {
   }, []);
 
   return (
-    <main className="px-8 py-10 max-w-6xl mx-auto">
+    <main className="px-4 py-6 sm:px-8 sm:py-10 max-w-6xl mx-auto">
       <div className="flex items-start justify-between gap-6 mb-8">
         <div className="min-w-0">
           <h1 className="text-2xl font-semibold tracking-tight">Agents</h1>

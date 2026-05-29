@@ -651,7 +651,7 @@ export default function PolarisPage() {
         </div>
       </section>
 
-      <div className="max-w-6xl mx-auto px-8 py-10">
+      <div className="max-w-6xl mx-auto px-4 py-6 sm:px-8 sm:py-10">
         {/* Phase 12D.2: Polaris narrates the cost audit alongside the
             plan stream. Renders nothing when there's no event yet or
             no actionable insights, so the page reads the same as before
