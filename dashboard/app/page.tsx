@@ -50,7 +50,7 @@ export default function Home() {
   }, [router]);
 
   return (
-    <main className="px-8 py-10 max-w-6xl mx-auto">
+    <main className="px-4 py-6 sm:px-8 sm:py-10 max-w-6xl mx-auto">
 
       {/* Phase 18.3: first-run onboarding checklist. Renders above
           the constellation hero so a non-technical first-time user
@@ -70,7 +70,7 @@ export default function Home() {
           field stars so the whole frame reads as one continuous
           sky. */}
       <section
-        className="mb-10 relative overflow-hidden rounded-lg border border-indigo-900/50 shadow-lg shadow-indigo-950/30"
+        className="mb-6 sm:mb-10 relative overflow-hidden rounded-lg border border-indigo-900/50 shadow-lg shadow-indigo-950/30"
         style={{
           background:
             "linear-gradient(180deg, #020617 0%, #1e1b4b 50%, #0f172a 100%)",
@@ -134,8 +134,14 @@ export default function Home() {
         </svg>
 
         {/* The constellation map fills the canvas. Behind the hero
-            text overlay, but pointer events still work for hover. */}
-        <Constellation />
+            text overlay, but pointer events still work for hover.
+            Hidden below md: on a phone the map compresses to where its
+            stars + labels collide with the hero text, and it's too
+            small to read or hover anyway. The "Constellation →" link
+            below still routes to the full map on /agents. */}
+        <div className="hidden md:block">
+          <Constellation />
+        </div>
 
         {/* Hero text + constellation label, positioned absolutely
             in the upper-left so they overlay the dark canvas rather
@@ -144,7 +150,7 @@ export default function Home() {
             stay clickable through the hero's transparent areas; the
             inner content keeps pointer events on so the headline's
             expand button still works. */}
-        <div className="absolute inset-x-0 top-0 pointer-events-none">
+        <div className="relative md:absolute md:inset-x-0 md:top-0 pointer-events-none">
           {/* Wide enough that the headline + subtitle stay on one
               line at typical desktop widths. The hero only renders
               text on the left two-thirds; agent stars sit further
@@ -171,7 +177,7 @@ export default function Home() {
 
       {/* Cost preview. Headline numbers + budget bar; per-agent + per-model
           breakdowns live on the dedicated /cost page so the home stays scannable. */}
-      <section className="mb-10">
+      <section className="mb-6 sm:mb-10">
         <CostPanel compact />
       </section>
 
@@ -222,10 +228,10 @@ export default function Home() {
               <tr>
                 <th className="px-4 py-3 font-medium">Started</th>
                 <th className="px-4 py-3 font-medium">Agent</th>
-                <th className="px-4 py-3 font-medium">Model</th>
-                <th className="px-4 py-3 font-medium">Events</th>
-                <th className="px-4 py-3 font-medium">Tokens</th>
-                <th className="px-4 py-3 font-medium">Latency</th>
+                <th className="px-4 py-3 font-medium hidden sm:table-cell">Model</th>
+                <th className="px-4 py-3 font-medium hidden sm:table-cell">Events</th>
+                <th className="px-4 py-3 font-medium hidden sm:table-cell">Tokens</th>
+                <th className="px-4 py-3 font-medium hidden sm:table-cell">Latency</th>
                 <th className="px-4 py-3 font-medium">Status</th>
               </tr>
             </thead>
@@ -254,14 +260,14 @@ export default function Home() {
                       {r.agent_name}
                     </Link>
                   </td>
-                  <td className="px-4 py-3 font-mono text-xs text-gray-600">
+                  <td className="px-4 py-3 font-mono text-xs text-gray-600 hidden sm:table-cell">
                     {r.model ?? "—"}
                   </td>
-                  <td className="px-4 py-3 text-gray-700">{r.event_count}</td>
-                  <td className="px-4 py-3 font-mono text-xs text-gray-600">
+                  <td className="px-4 py-3 text-gray-700 hidden sm:table-cell">{r.event_count}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-gray-600 hidden sm:table-cell">
                     {r.input_tokens} / {r.output_tokens}
                   </td>
-                  <td className="px-4 py-3 text-gray-700">
+                  <td className="px-4 py-3 text-gray-700 hidden sm:table-cell">
                     {r.latency_ms > 0 ? `${r.latency_ms} ms` : "—"}
                   </td>
                   <td className="px-4 py-3">
