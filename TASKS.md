@@ -7,7 +7,9 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 29.4 close gate (real-iPhone APNS receipt) + 29.5 audit / 29.6 TestFlight.** The full SW chain is proven on the iOS simulator (see Done Log 2026-05-27): auth + keychain + APNS device-token registration round-trip green; `simctl push` renders banners; backend `apns.py` is live-signing JWTs against `api.sandbox.push.apple.com`; AASA serves the populated `appIDs` for Team `25ZQDZQ92C`. What's still pending: (a) one real-iPhone receipt to validate the prod APNS network round-trip (simulator tokens aren't valid APNS targets — Bailey plugs his phone into Xcode + Cmd+R from `ios/Lightsei/Lightsei.xcodeproj`, signs in via SIWA, taps Allow on the permission prompt, then an operator reply from `/inbox` should land); (b) a re-audit of 29.5 (`AddVendorView` + `VendorSettingsView` already exist from prior polish rounds — verify they cover the invite-code redeem + per-vendor settings the spec calls for); (c) 29.6 GitHub Actions workflow for TestFlight upload on `ios-release-v*` tags (needs App-Specific Password + .p8 + Apple ID as GH secrets). 29.7 (App Store submission) is a few rounds out — needs privacy policy URL + screenshots + demo account first. Theme unchanged: Lightsei end-user app — consumer-facing chat surface where end users (people who buy from a Lightsei-using business) get accounts, can chat with bots across vendors they've subscribed to, on web (PWA) and native iOS. JYNI-customer-fit motivated.**
+> **Phase 30.1 — Slack shell.** Reshape the native iOS app into a chat-first, Slack/Discord-style client (full spec under "Phase 30" below; design calls decided 2026-05-28). 30.1 builds the three-pane navigation in SwiftUI — sidebar (servers) → channel list (bots) → chat pane — identity-agnostic behind a data protocol, wired to the per-bot endpoints that ALREADY exist (operator: threads API `/agents/{name}/threads` + `/threads/{id}/messages`; end user: widget API `/widget/{public_id}/messages` + conversations). Transport is polling. This delivers the Slack/Discord feel using only existing backend; operator auth (30.2) + the Polaris team channel (30.3) + dashboard-capability ports (30.4+) come after. "Constellation" replaces "vendor" in user-facing copy (internal `vendor_*` identifiers stay). DEMO at phase close: one app, sign in as operator → bot channels + team channel; sign out, sign in as end user → Constellations + vendor-bot chat.
+>
+> **Parked from Phase 29 (not lost):** (a) real-iPhone APNS receipt to validate the prod network round-trip (SW chain already proven on the simulator 2026-05-27; just needs Bailey to plug in a device + Cmd+R + sign in + Allow, then an operator `/inbox` reply); (b) 29.5 re-audit (`AddVendorView`/`VendorSettingsView` cover invite-redeem + per-vendor settings?); (c) 29.6 TestFlight GitHub Action; (d) 29.7 App Store submission. These gate "downloadable from the App Store" but don't block Phase 30 dev on the simulator.**
 
 Phase 24 (planner emits structured zone + capabilities) complete 2026-05-25: 5 sub-tasks shipped + JYNI re-test validated end to end. The team-from-readme planner now reasons about trust zones + capability allow-lists as structured fields (not prose), honors operator freeform constraints per-bot, surfaces both as editable chips on the Proposed-team sidebar, and carries the operator's edits through to the deployed agent rows. Phase 16's wedge is now enforced from team-from-readme output without the operator needing to remember the Compliance preset.
 
@@ -1596,6 +1598,50 @@ Privacy policy URL, marketing copy, screenshots (8 sizes), demo account for Appl
 - Apple Watch companion (notification glance).
 - Widgets (iOS home screen widget showing latest message or vendor activity).
 - Share extension (share text from another iOS app → start a conversation in Lightsei).
+
+### Phase 30: Slack/Discord-shaped app (one app, two identities)
+
+Spec drafted 2026-05-28. Direction set by Bailey: reshape the native iOS app (currently the Phase 25-29 end-user-only consumer app) into a chat-first, Slack/Discord-style client that serves BOTH audiences from one binary and exposes the operator's full dashboard capabilities over time.
+
+**Locked decisions:**
+- **One app, two identities.** Same app adapts on sign-in: operator (the business owner + teammates) OR end user (a customer of a Lightsei business). Auth surface picks the lane.
+- **Slack/Discord shape.** Left sidebar = the things you belong to (operator: your workspaces; end user: your Constellations). Within one, a channel list = bots. Main pane = chat.
+- **Per-bot channels + a team channel.** Each bot is a channel you DM; plus one "team" channel where you talk to the whole team and Polaris routes.
+- **"Constellation" replaces "vendor"** in all user-facing copy (see memory: keep internal `vendor_*` identifiers). Operator side calls the sidebar unit a "workspace" / "team"; end-user side calls it a "Constellation."
+
+**What already exists (reuse, don't rebuild):**
+- End-user identity + auth: SIWA + magic-link, `end_user_sessions`, wired in the app today (Phase 25-29).
+- Operator auth: `POST /auth/login` (password), `/auth/magic-link/request` + `/consume`, `/auth/google/start` + callback. **Magic-link is the cleanest operator login to reuse in-app** (same pattern the app already runs for end users).
+- Operator → bot DM: **the threads API already exists** — `POST /agents/{name}/threads`, `GET /agents/{name}/threads`, `GET /threads/{id}`, `POST /threads/{id}/messages`, `DELETE /threads/{id}`, `POST /agents/{name}/threads/claim`. The web `/agents/[name]/chat` page drives it. This IS the per-bot channel for operators.
+- End user → bot chat: `POST /widget/{public_id}/messages`, `GET /widget/{public_id}/conversations/{id}`, `POST /widget-bot/respond`, `GET /me/end-user/vendors/{slug}/conversations`. This IS the per-bot channel for end users.
+- Operator data for "full capabilities": agents / runs / cost / zones / integrations all have backend endpoints already (the web dashboard consumes them).
+
+**What's net-new (the real lifts):**
+1. **Operator auth inside the iOS app.** Today `AuthStore` is end-user-only. Need an operator lane (start with magic-link) + an operator `APIClient` (operator session token, not end-user). Decide: separate stores or one store with an `identity` enum.
+2. **The "team channel" (Polaris-routed group chat).** No chat surface exists for "talk to the whole team, orchestrator routes to bots." Dispatch chains (Phase 11) are the routing primitive but there's no conversational endpoint. New backend: an operator-facing team-conversation endpoint that fans a message through Polaris/dispatch and streams the bots' replies back as channel messages.
+3. **Full dashboard capabilities in native SwiftUI.** Porting agents/runs/cost/zones/integrations/settings to Swift is effectively rebuilding the web dashboard. Multi-week; do it surface-by-surface, lowest-friction first.
+
+**Sub-tasks (MVP-first; each ends with a sim/device verify):**
+
+### 30.1: Slack shell
+Three-pane navigation in SwiftUI: sidebar (servers) → channel list (bots) → chat pane. Build it identity-agnostic with a data protocol so 30.2 can feed it either operator workspaces or end-user Constellations. Wire the chat pane to the EXISTING per-bot endpoints (threads API for operator; widget API for end user) so the shell is real, not a mock. This delivers the Slack/Discord feel using only existing backend.
+
+### 30.2: Dual identity
+Add an operator login lane (magic-link first) alongside the existing end-user auth. `AuthStore` grows an `identity` notion; `APIClient` carries the right session token + base paths. Sign-in screen offers "I'm a business / I'm a customer" (or auto-detects from the magic link). The 30.1 shell reads its sidebar + channels from whichever identity is active.
+
+### 30.3: Team channel (Polaris-routed)
+New backend: an operator team-conversation endpoint that accepts a message to the whole team, runs it through the orchestrator/dispatch path, and returns the bots' responses as channel messages (with attribution per bot). New SwiftUI "team" channel pinned at the top of each workspace's channel list. Tests on the dispatch path.
+
+### 30.4+: Dashboard capabilities (one surface per sub-task)
+Port operator surfaces into the app, lowest-friction first. Candidate order: agents list + agent detail → runs → cost → zones → integrations → settings. Each is its own sub-task with its own verify. Re-evaluate priority after 30.1-30.3 ship and we see what mobile operators actually reach for.
+
+**Design calls (decided 2026-05-28):**
+- **Chat transport: polling.** Threads API is request/response, widget already polls, bot replies are multi-second LLM calls. Poll while foregrounded; APNS covers replies that land while away. Streaming/typing-indicators deferred until they're a felt need.
+- **Auth: one `AuthStore` with an `identity` enum** (`.signedOut` / `.operator(session)` / `.endUser(session)`). Single source of truth for keychain + restore + the `ContentView` switch; makes the account switcher (see below) straightforward.
+- **Team channel: async.** Post the message; bot replies arrive as channel messages over time (poll foreground, APNS background). No synchronous fan-out — a blocking call waiting on a multi-bot dispatch chain would hit HTTP timeouts + the Railway idle-in-transaction trap. Matches the existing async dispatch + `widget-bot/respond` model.
+- **Sign-in: one identity at a time + sidebar account switcher.** One active session in the keychain. True simultaneous operator+end-user (merged sidebar, two live tokens) → parking lot unless a real need emerges.
+
+**DEMO (phase close):** on a real device, sign in as an operator, see your workspace(s) in the sidebar, open a bot channel and exchange messages, open the team channel and watch Polaris route; then sign out, sign in as an end user, see your Constellations and chat with a vendor's bot. Both lanes from one app.
 
 ---
 
