@@ -370,7 +370,7 @@ export default function InboxPage(): JSX.Element {
               No conversations match this filter.
             </p>
           ) : (
-            <ul className="divide-y divide-gray-100 max-h-[calc(100vh-220px)] overflow-y-auto">
+            <ul className="divide-y divide-gray-100 md:max-h-[calc(100vh-220px)] md:overflow-y-auto">
               {conversations.map((c) => {
                 const badge = statusBadge(c.status);
                 const selected = c.id === selectedId;
@@ -423,7 +423,7 @@ export default function InboxPage(): JSX.Element {
         </aside>
 
         {/* Thread view */}
-        <section className="rounded-lg border border-gray-200 bg-white flex flex-col min-h-[calc(100vh-220px)]">
+        <section className="rounded-lg border border-gray-200 bg-white flex flex-col md:min-h-[calc(100vh-220px)]">
           {!selectedId ? (
             <div className="p-6 text-gray-500 text-xs italic">
               Pick a conversation from the list to view it.
