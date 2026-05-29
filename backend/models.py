@@ -1984,6 +1984,9 @@ class EndUser(Base):
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    apple_sub: Mapped[Optional[str]] = mapped_column(
+        String(255), unique=True, nullable=True,
+    )
     display_name: Mapped[Optional[str]] = mapped_column(
         String(128), nullable=True,
     )

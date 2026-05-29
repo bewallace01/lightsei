@@ -12,7 +12,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPE
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import desc, func, select, text
+from sqlalchemy import desc, func, select, text, update
 from sqlalchemy.orm import Session
 
 import limits
@@ -264,8 +264,8 @@ class EndUserPushUnsubscribeIn(BaseModel):
 # Phase 29.2c stub: Sign in with Apple body. `identity_token` is
 # the JWT the iOS app gets from ASAuthorizationAppleIDCredential.
 # `email` + `display_name` only arrive on the FIRST sign-in (per
-# Apple docs); the iOS app caches them locally + forwards on
-# subsequent calls so the backend can keep its row correct.
+# Apple docs). The backend only trusts email from the verified token;
+# request-body email is accepted for old clients but ignored.
 class EndUserSignInWithAppleIn(BaseModel):
     identity_token: str = Field(min_length=1, max_length=4096)
     email: Optional[EmailStr] = None
@@ -5283,12 +5283,20 @@ def redeem_vendor_invite_code(
     check above.
     """
     now = utcnow()
-    code_row = session.get(VendorInviteCode, body.code)
-    if (
-        code_row is None
-        or code_row.consumed_at is not None
-        or code_row.expires_at <= now
-    ):
+    consumed = session.execute(
+        update(VendorInviteCode)
+        .where(
+            VendorInviteCode.code == body.code,
+            VendorInviteCode.consumed_at.is_(None),
+            VendorInviteCode.expires_at > now,
+        )
+        .values(
+            consumed_at=now,
+            consumed_by_end_user_id=auth.end_user.id,
+        )
+        .returning(VendorInviteCode.workspace_id)
+    ).one_or_none()
+    if consumed is None:
         raise HTTPException(
             status_code=422,
             detail={
@@ -5299,15 +5307,10 @@ def redeem_vendor_invite_code(
                 ),
             },
         )
-
-    # Mark consumed before doing the link insert so a parallel
-    # redeem of the same code loses the race + 422s.
-    code_row.consumed_at = now
-    code_row.consumed_by_end_user_id = auth.end_user.id
-    session.flush()
+    workspace_id = consumed.workspace_id
 
     existing = session.get(
-        EndUserVendorLink, (auth.end_user.id, code_row.workspace_id),
+        EndUserVendorLink, (auth.end_user.id, workspace_id),
     )
     if existing is not None:
         # Already linked. If soft-revoked, re-activate by clearing
@@ -5318,14 +5321,14 @@ def redeem_vendor_invite_code(
     else:
         link = EndUserVendorLink(
             end_user_id=auth.end_user.id,
-            workspace_id=code_row.workspace_id,
+            workspace_id=workspace_id,
             linked_via="invite_code",
             linked_at=now,
         )
         session.add(link)
         session.flush()
 
-    ws = session.get(Workspace, code_row.workspace_id)
+    ws = session.get(Workspace, workspace_id)
     return {
         "linked": True,
         "vendor": (
@@ -5615,15 +5618,14 @@ def sign_in_with_apple(
     Lightsei session.
 
     Verifies the identity token via apple_signin.verify_identity_token,
-    keys account lookup by email (claim.email when Apple sent it on
-    first sign-in, else body.email forwarded by the iOS app from
-    its first-signin cache), upserts an EndUser, creates an
-    EndUserSession, returns the same shape as magic-link consume.
+    keys account lookup by Apple's stable subject, upserts an EndUser,
+    creates an EndUserSession, returns the same shape as magic-link
+    consume.
 
     Returns:
       501 siwa_not_configured  → REQUIRE_LIVE not set, no verify
       401 siwa_invalid_token   → JWT signature/claim validation
-      422 siwa_missing_email   → no email anywhere (caller bug)
+      422 siwa_missing_email   → first sign-in token omitted email
       200 success
     """
     import apple_signin as _siwa
@@ -5647,34 +5649,52 @@ def sign_in_with_apple(
             },
         ) from None
 
-    # Apple sends email only on the FIRST sign-in per Apple ID.
-    # Subsequent signs-in carry just sub; the iOS app caches the
-    # original email + forwards it via body.email so the backend
-    # can keep keying off email. If neither, the caller didn't
-    # cache properly — fail loud.
-    email = (claim.email or body.email or "").strip().lower()
-    if not email:
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": "siwa_missing_email",
-                "message": (
-                    "Apple did not send an email + the request did "
-                    "not carry one. Re-sign on the device to refresh."
-                ),
-            },
-        )
-
     now = utcnow()
 
     existing = session.scalar(
-        select(EndUser).where(EndUser.email == email)
+        select(EndUser).where(EndUser.apple_sub == claim.sub)
     )
-    is_new = existing is None
+    if existing is not None:
+        end_user = existing
+        is_new = False
+    else:
+        # Apple sends email only on the first sign-in for an Apple ID.
+        # Without a stored subject binding, a caller-supplied fallback
+        # email would let one Apple account claim another user's row.
+        email = (claim.email or "").strip().lower()
+        if not email:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "error": "siwa_missing_email",
+                    "message": (
+                        "Apple did not send an email for this Apple "
+                        "account. Start a fresh Apple sign-in so the "
+                        "backend can bind the verified account."
+                    ),
+                },
+            )
+
+        existing = session.scalar(
+            select(EndUser).where(EndUser.email == email)
+        )
+        is_new = existing is None
+        if existing is not None and existing.apple_sub is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "siwa_account_conflict",
+                    "message": (
+                        "this email is already linked to a different "
+                        "Apple account"
+                    ),
+                },
+            )
     if existing is None:
         end_user = EndUser(
             id=str(uuid.uuid4()),
             email=email,
+            apple_sub=claim.sub,
             display_name=body.display_name,
             email_verified=claim.email_verified,
             auth_provider="siwa",
@@ -5684,6 +5704,7 @@ def sign_in_with_apple(
         session.flush()
     else:
         end_user = existing
+        end_user.apple_sub = claim.sub
         # If the original account was magic-link only and Apple
         # vouches for the email, mark it verified going forward.
         if claim.email_verified and not end_user.email_verified:
