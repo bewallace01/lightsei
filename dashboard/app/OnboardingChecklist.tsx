@@ -153,13 +153,15 @@ export default function OnboardingChecklist() {
   };
 
   return (
-    <section className="mb-10 rounded-lg border border-accent-200 bg-accent-50/40 p-5">
-      <div className="flex items-start justify-between mb-4">
+    <section className="mb-6 sm:mb-10 rounded-lg border border-accent-200 bg-accent-50/40 p-4 sm:p-5">
+      <div className="flex items-start justify-between mb-3 sm:mb-4">
         <div>
-          <h2 className="text-lg font-semibold tracking-tight text-gray-900">
+          <h2 className="text-base sm:text-lg font-semibold tracking-tight text-gray-900">
             Get your team running ({doneCount}/{steps.length})
           </h2>
-          <p className="text-sm text-gray-600 mt-1 max-w-2xl">
+          {/* Intro copy is helpful on desktop but just adds height on a
+              phone where the step labels already explain the flow. */}
+          <p className="hidden sm:block text-sm text-gray-600 mt-1 max-w-2xl">
             Four steps from empty workspace to deployed bots with trust
             zones configured. Each link takes you to the right surface.
           </p>
@@ -179,7 +181,7 @@ export default function OnboardingChecklist() {
             <Link
               href={step.href}
               className={
-                "block rounded-md border px-3 py-3 hover:border-accent-300 transition-colors no-underline " +
+                "block rounded-md border px-3 py-2.5 sm:py-3 hover:border-accent-300 transition-colors no-underline " +
                 (step.done
                   ? "border-green-200 bg-green-50/70"
                   : "border-gray-200 bg-white")
@@ -206,7 +208,10 @@ export default function OnboardingChecklist() {
                   >
                     {step.label}
                   </div>
-                  <div className="text-xs text-gray-600 mt-0.5">
+                  {/* Per-step detail hidden on mobile: the label alone
+                      conveys the step + keeps each row to one line so
+                      the 4-step list isn't a screen-and-a-half tall. */}
+                  <div className="hidden sm:block text-xs text-gray-600 mt-0.5">
                     {step.detail}
                   </div>
                 </div>

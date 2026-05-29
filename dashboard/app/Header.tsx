@@ -289,6 +289,9 @@ export default function Header() {
   const [workspace, setWorkspace] = useState<SessionWorkspace | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+  const [openMobileGroups, setOpenMobileGroups] = useState<
+    Record<string, boolean>
+  >({});
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -537,7 +540,7 @@ export default function Header() {
                   key={n.href}
                   href={n.href}
                   className={
-                    "block px-2 py-2 rounded-md no-underline " +
+                    "block px-2 py-2.5 rounded-md no-underline " +
                     (isActive(n.href)
                       ? "text-gray-900 font-medium bg-gray-50"
                       : "text-gray-600 hover:bg-gray-50")
@@ -546,25 +549,73 @@ export default function Header() {
                   {n.label}
                 </Link>
               ) : (
-                <div key={n.label} className="mt-2">
-                  <div className="px-2 text-[11px] uppercase tracking-wider text-gray-400">
-                    {n.label}
-                  </div>
-                  {n.children.map((c) => (
-                    <Link
-                      key={c.href}
-                      href={c.href}
-                      className={
-                        "block px-2 py-2 rounded-md no-underline " +
-                        (isActive(c.href)
-                          ? "text-gray-900 font-medium bg-gray-50"
-                          : "text-gray-600 hover:bg-gray-50")
-                      }
-                    >
-                      {c.label}
-                    </Link>
-                  ))}
-                </div>
+                (() => {
+                  // Accordion: groups collapse so the drawer is a short
+                  // list of sections, not a ~24-link wall. Auto-expand
+                  // the group that owns the current page; otherwise the
+                  // user's explicit toggle wins.
+                  const childActive = n.children.some((c) => isActive(c.href));
+                  const open = openMobileGroups[n.label] ?? childActive;
+                  return (
+                    <div key={n.label}>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setOpenMobileGroups((m) => ({
+                            ...m,
+                            [n.label]: !open,
+                          }))
+                        }
+                        aria-expanded={open}
+                        className={
+                          "w-full flex items-center justify-between px-2 py-2.5 rounded-md " +
+                          (childActive
+                            ? "text-gray-900 font-medium"
+                            : "text-gray-700 hover:bg-gray-50")
+                        }
+                      >
+                        <span>{n.label}</span>
+                        <svg
+                          width="14"
+                          height="14"
+                          viewBox="0 0 16 16"
+                          aria-hidden="true"
+                          className={
+                            "text-gray-400 transition-transform " +
+                            (open ? "rotate-180" : "")
+                          }
+                        >
+                          <path
+                            d="M4 6 L8 10 L12 6"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="1.5"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      </button>
+                      {open && (
+                        <div className="pl-3 border-l border-gray-100 ml-2 mb-1">
+                          {n.children.map((c) => (
+                            <Link
+                              key={c.href}
+                              href={c.href}
+                              className={
+                                "block px-2 py-2 rounded-md no-underline " +
+                                (isActive(c.href)
+                                  ? "text-gray-900 font-medium bg-gray-50"
+                                  : "text-gray-600 hover:bg-gray-50")
+                              }
+                            >
+                              {c.label}
+                            </Link>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()
               ),
             )}
           </nav>
