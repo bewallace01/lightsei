@@ -50,4 +50,10 @@ final class EndUserChatSource: ChatDataSource {
     func vendor(for serverID: String) -> EndUserVendor? {
         vendorsByID[serverID]
     }
+
+    func target(for channel: ChatChannel) -> ChatTarget? {
+        guard channel.kind == .bot,
+              let v = vendorsByID[channel.serverID] else { return nil }
+        return .endUserVendor(v)
+    }
 }

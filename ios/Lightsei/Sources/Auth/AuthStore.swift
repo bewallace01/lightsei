@@ -1,75 +1,186 @@
-// Phase 29.2a: observable auth state for the app.
+// Phase 30.2: dual-identity auth state.
 //
-// One source of truth for "am I signed in?" + the EndUser profile.
-// LightseiApp creates one AuthStore at launch, ContentView switches
-// on `state`, the sign-in flows call signIn(token:) to flip to .ok.
+// One AuthStore serves both signed-in identities the Lightsei iOS app
+// supports:
 //
-// Persists the session token to the Keychain via Keychain.read/
-// write/clear. Restores on launch via `restore()`.
+//   - End user   — the customer of someone else's Constellation. Auth
+//                  via magic-link or Sign in with Apple; session
+//                  stored in the end-user Keychain slot.
+//   - Operator   — the business owner of a workspace. Auth via email
+//                  + password (POST /auth/login); session stored in
+//                  the operator Keychain slot.
+//
+// Only one identity is active at a time. The dormant slot is kept so
+// a future account-switcher (also Phase 30) can flip identities
+// without re-authenticating.
+//
+// `restore()` rehydrates from whichever slot the user last used (a
+// UserDefaults pointer), falling back to the end-user slot then the
+// operator slot if the pointer is missing.
 
 import Foundation
 
 @MainActor
 final class AuthStore: ObservableObject {
     enum State {
-        case unknown          // before restore() runs
+        case unknown                                  // before restore()
         case signedOut
-        case ok(EndUser)
+        case endUser(EndUser)
+        case operatorUser(OperatorIdentity)
+    }
+
+    /// Wraps the operator user + their active workspace. Persisted
+    /// in-memory only; restored each launch via /auth/me.
+    struct OperatorIdentity: Equatable {
+        let user: OperatorUser
+        let workspace: OperatorWorkspace?
     }
 
     @Published private(set) var state: State = .unknown
 
     private var api: APIClient = .production
 
-    /// Re-hydrate from Keychain + verify the token against the
-    /// backend via GET /me/end-user. Called once at app launch.
+    private static let lastIdentityKey = "com.lightsei.app.lastIdentity"
+    private enum LastIdentity: String { case endUser, operatorUser }
+
     func restore() async {
-        guard let token = Keychain.read() else {
-            state = .signedOut
-            return
+        let last = LastIdentity(
+            rawValue: UserDefaults.standard.string(
+                forKey: Self.lastIdentityKey,
+            ) ?? "",
+        )
+
+        // Try the preferred slot first; fall through to the other.
+        let order: [LastIdentity] = last == .operatorUser
+            ? [.operatorUser, .endUser]
+            : [.endUser, .operatorUser]
+
+        for identity in order {
+            switch identity {
+            case .endUser:
+                if await tryRestoreEndUser() { return }
+            case .operatorUser:
+                if await tryRestoreOperator() { return }
+            }
+        }
+        state = .signedOut
+    }
+
+    private func tryRestoreEndUser() async -> Bool {
+        guard let token = Keychain.read(account: Keychain.endUserAccount) else {
+            return false
         }
         var client = api
         client.bearer = token
         do {
             let me = try await client.fetchEndUserMe()
             api.bearer = token
-            state = .ok(me.end_user)
+            state = .endUser(me.end_user)
+            UserDefaults.standard.set(
+                LastIdentity.endUser.rawValue, forKey: Self.lastIdentityKey,
+            )
+            return true
         } catch APIError.unauthorized {
-            Keychain.clear()
-            state = .signedOut
+            Keychain.clear(account: Keychain.endUserAccount)
+            return false
         } catch {
-            // Network blip on launch: keep the token (don't clear)
-            // and treat as signed-out for now. Next call will
-            // either succeed or surface a clearer error.
-            state = .signedOut
+            // Network blip: don't clear the token, just treat as not
+            // restorable this launch.
+            return false
         }
     }
 
-    /// Sign in by consuming a magic-link token. Persists the
-    /// resulting session token + flips state.
+    private func tryRestoreOperator() async -> Bool {
+        guard let token = Keychain.read(account: Keychain.operatorAccount) else {
+            return false
+        }
+        var client = api
+        client.bearer = token
+        do {
+            let me = try await client.fetchOperatorAuthMe()
+            guard let user = me.user else {
+                // /auth/me succeeded but with no user: the token is
+                // an API key or something else. Wipe + give up.
+                Keychain.clear(account: Keychain.operatorAccount)
+                return false
+            }
+            api.bearer = token
+            state = .operatorUser(
+                OperatorIdentity(user: user, workspace: me.workspace),
+            )
+            UserDefaults.standard.set(
+                LastIdentity.operatorUser.rawValue,
+                forKey: Self.lastIdentityKey,
+            )
+            return true
+        } catch APIError.unauthorized {
+            Keychain.clear(account: Keychain.operatorAccount)
+            return false
+        } catch {
+            return false
+        }
+    }
+
+    // MARK: end-user sign-in
+
     func signIn(magicLinkToken: String) async throws {
         let resp = try await api.consumeMagicLink(token: magicLinkToken)
-        try Keychain.write(resp.session_token)
+        try Keychain.write(
+            resp.session_token, account: Keychain.endUserAccount,
+        )
         api.bearer = resp.session_token
-        state = .ok(resp.end_user)
+        state = .endUser(resp.end_user)
+        UserDefaults.standard.set(
+            LastIdentity.endUser.rawValue, forKey: Self.lastIdentityKey,
+        )
     }
 
+    func acceptSession(token: String, endUser: EndUser) throws {
+        try Keychain.write(token, account: Keychain.endUserAccount)
+        api.bearer = token
+        state = .endUser(endUser)
+        UserDefaults.standard.set(
+            LastIdentity.endUser.rawValue, forKey: Self.lastIdentityKey,
+        )
+    }
+
+    // MARK: operator sign-in
+
+    func signInOperator(email: String, password: String) async throws {
+        let resp = try await api.operatorLogin(
+            email: email, password: password,
+        )
+        try Keychain.write(
+            resp.session_token, account: Keychain.operatorAccount,
+        )
+        api.bearer = resp.session_token
+        state = .operatorUser(
+            OperatorIdentity(user: resp.user, workspace: resp.workspace),
+        )
+        UserDefaults.standard.set(
+            LastIdentity.operatorUser.rawValue,
+            forKey: Self.lastIdentityKey,
+        )
+    }
+
+    // MARK: sign-out
+
+    /// Sign out the currently active identity. Leaves the dormant
+    /// slot intact so the future account-switcher (Phase 30) can
+    /// flip back without re-authenticating.
     func signOut() {
-        Keychain.clear()
+        switch state {
+        case .endUser:
+            Keychain.clear(account: Keychain.endUserAccount)
+        case .operatorUser:
+            Keychain.clear(account: Keychain.operatorAccount)
+        default:
+            break
+        }
         api.bearer = nil
         state = .signedOut
+        UserDefaults.standard.removeObject(forKey: Self.lastIdentityKey)
     }
 
-    /// Bearer-attached client for callers (e.g. SignInView for the
-    /// magic-link request, future vendor list fetches).
     var client: APIClient { api }
-
-    /// Set the bearer + flip to .ok. Used by auxiliary sign-in
-    /// flows (Sign in with Apple) that live in extension files
-    /// and so can't poke the private `api` field directly.
-    func acceptSession(token: String, endUser: EndUser) throws {
-        try Keychain.write(token)
-        api.bearer = token
-        state = .ok(endUser)
-    }
 }

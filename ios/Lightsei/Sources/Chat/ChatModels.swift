@@ -1,14 +1,16 @@
-// Phase 30.1: identity-agnostic chat-shell models.
+// Phase 30.1 + 30.2: identity-agnostic chat-shell models.
 //
 // The Slack-shaped shell renders three things: a server rail, a
-// channel list for the selected server, and a chat pane. These
-// value types are what the shell draws; a ChatDataSource (per
-// identity) supplies them. 30.1 ships only the end-user source
-// (EndUserChatSource); 30.2 adds an operator source feeding the
-// same shell.
+// channel list for the selected server, and a chat pane. These value
+// types are what the shell draws; a ChatDataSource (per identity)
+// supplies them.
 //
 // "Server" is the neutral word for a sidebar unit: end users see
-// their Constellations, operators will see their workspaces.
+// their Constellations, operators see their workspaces.
+//
+// 30.2 adds ChatTarget so the shell can hand a tapped channel off to
+// the right chat pane (end-user widget chat vs. operator threads
+// chat) without the shell having to know which identity is signed in.
 
 import Foundation
 
@@ -36,11 +38,22 @@ struct ChatChannel: Identifiable, Hashable {
     let serverID: String
 }
 
-// Supplies the shell's servers + channels for whichever identity is
-// signed in. Kept @MainActor since implementations hold an
+// The destination a tapped channel pushes onto the shell's nav stack.
+// Carries the identity-specific payload the chat pane needs:
+//
+//   - .endUserVendor    → existing widget ChatView(vendor:)
+//   - .operatorBot      → OperatorChatView(workspaceID:agentName:)
+enum ChatTarget: Hashable {
+    case endUserVendor(EndUserVendor)
+    case operatorBot(workspaceID: String, agentName: String)
+}
+
+// Supplies the shell's servers + channels + open-target for whichever
+// identity is signed in. Kept @MainActor since implementations hold an
 // APIClient + feed SwiftUI state directly.
 @MainActor
 protocol ChatDataSource {
     func loadServers() async throws -> [ChatServer]
     func loadChannels(for server: ChatServer) async throws -> [ChatChannel]
+    func target(for channel: ChatChannel) -> ChatTarget?
 }

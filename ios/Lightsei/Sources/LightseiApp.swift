@@ -44,8 +44,11 @@ struct LightseiApp: App {
                     // Only ask once we know who the user is —
                     // pre-signin the request would block the
                     // sign-in surface for no benefit.
-                    if case .ok = auth.state {
+                    switch auth.state {
+                    case .endUser, .operatorUser:
                         PushRegistration.shared.request()
+                    default:
+                        break
                     }
                 }
                 .onOpenURL { url in

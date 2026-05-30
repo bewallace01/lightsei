@@ -1,30 +1,37 @@
-// Phase 30.1: Slack/Discord-shaped shell.
+// Phase 30.1 + 30.2: Slack/Discord-shaped shell, identity-agnostic.
 //
-// Discord-style layout: a narrow server rail pinned on the left
-// (one avatar per Constellation) + a main column showing the
-// selected server's channel list, which pushes into the existing
-// ChatView when a bot channel is tapped.
+// Discord-style layout: a narrow server rail pinned on the left (one
+// avatar per Constellation or workspace) + a main column showing the
+// selected server's channels, which pushes into an identity-shaped
+// chat view when a channel is tapped.
 //
-// Built against ChatDataSource so 30.2 can feed it operator data;
-// 30.1 wires the end-user source only. The chat pane still takes an
-// EndUserVendor (ChatView is vendor-typed until 30.2 generalizes it),
-// so the shell resolves the tapped channel's server back to its
-// vendor via EndUserChatSource.vendor(for:).
+// The shell knows nothing about which identity is signed in. A
+// ChatDataSource feeds it the servers + channels; tapping a channel
+// resolves to a ChatTarget which the shell's navigation destination
+// switches on:
+//
+//   .endUserVendor    → existing ChatView (widget chat)
+//   .operatorBot      → OperatorChatView (threads chat)
+//
+// `addServerAction` is wired only on the end-user surface (Add a
+// Constellation via invite code); operators don't yet have an
+// analog, so the + button is hidden when nil.
 
 import SwiftUI
 
-struct SlackShellView: View {
+struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
     @EnvironmentObject var auth: AuthStore
-    let endUser: EndUser
+    let source: Source
+    let accountLabel: String
+    let addServerAction: (() -> Void)?
+    let reloadID: Int
 
-    @State private var source: EndUserChatSource?
     @State private var servers: [ChatServer] = []
     @State private var selectedServerID: String?
     @State private var channels: [ChatChannel] = []
     @State private var loading: Bool = true
     @State private var loadError: String?
-    @State private var showAddVendor: Bool = false
-    @State private var path: [EndUserVendor] = []
+    @State private var path: [ChatTarget] = []
 
     private let railWidth: CGFloat = 64
 
@@ -34,7 +41,7 @@ struct SlackShellView: View {
             Divider()
             mainColumn
         }
-        .task { await loadServers() }
+        .task(id: reloadID) { await loadServers() }
     }
 
     // MARK: server rail
@@ -51,21 +58,25 @@ struct SlackShellView: View {
                         }
                         .buttonStyle(.plain)
                     }
-                    Button {
-                        showAddVendor = true
-                    } label: {
-                        ZStack {
-                            Circle()
-                                .strokeBorder(
-                                    Color(.separator),
-                                    style: StrokeStyle(lineWidth: 1, dash: [3, 3]),
-                                )
-                                .frame(width: 44, height: 44)
-                            Image(systemName: "plus")
-                                .foregroundStyle(Color.accentColor)
+                    if let addServerAction {
+                        Button {
+                            addServerAction()
+                        } label: {
+                            ZStack {
+                                Circle()
+                                    .strokeBorder(
+                                        Color(.separator),
+                                        style: StrokeStyle(
+                                            lineWidth: 1, dash: [3, 3],
+                                        ),
+                                    )
+                                    .frame(width: 44, height: 44)
+                                Image(systemName: "plus")
+                                    .foregroundStyle(Color.accentColor)
+                            }
                         }
+                        .accessibilityLabel("Add a constellation")
                     }
-                    .accessibilityLabel("Add a constellation")
                 }
                 .padding(.top, 10)
             }
@@ -73,7 +84,7 @@ struct SlackShellView: View {
             Spacer(minLength: 0)
 
             Menu {
-                Text(endUser.email)
+                Text(accountLabel)
                 Button("Sign out", role: .destructive) { auth.signOut() }
             } label: {
                 Image(systemName: "ellipsis.circle")
@@ -92,7 +103,8 @@ struct SlackShellView: View {
         let selected = server.id == selectedServerID
         return ZStack {
             RoundedRectangle(cornerRadius: selected ? 14 : 22)
-                .fill(selected ? Color.accentColor : Color(.tertiarySystemBackground))
+                .fill(selected ? Color.accentColor
+                                : Color(.tertiarySystemBackground))
                 .frame(width: 44, height: 44)
             Text(server.initial)
                 .font(.system(size: 18, weight: .semibold))
@@ -116,7 +128,8 @@ struct SlackShellView: View {
         NavigationStack(path: $path) {
             Group {
                 if loading {
-                    ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
+                    ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
                 } else if let loadError {
                     errorState(loadError)
                 } else if servers.isEmpty {
@@ -127,16 +140,18 @@ struct SlackShellView: View {
                     channelList
                 }
             }
-            .navigationDestination(for: EndUserVendor.self) { vendor in
-                ChatView(vendor: vendor)
+            .navigationDestination(for: ChatTarget.self) { target in
+                switch target {
+                case .endUserVendor(let vendor):
+                    ChatView(vendor: vendor)
+                case .operatorBot(let wsID, let agent):
+                    OperatorChatView(
+                        workspaceID: wsID, agentName: agent,
+                    )
+                }
             }
         }
         .frame(maxWidth: .infinity)
-        .sheet(isPresented: $showAddVendor) {
-            AddVendorView {
-                Task { await loadServers() }
-            }
-        }
     }
 
     private var channelList: some View {
@@ -148,8 +163,11 @@ struct SlackShellView: View {
                         openChannel(channel)
                     } label: {
                         HStack(spacing: 8) {
-                            Image(systemName: channel.kind == .team ? "number.square" : "number")
-                                .foregroundStyle(.secondary)
+                            Image(systemName:
+                                channel.kind == .team
+                                    ? "number.square" : "number",
+                            )
+                            .foregroundStyle(.secondary)
                             Text(channel.name)
                                 .foregroundStyle(.primary)
                             Spacer()
@@ -168,9 +186,9 @@ struct SlackShellView: View {
             Image(systemName: "bubble.left.and.bubble.right")
                 .font(.system(size: 34))
                 .foregroundStyle(.secondary)
-            Text("Pick a constellation")
+            Text("Pick one to start")
                 .font(.system(size: 15, weight: .medium))
-            Text("Tap a constellation on the left to see its bots.")
+            Text("Tap an item on the left to see its bots.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -181,15 +199,17 @@ struct SlackShellView: View {
 
     private var emptyState: some View {
         VStack(spacing: 10) {
-            Text("No constellations yet")
+            Text("Nothing here yet")
                 .font(.system(size: 17, weight: .semibold))
-            Text("Add a constellation with an invite code to start chatting with its bots.")
+            Text("You haven't joined any spaces yet.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
-            Button("Add a constellation") { showAddVendor = true }
-                .buttonStyle(.borderedProminent)
-                .padding(.top, 4)
+            if let addServerAction {
+                Button("Add a constellation") { addServerAction() }
+                    .buttonStyle(.borderedProminent)
+                    .padding(.top, 4)
+            }
         }
         .padding(24)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -197,7 +217,8 @@ struct SlackShellView: View {
 
     private func errorState(_ msg: String) -> some View {
         VStack(spacing: 10) {
-            Text("Couldn't load").font(.system(size: 15, weight: .medium))
+            Text("Couldn't load")
+                .font(.system(size: 15, weight: .medium))
             Text(msg).font(.caption).foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
             Button("Retry") { Task { await loadServers() } }
@@ -211,17 +232,15 @@ struct SlackShellView: View {
     private func loadServers() async {
         loading = true
         loadError = nil
-        let src = source ?? EndUserChatSource(client: auth.client)
-        source = src
         do {
-            let loaded = try await src.loadServers()
+            let loaded = try await source.loadServers()
             servers = loaded
             if selectedServerID == nil, let first = loaded.first {
                 select(first)
             } else if let sel = selectedServerID {
-                // refresh channels for the still-selected server
                 if let s = loaded.first(where: { $0.id == sel }) {
-                    channels = (try? await src.loadChannels(for: s)) ?? []
+                    channels = (try? await source.loadChannels(for: s))
+                        ?? []
                 } else {
                     selectedServerID = nil
                     channels = []
@@ -229,7 +248,8 @@ struct SlackShellView: View {
             }
             loading = false
         } catch {
-            loadError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            loadError = (error as? LocalizedError)?
+                .errorDescription ?? "\(error)"
             loading = false
         }
     }
@@ -237,13 +257,13 @@ struct SlackShellView: View {
     private func select(_ server: ChatServer) {
         selectedServerID = server.id
         Task {
-            guard let src = source else { return }
-            channels = (try? await src.loadChannels(for: server)) ?? []
+            channels = (try? await source.loadChannels(for: server))
+                ?? []
         }
     }
 
     private func openChannel(_ channel: ChatChannel) {
-        guard let vendor = source?.vendor(for: channel.serverID) else { return }
-        path.append(vendor)
+        guard let target = source.target(for: channel) else { return }
+        path.append(target)
     }
 }

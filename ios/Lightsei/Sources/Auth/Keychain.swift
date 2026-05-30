@@ -18,9 +18,13 @@ enum KeychainError: Error {
 
 struct Keychain {
     static let service = "com.lightsei.app.session"
-    static let account = "end-user"
+    // Phase 30.2: two slots so an end-user session + an operator
+    // session can both persist (one is active at a time, but the
+    // app remembers the other for a future account switcher).
+    static let endUserAccount = "end-user"
+    static let operatorAccount = "operator"
 
-    static func read() -> String? {
+    static func read(account: String = endUserAccount) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -38,7 +42,7 @@ struct Keychain {
         return s
     }
 
-    static func write(_ token: String) throws {
+    static func write(_ token: String, account: String = endUserAccount) throws {
         let data = Data(token.utf8)
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -67,7 +71,7 @@ struct Keychain {
         }
     }
 
-    static func clear() {
+    static func clear(account: String = endUserAccount) {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
