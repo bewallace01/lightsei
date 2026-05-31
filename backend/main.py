@@ -73,6 +73,8 @@ from models import (
     SlackOAuthPendingState,
     SlackWorkspace,
     Session as SessionRow,
+    TeamConversation,
+    TeamMessage,
     Thread,
     ThreadMessage,
     Trigger,
@@ -430,6 +432,14 @@ class ThreadCreateIn(BaseModel):
 
 
 class ThreadMessagePostIn(BaseModel):
+    content: str = Field(min_length=1)
+
+
+class TeamConversationCreateIn(BaseModel):
+    title: Optional[str] = None
+
+
+class TeamMessagePostIn(BaseModel):
     content: str = Field(min_length=1)
 
 
@@ -10559,6 +10569,226 @@ def complete_thread_message(
     t.updated_at = now
     session.flush()
     return _serialize_thread_message(msg)
+
+
+# ---------- Phase 30.3.c: team conversations (Polaris-routed) ---------- #
+#
+# Per-bot threads (above) are a 1:1 chat with one agent. Team
+# conversations are 1:N: the operator addresses the whole team, the
+# Polaris router (backend/team_router.py) picks the responding subset,
+# and the dispatch step inserts one pending assistant row per pick.
+# Each agent's existing claim loop (POST /agents/{name}/threads/claim)
+# claims its own assistant row by agent_name on team_messages — the
+# claim handler will need a sibling for team rows in a future task;
+# 30.3.c only ships the operator-facing surface + router wiring.
+
+
+def _serialize_team_conversation(c: TeamConversation) -> dict[str, Any]:
+    return {
+        "id": c.id,
+        "workspace_id": c.workspace_id,
+        "title": c.title,
+        "created_at": c.created_at.isoformat(),
+        "updated_at": c.updated_at.isoformat(),
+    }
+
+
+def _serialize_team_message(m: TeamMessage) -> dict[str, Any]:
+    return {
+        "id": m.id,
+        "conversation_id": m.conversation_id,
+        "role": m.role,
+        "content": m.content,
+        "status": m.status,
+        "agent_name": m.agent_name,
+        "routed_agents": m.routed_agents,
+        "error": m.error,
+        "created_at": m.created_at.isoformat(),
+        "completed_at": (
+            m.completed_at.isoformat() if m.completed_at else None
+        ),
+    }
+
+
+def _team_conv_for_workspace(
+    session: Session, conversation_id: str, workspace_id: str,
+) -> TeamConversation:
+    c = session.get(TeamConversation, conversation_id)
+    if c is None or c.workspace_id != workspace_id:
+        raise HTTPException(
+            status_code=404, detail="team conversation not found",
+        )
+    return c
+
+
+@app.post("/workspaces/me/team-conversations")
+def create_team_conversation(
+    body: TeamConversationCreateIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    now = utcnow()
+    c = TeamConversation(
+        id=str(uuid.uuid4()),
+        workspace_id=workspace_id,
+        title=body.title or "Team chat",
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(c)
+    session.flush()
+    return _serialize_team_conversation(c)
+
+
+@app.get("/workspaces/me/team-conversations")
+def list_team_conversations(
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    rows = session.execute(
+        select(TeamConversation)
+        .where(TeamConversation.workspace_id == workspace_id)
+        .order_by(desc(TeamConversation.updated_at))
+    ).scalars().all()
+    return {"conversations": [_serialize_team_conversation(c) for c in rows]}
+
+
+@app.get("/team-conversations/{conversation_id}")
+def get_team_conversation(
+    conversation_id: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    c = _team_conv_for_workspace(session, conversation_id, workspace_id)
+    msgs = session.execute(
+        select(TeamMessage)
+        .where(TeamMessage.conversation_id == c.id)
+        .order_by(TeamMessage.created_at)
+    ).scalars().all()
+    return {
+        "conversation": _serialize_team_conversation(c),
+        "messages": [_serialize_team_message(m) for m in msgs],
+    }
+
+
+@app.delete("/team-conversations/{conversation_id}")
+def delete_team_conversation(
+    conversation_id: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    c = _team_conv_for_workspace(session, conversation_id, workspace_id)
+    session.delete(c)
+    session.flush()
+    return {"deleted": conversation_id}
+
+
+# Test-injection point: tests override this with a factory that
+# returns a fake Anthropic client. Default None means team_router uses
+# its own anthropic.Anthropic() call.
+_TEAM_ROUTER_ANTHROPIC_FACTORY: Optional[Any] = None
+
+
+@app.post("/team-conversations/{conversation_id}/messages")
+def post_team_conversation_message(
+    conversation_id: str,
+    body: TeamMessagePostIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Operator posts a message to the whole team.
+
+    Writes the user row, runs the Polaris router, writes the router
+    row + one pending assistant row per picked agent. Each agent's
+    claim loop picks up its own row (claim handler matches on
+    team_messages.agent_name).
+
+    If the router fails (RouterError, e.g. missing ANTHROPIC_API_KEY),
+    the user row still lands + a single router row is written with
+    status='error' carrying the error text. No assistant rows are
+    created in that case — the channel surfaces the failure rather
+    than going silent.
+    """
+    import team_router  # local import: avoid module-load cycle risk
+    c = _team_conv_for_workspace(session, conversation_id, workspace_id)
+    now = utcnow()
+
+    user_msg = TeamMessage(
+        id=str(uuid.uuid4()),
+        conversation_id=c.id,
+        role="user",
+        content=body.content,
+        status="completed",
+        created_at=now,
+        completed_at=now,
+    )
+    session.add(user_msg)
+    if c.title == "Team chat":
+        c.title = body.content.strip().splitlines()[0][:60]
+
+    # Run the router. team_router.route_team_message commits the
+    # session before the LLM call (Railway idle-in-tx kill protection),
+    # so the user_msg above is already durable when the call returns.
+    router_id = str(uuid.uuid4())
+    assistant_rows: list[TeamMessage] = []
+    try:
+        decision = team_router.route_team_message(
+            session, workspace_id, body.content,
+            anthropic_factory=_TEAM_ROUTER_ANTHROPIC_FACTORY,
+        )
+    except team_router.RouterError as e:
+        router_row = TeamMessage(
+            id=router_id,
+            conversation_id=c.id,
+            role="router",
+            content=f"Router error: {e}",
+            status="error",
+            error=str(e),
+            created_at=utcnow(),
+            completed_at=utcnow(),
+        )
+        session.add(router_row)
+        c.updated_at = utcnow()
+        session.flush()
+        return {
+            "user_message": _serialize_team_message(user_msg),
+            "router_message": _serialize_team_message(router_row),
+            "pending_messages": [],
+        }
+
+    router_row = TeamMessage(
+        id=router_id,
+        conversation_id=c.id,
+        role="router",
+        content=decision.summary,
+        status="completed",
+        routed_agents=decision.as_routed_agents_json(),
+        created_at=utcnow(),
+        completed_at=utcnow(),
+    )
+    session.add(router_row)
+
+    for pick in decision.agents:
+        row = TeamMessage(
+            id=str(uuid.uuid4()),
+            conversation_id=c.id,
+            role="assistant",
+            agent_name=pick.name,
+            status="pending",
+            created_at=utcnow(),
+        )
+        session.add(row)
+        assistant_rows.append(row)
+
+    c.updated_at = utcnow()
+    session.flush()
+    return {
+        "user_message": _serialize_team_message(user_msg),
+        "router_message": _serialize_team_message(router_row),
+        "pending_messages": [
+            _serialize_team_message(r) for r in assistant_rows
+        ],
+    }
 
 
 @app.get("/agents/{agent_name}/cost")
