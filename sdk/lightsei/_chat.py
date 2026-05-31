@@ -306,13 +306,37 @@ class _ChatPoller:
                 logger.warning("lightsei chat poller error: %s", e)
             self._stop.wait(self._interval)
 
+    # Phase 30.3.f: poll both surfaces each tick. The per-bot threads
+    # claim (existing since 29.x) AND the workspace-team claim (new in
+    # 30.3). Both reach the same registered @on_chat handler. URL
+    # templates per surface live in _endpoint_paths().
+    _SURFACES = ("thread", "team")
+
+    @staticmethod
+    def _endpoint_paths(kind: str, agent: str) -> dict[str, str]:
+        if kind == "team":
+            return {
+                "claim": f"/agents/{agent}/team-conversations/claim",
+                "chunk": "/team-messages/{mid}/chunk",
+                "complete": "/team-messages/{mid}/complete",
+            }
+        return {
+            "claim": f"/agents/{agent}/threads/claim",
+            "chunk": "/messages/{mid}/chunk",
+            "complete": "/messages/{mid}/complete",
+        }
+
     def _tick_once(self) -> None:
         if self._client._http is None or not self._client.agent_name:
             return
+        for kind in self._SURFACES:
+            self._tick_surface(kind)
+
+    def _tick_surface(self, kind: str) -> None:
+        paths = self._endpoint_paths(kind, self._client.agent_name)
         try:
             r = self._client._http.post(
-                f"/agents/{self._client.agent_name}/threads/claim",
-                timeout=self._client.timeout,
+                paths["claim"], timeout=self._client.timeout,
             )
             if r.status_code != 200:
                 return
@@ -321,19 +345,24 @@ class _ChatPoller:
             return
         if turn is None:
             return
-        self._dispatch(turn)
+        self._dispatch(turn, paths=paths)
 
-    def _dispatch(self, turn: dict[str, Any]) -> None:
+    def _dispatch(
+        self, turn: dict[str, Any], *, paths: dict[str, str],
+    ) -> None:
         message_id = turn.get("message_id")
         history: List[dict[str, Any]] = turn.get("messages") or []
         handler = _default_handler()
         if handler is None:
-            self._complete(message_id, error="no chat handler registered (use @lightsei.on_chat)")
+            self._complete(
+                message_id, paths=paths,
+                error="no chat handler registered (use @lightsei.on_chat)",
+            )
             return
         try:
             result = handler(history)
         except BaseException as e:
-            self._complete(message_id, error=repr(e))
+            self._complete(message_id, paths=paths, error=repr(e))
             return
         # Streaming: handler returned a generator/iterator. Post each yield
         # as a delta chunk; after the iterator is exhausted, mark the message
@@ -345,29 +374,34 @@ class _ChatPoller:
                 for chunk in result:
                     if not chunk:
                         continue
-                    self._post_chunk(message_id, str(chunk))
+                    self._post_chunk(message_id, str(chunk), paths=paths)
             except BaseException as e:
-                self._complete(message_id, error=repr(e))
+                self._complete(message_id, paths=paths, error=repr(e))
                 return
-            self._complete(message_id)  # keep server-accumulated content
+            self._complete(message_id, paths=paths)  # keep accumulated
             return
         if result is None:
-            self._complete(message_id, content="")
+            self._complete(message_id, paths=paths, content="")
             return
         if isinstance(result, str):
-            self._complete(message_id, content=result)
+            self._complete(message_id, paths=paths, content=result)
             return
         if isinstance(result, dict) and "content" in result:
-            self._complete(message_id, content=str(result["content"]))
+            self._complete(
+                message_id, paths=paths, content=str(result["content"]),
+            )
             return
-        self._complete(message_id, content=str(result))
+        self._complete(message_id, paths=paths, content=str(result))
 
-    def _post_chunk(self, message_id: Optional[str], delta: str) -> None:
+    def _post_chunk(
+        self, message_id: Optional[str], delta: str,
+        *, paths: dict[str, str],
+    ) -> None:
         if message_id is None or self._client._http is None:
             return
         try:
             self._client._http.post(
-                f"/messages/{message_id}/chunk",
+                paths["chunk"].format(mid=message_id),
                 json={"delta": delta},
                 timeout=self._client.timeout,
             )
@@ -380,6 +414,7 @@ class _ChatPoller:
         self,
         message_id: Optional[str],
         *,
+        paths: dict[str, str],
         content: Any = _SENTINEL,
         error: Optional[str] = None,
     ) -> None:
@@ -395,7 +430,7 @@ class _ChatPoller:
             body["content"] = content if content is not None else ""
         try:
             self._client._http.post(
-                f"/messages/{message_id}/complete",
+                paths["complete"].format(mid=message_id),
                 json=body,
                 timeout=self._client.timeout,
             )
