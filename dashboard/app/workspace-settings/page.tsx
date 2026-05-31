@@ -12,6 +12,7 @@ import {
   patchMyWorkspace,
 } from "../api";
 import EndUserInvitesSection from "./EndUserInvitesSection";
+import VendorSlugSection from "./VendorSlugSection";
 
 export default function WorkspaceSettingsPage() {
   const router = useRouter();
@@ -194,6 +195,13 @@ export default function WorkspaceSettingsPage() {
           </div>
         </div>
       </section>
+
+      {/* ---------- Consumer chat URL (Phase 26.x close-out) ---------- */}
+      <VendorSlugSection
+        active={active}
+        isOwner={isOwner}
+        onClaimed={refresh}
+      />
 
       {/* ---------- End-user invites (Phase 27.3) ---------- */}
       <EndUserInvitesSection />

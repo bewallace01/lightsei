@@ -1997,6 +1997,10 @@ def _serialize_membership(m: WorkspaceMember, ws: Workspace, is_active: bool) ->
         "is_active": is_active,
         "plan_tier": ws.plan_tier,
         "created_at": ws.created_at.isoformat(),
+        # Phase 26.1: surface the claimed consumer-chat handle so the
+        # /workspace-settings page can render its slug-claim section
+        # without a second round-trip. NULL until claimed.
+        "vendor_slug": getattr(ws, "vendor_slug", None),
     }
 
 

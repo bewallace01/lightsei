@@ -2385,6 +2385,9 @@ export type WorkspaceMembership = {
   is_active: boolean;
   plan_tier: string;
   created_at: string;
+  // Phase 26.1: operator-claimed consumer-chat URL handle. NULL
+  // until the operator claims one via POST /workspaces/me/vendor-slug.
+  vendor_slug: string | null;
 };
 
 export async function listMyWorkspaces(): Promise<WorkspaceMembership[]> {
@@ -2434,6 +2437,21 @@ export async function deleteMyWorkspace(
     `/me/workspaces/${encodeURIComponent(workspaceId)}`,
     { method: "DELETE" },
   )) as { deleted: boolean; workspace_id: string; switched_to: string | null };
+}
+
+// Phase 26.1: claim the consumer-chat URL handle for the active
+// workspace. Backend returns the full serialized workspace; callers
+// typically just need to refetch /me/workspaces afterward to pick
+// up the new vendor_slug in the membership row.
+export async function claimVendorSlug(
+  slug: string,
+): Promise<{ vendor_slug: string | null }> {
+  const body = (await authedJson(`/workspaces/me/vendor-slug`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ slug }),
+  })) as { vendor_slug: string | null };
+  return body;
 }
 
 // ----- Phase 25.2 + 26.2: end-user consumer surface -----
