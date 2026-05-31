@@ -723,6 +723,74 @@ class ThreadMessage(Base):
     )
 
 
+class TeamConversation(Base):
+    __tablename__ = "team_conversations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_team_conversations_ws_updated",
+            "workspace_id", updated_at.desc(),
+        ),
+    )
+
+
+class TeamMessage(Base):
+    __tablename__ = "team_messages"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    conversation_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("team_conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    # "user" | "router" | "assistant"
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # "pending" | "completed" | "error"
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="completed"
+    )
+    # Set on assistant rows; the deployed agent claims by name.
+    # NULL on user + router rows.
+    agent_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Set on router rows: {"agents": [{"name": str, "reason": str}, ...]}.
+    # NULL on user + assistant rows.
+    routed_agents: Mapped[Optional[dict]] = mapped_column(JSONB, nullable=True)
+    error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    __table_args__ = (
+        Index(
+            "ix_team_messages_conv_created",
+            "conversation_id", "created_at",
+        ),
+        Index(
+            "ix_team_messages_pending_assistant",
+            "agent_name", "created_at",
+            postgresql_where=text(
+                "status = 'pending' AND role = 'assistant'"
+            ),
+        ),
+    )
+
+
 class AgentInstance(Base):
     __tablename__ = "agent_instances"
 
