@@ -19,16 +19,16 @@
 
 import SwiftUI
 
-// 30.4.e + 30.5.d + 30.6.c + 30.7.b: per-workspace tab in the main
-// column. Operators get Channels + Runs + Agents + Cost + Zones;
-// end-users see only Channels (no operator surfaces exist for them).
-// Lives at module scope so callers can pass `.channels` as the
-// default.
+// 30.4.e + 30.5.d + 30.6.c + 30.7.b + 30.7.c: per-workspace tab in
+// the main column. Operators get Channels + Runs + Agents + Cost +
+// Zones today; end-users see only Channels (no operator surfaces
+// exist for them). Lives at module scope so callers can pass
+// `.channels` as the default.
 //
-// At 5 segments the iOS segmented picker is at its comfortable
-// ceiling. Adding 30.8 (integrations) → 6 segments will cramp the
-// labels; plan a picker shape refactor (icon strip, scrollable
-// picker, or a "More" menu for less-touched surfaces) before .8 lands.
+// 30.7.c replaced the segmented Picker with a horizontally-scrolling
+// pill strip (see paneModePicker below). The strip scales to N tabs
+// without cramping, so adding 30.8 (integrations) + 30.9 (settings)
+// is now an enum case + a row in `paneModeOrder` — no shape refactor.
 enum MainPaneMode: Hashable {
     case channels
     case runs
@@ -36,6 +36,19 @@ enum MainPaneMode: Hashable {
     case cost
     case zones
 }
+
+// Display order for the 30.7.c pill strip. File-scoped (not a
+// SlackShellView static) because the shell is generic and Swift
+// disallows static stored properties on generic types. Add new
+// surfaces here (and add their `.case` to MainPaneMode above) to
+// extend the strip.
+private let paneModeOrder: [(MainPaneMode, String)] = [
+    (.channels, "Channels"),
+    (.runs, "Runs"),
+    (.agents, "Agents"),
+    (.cost, "Cost"),
+    (.zones, "Zones"),
+]
 
 struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
     @EnvironmentObject var auth: AuthStore
@@ -206,18 +219,55 @@ struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
         .frame(maxWidth: .infinity)
     }
 
+    // 30.7.c picker shape refactor. Replaced the segmented Picker
+    // (which capped out around 5 labels before cramping) with a
+    // horizontally-scrolling pill strip so 30.8 (integrations) +
+    // 30.9 (settings) can land without cramping. Selected pill fills
+    // with the accent color; others get a subtle tertiary chip. A
+    // ScrollViewReader scrolls the active pill into view on change
+    // so flipping to an off-screen tab via code (deep link, account
+    // switch) still surfaces the selection.
     private var paneModePicker: some View {
-        Picker("View", selection: $mainPaneMode) {
-            Text("Channels").tag(MainPaneMode.channels)
-            Text("Runs").tag(MainPaneMode.runs)
-            Text("Agents").tag(MainPaneMode.agents)
-            Text("Cost").tag(MainPaneMode.cost)
-            Text("Zones").tag(MainPaneMode.zones)
+        ScrollViewReader { proxy in
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 6) {
+                    ForEach(paneModeOrder, id: \.0) { (mode, label) in
+                        paneModePill(mode: mode, label: label)
+                            .id(mode)
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.top, 8)
+                .padding(.bottom, 4)
+            }
+            .onChange(of: mainPaneMode) { newValue in
+                withAnimation(.easeInOut(duration: 0.18)) {
+                    proxy.scrollTo(newValue, anchor: .center)
+                }
+            }
         }
-        .pickerStyle(.segmented)
-        .padding(.horizontal, 12)
-        .padding(.top, 8)
-        .padding(.bottom, 4)
+    }
+
+    private func paneModePill(
+        mode: MainPaneMode, label: String,
+    ) -> some View {
+        let selected = mainPaneMode == mode
+        return Button {
+            mainPaneMode = mode
+        } label: {
+            Text(label)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(selected ? .white : .primary)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 6)
+                .background(
+                    selected
+                        ? Color.accentColor
+                        : Color(.tertiarySystemBackground),
+                )
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     private var channelList: some View {
