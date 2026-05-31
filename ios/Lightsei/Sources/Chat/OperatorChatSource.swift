@@ -43,7 +43,17 @@ final class OperatorChatSource: ChatDataSource {
         // it again.
         try await client.switchWorkspace(server.id)
         let agents = try await client.fetchOperatorAgents()
-        return agents.map {
+        // 30.3.d: pin the workspace-team channel at the top so the
+        // operator's eye lands on it first (Slack convention for
+        // #general). The channel.id uses "<wsid>:team" so it's
+        // distinct from any agent channel sharing the same name.
+        let teamChannel = ChatChannel(
+            id: "\(server.id):team",
+            name: "team",
+            kind: .team,
+            serverID: server.id,
+        )
+        return [teamChannel] + agents.map {
             ChatChannel(
                 id: $0.name,
                 name: $0.name,
@@ -54,10 +64,14 @@ final class OperatorChatSource: ChatDataSource {
     }
 
     func target(for channel: ChatChannel) -> ChatTarget? {
-        guard channel.kind == .bot else { return nil }
-        return .operatorBot(
-            workspaceID: channel.serverID,
-            agentName: channel.id,
-        )
+        switch channel.kind {
+        case .team:
+            return .operatorTeam(workspaceID: channel.serverID)
+        case .bot:
+            return .operatorBot(
+                workspaceID: channel.serverID,
+                agentName: channel.id,
+            )
+        }
     }
 }

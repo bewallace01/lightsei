@@ -148,6 +148,8 @@ struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
                     OperatorChatView(
                         workspaceID: wsID, agentName: agent,
                     )
+                case .operatorTeam(let wsID):
+                    OperatorTeamChatView(workspaceID: wsID)
                 }
             }
         }

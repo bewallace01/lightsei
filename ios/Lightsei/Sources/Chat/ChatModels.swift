@@ -43,9 +43,12 @@ struct ChatChannel: Identifiable, Hashable {
 //
 //   - .endUserVendor    → existing widget ChatView(vendor:)
 //   - .operatorBot      → OperatorChatView(workspaceID:agentName:)
+//   - .operatorTeam     → OperatorTeamChatView(workspaceID:) — the
+//                         Polaris-routed whole-team channel (Phase 30.3.d)
 enum ChatTarget: Hashable {
     case endUserVendor(EndUserVendor)
     case operatorBot(workspaceID: String, agentName: String)
+    case operatorTeam(workspaceID: String)
 }
 
 // Supplies the shell's servers + channels + open-target for whichever
