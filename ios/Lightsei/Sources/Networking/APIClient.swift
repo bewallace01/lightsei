@@ -43,7 +43,23 @@ struct APIClient {
         body: Encodable? = nil,
         as: Out.Type = Out.self,
     ) async throws -> Out {
-        var req = URLRequest(url: baseURL.appendingPathComponent(path))
+        // Split off the query string before appendingPathComponent
+        // (it percent-encodes its argument, which mangles `?` + `&`).
+        // Caller passes the query already URL-encoded.
+        let url: URL
+        if let qIdx = path.firstIndex(of: "?") {
+            let p = String(path[..<qIdx])
+            let q = String(path[path.index(after: qIdx)...])
+            let base = baseURL.appendingPathComponent(p)
+            var comps = URLComponents(
+                url: base, resolvingAgainstBaseURL: false,
+            )
+            comps?.percentEncodedQuery = q
+            url = comps?.url ?? base
+        } else {
+            url = baseURL.appendingPathComponent(path)
+        }
+        var req = URLRequest(url: url)
         req.httpMethod = method
         req.setValue("application/json", forHTTPHeaderField: "Accept")
         if let bearer {
