@@ -80,7 +80,7 @@ struct ChatView: View {
                         showSettings = true
                     } label: {
                         Label(
-                            "Vendor settings",
+                            "Constellation settings",
                             systemImage: "gearshape",
                         )
                     }

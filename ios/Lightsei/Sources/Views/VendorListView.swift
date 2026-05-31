@@ -32,7 +32,7 @@ struct VendorListView: View {
                         } label: {
                             Image(systemName: "plus")
                         }
-                        .accessibilityLabel("Add vendor")
+                        .accessibilityLabel("Add a Constellation")
                     }
                     ToolbarItem(placement: .topBarTrailing) {
                         Menu {
