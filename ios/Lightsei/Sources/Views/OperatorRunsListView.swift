@@ -43,6 +43,15 @@ struct OperatorRunsListView: View {
         }
         .task { await load() }
         .refreshable { await load() }
+        // Phase 30.4.d: list + detail are a self-contained pair.
+        // 30.4.e mounts the list inside SlackShellView's NavigationStack;
+        // this destination registration travels with it.
+        .navigationDestination(for: RunsNavValue.self) { value in
+            switch value {
+            case .runDetail(let runID):
+                OperatorRunDetailView(runID: runID)
+            }
+        }
     }
 
     private var list: some View {

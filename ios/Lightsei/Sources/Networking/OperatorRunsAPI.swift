@@ -63,10 +63,18 @@ struct OperatorRunEvent: Codable, Identifiable, Equatable, Hashable {
     let timestamp: Date
 }
 
+// Minimal snapshot of the run row, returned alongside the events.
+// The detail view uses this for its header (agent name + timestamps)
+// rather than re-fetching the full /runs row.
+struct OperatorRunSnapshot: Codable, Equatable, Hashable {
+    let id: String
+    let agent_name: String
+    let started_at: Date
+    let ended_at: Date?
+}
+
 struct OperatorRunEventsResponse: Codable {
-    // Backend returns a `run` snapshot too; the iOS detail view
-    // already has its OperatorRun from the list, so we only model
-    // the events.
+    let run: OperatorRunSnapshot
     let events: [OperatorRunEvent]
 }
 
@@ -162,6 +170,9 @@ extension APIClient {
         return resp.runs
     }
 
+    /// Returns the events alone (caller already has the run summary
+    /// from the list). For the run-detail header use
+    /// `fetchOperatorRunWithEvents` which returns the snapshot too.
     func fetchOperatorRunEvents(
         runID: String,
     ) async throws -> [OperatorRunEvent] {
@@ -169,5 +180,11 @@ extension APIClient {
             "runs/\(runID)/events",
         )
         return resp.events
+    }
+
+    func fetchOperatorRunWithEvents(
+        runID: String,
+    ) async throws -> OperatorRunEventsResponse {
+        try await request("runs/\(runID)/events")
     }
 }
