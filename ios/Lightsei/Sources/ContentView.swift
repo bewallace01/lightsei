@@ -46,6 +46,7 @@ private struct EndUserShell: View {
                     accountLabel: endUser.email,
                     addServerAction: { showAddVendor = true },
                     reloadID: reloadID,
+                    showsRunsTab: false,
                 )
             } else {
                 ProgressView()
@@ -81,6 +82,7 @@ private struct OperatorShell: View {
                     accountLabel: identity.user.email,
                     addServerAction: nil,
                     reloadID: 0,
+                    showsRunsTab: true,
                 )
             } else {
                 ProgressView()

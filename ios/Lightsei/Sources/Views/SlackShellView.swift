@@ -19,16 +19,30 @@
 
 import SwiftUI
 
+// 30.4.e: per-workspace tab in the main column. Operators get the
+// Runs surface alongside Channels; end-users see only Channels (no
+// Runs surface exists for them). Lives at module scope so callers
+// can pass `.channels` as the default.
+enum MainPaneMode: Hashable {
+    case channels
+    case runs
+}
+
 struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
     @EnvironmentObject var auth: AuthStore
     let source: Source
     let accountLabel: String
     let addServerAction: (() -> Void)?
     let reloadID: Int
+    /// When true, the main column shows a Channels|Runs segmented
+    /// control above the per-workspace content. The end-user shell
+    /// passes false (no Runs surface for end users).
+    let showsRunsTab: Bool
 
     @State private var servers: [ChatServer] = []
     @State private var selectedServerID: String?
     @State private var channels: [ChatChannel] = []
+    @State private var mainPaneMode: MainPaneMode = .channels
     @State private var loading: Bool = true
     @State private var loadError: String?
     @State private var path: [ChatTarget] = []
@@ -126,18 +140,32 @@ struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
 
     private var mainColumn: some View {
         NavigationStack(path: $path) {
-            Group {
-                if loading {
-                    ProgressView()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                } else if let loadError {
-                    errorState(loadError)
-                } else if servers.isEmpty {
-                    emptyState
-                } else if selectedServerID == nil {
-                    pickPrompt
-                } else {
-                    channelList
+            VStack(spacing: 0) {
+                if showsRunsTab && selectedServerID != nil {
+                    paneModePicker
+                }
+                Group {
+                    if loading {
+                        ProgressView()
+                            .frame(
+                                maxWidth: .infinity,
+                                maxHeight: .infinity,
+                            )
+                    } else if let loadError {
+                        errorState(loadError)
+                    } else if servers.isEmpty {
+                        emptyState
+                    } else if selectedServerID == nil {
+                        pickPrompt
+                    } else if mainPaneMode == .runs {
+                        // .runs is only reachable when showsRunsTab + a
+                        // selected workspace, so force-unwrap is safe.
+                        OperatorRunsListView(
+                            workspaceID: selectedServerID!,
+                        )
+                    } else {
+                        channelList
+                    }
                 }
             }
             .navigationDestination(for: ChatTarget.self) { target in
@@ -154,6 +182,17 @@ struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
             }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    private var paneModePicker: some View {
+        Picker("View", selection: $mainPaneMode) {
+            Text("Channels").tag(MainPaneMode.channels)
+            Text("Runs").tag(MainPaneMode.runs)
+        }
+        .pickerStyle(.segmented)
+        .padding(.horizontal, 12)
+        .padding(.top, 8)
+        .padding(.bottom, 4)
     }
 
     private var channelList: some View {
@@ -258,6 +297,11 @@ struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
 
     private func select(_ server: ChatServer) {
         selectedServerID = server.id
+        // Reset the per-workspace tab to Channels: switching
+        // workspaces while parked on Runs would otherwise show one
+        // workspace's Runs above another workspace's avatar, which
+        // reads wrong.
+        mainPaneMode = .channels
         Task {
             channels = (try? await source.loadChannels(for: server))
                 ?? []
