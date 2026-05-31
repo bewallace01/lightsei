@@ -36,6 +36,7 @@ enum MainPaneMode: Hashable {
     case cost
     case zones
     case integrations
+    case settings
 }
 
 // Display order for the 30.7.c pill strip. File-scoped (not a
@@ -50,6 +51,7 @@ private let paneModeOrder: [(MainPaneMode, String)] = [
     (.cost, "Cost"),
     (.zones, "Zones"),
     (.integrations, "Integrations"),
+    (.settings, "Settings"),
 ]
 
 struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
@@ -202,6 +204,10 @@ struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
                         )
                     } else if mainPaneMode == .integrations {
                         OperatorIntegrationsView(
+                            workspaceID: selectedServerID!,
+                        )
+                    } else if mainPaneMode == .settings {
+                        OperatorSettingsView(
                             workspaceID: selectedServerID!,
                         )
                     } else {
