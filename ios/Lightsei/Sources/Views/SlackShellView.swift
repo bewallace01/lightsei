@@ -19,13 +19,14 @@
 
 import SwiftUI
 
-// 30.4.e: per-workspace tab in the main column. Operators get the
-// Runs surface alongside Channels; end-users see only Channels (no
-// Runs surface exists for them). Lives at module scope so callers
+// 30.4.e + 30.5.d: per-workspace tab in the main column. Operators
+// get Channels + Runs + Agents; end-users see only Channels (no
+// operator surfaces exist for them). Lives at module scope so callers
 // can pass `.channels` as the default.
 enum MainPaneMode: Hashable {
     case channels
     case runs
+    case agents
 }
 
 struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
@@ -158,9 +159,14 @@ struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
                     } else if selectedServerID == nil {
                         pickPrompt
                     } else if mainPaneMode == .runs {
-                        // .runs is only reachable when showsRunsTab + a
-                        // selected workspace, so force-unwrap is safe.
+                        // .runs / .agents are only reachable when
+                        // showsRunsTab + a selected workspace, so the
+                        // force-unwrap is safe.
                         OperatorRunsListView(
+                            workspaceID: selectedServerID!,
+                        )
+                    } else if mainPaneMode == .agents {
+                        OperatorAgentsListView(
                             workspaceID: selectedServerID!,
                         )
                     } else {
@@ -188,6 +194,7 @@ struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
         Picker("View", selection: $mainPaneMode) {
             Text("Channels").tag(MainPaneMode.channels)
             Text("Runs").tag(MainPaneMode.runs)
+            Text("Agents").tag(MainPaneMode.agents)
         }
         .pickerStyle(.segmented)
         .padding(.horizontal, 12)
