@@ -19,14 +19,19 @@
 
 import SwiftUI
 
-// 30.4.e + 30.5.d: per-workspace tab in the main column. Operators
-// get Channels + Runs + Agents; end-users see only Channels (no
-// operator surfaces exist for them). Lives at module scope so callers
-// can pass `.channels` as the default.
+// 30.4.e + 30.5.d + 30.6.c: per-workspace tab in the main column.
+// Operators get Channels + Runs + Agents + Cost; end-users see only
+// Channels (no operator surfaces exist for them). Lives at module
+// scope so callers can pass `.channels` as the default.
+//
+// At 4 segments the iOS segmented picker is still comfortable. When
+// 30.x adds zones / integrations / settings we'll likely need a
+// different shape (icon strip, scrollable picker, or "More" menu).
 enum MainPaneMode: Hashable {
     case channels
     case runs
     case agents
+    case cost
 }
 
 struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
@@ -169,6 +174,10 @@ struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
                         OperatorAgentsListView(
                             workspaceID: selectedServerID!,
                         )
+                    } else if mainPaneMode == .cost {
+                        OperatorCostView(
+                            workspaceID: selectedServerID!,
+                        )
                     } else {
                         channelList
                     }
@@ -195,6 +204,7 @@ struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
             Text("Channels").tag(MainPaneMode.channels)
             Text("Runs").tag(MainPaneMode.runs)
             Text("Agents").tag(MainPaneMode.agents)
+            Text("Cost").tag(MainPaneMode.cost)
         }
         .pickerStyle(.segmented)
         .padding(.horizontal, 12)
