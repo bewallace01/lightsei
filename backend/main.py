@@ -10791,6 +10791,159 @@ def post_team_conversation_message(
     }
 
 
+# ---------- Phase 30.3.e: claim/chunk/complete for team messages ---------- #
+#
+# Sibling of the threads claim loop above (10442+) but keyed on
+# team_messages. Each deployed agent runs ONE long-poll loop that
+# tries both endpoints (threads.claim + team-conversations.claim)
+# round-robin; the SDK extension comes in a follow-up.
+#
+# History fed to the bot: the operator's user message + the router
+# row's summary as a system note. Peer agents' completed replies are
+# NOT included in this iteration — keep the surface minimal so the
+# claim → reply → complete round-trip is provable on its own. Peer
+# awareness ("hermes already said X") is a follow-up.
+
+
+@app.post("/agents/{agent_name}/team-conversations/claim")
+def claim_team_turn(
+    agent_name: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Atomically claim the oldest pending team_message for this
+    agent in the caller's workspace. Returns the message id + the
+    user-visible history (user row + router summary as a system
+    note). Returns {"turn": null} if nothing is pending."""
+    row = session.execute(
+        text(
+            """
+            SELECT m.id AS message_id,
+                   m.conversation_id AS conversation_id
+            FROM team_messages m
+            JOIN team_conversations c ON c.id = m.conversation_id
+            WHERE c.workspace_id = :wsid
+              AND m.agent_name = :agent
+              AND m.status = 'pending'
+              AND m.role = 'assistant'
+            ORDER BY m.created_at ASC
+            LIMIT 1
+            FOR UPDATE OF m SKIP LOCKED
+            """
+        ),
+        {"wsid": workspace_id, "agent": agent_name},
+    ).first()
+    if row is None:
+        return {"turn": None}
+    msg = session.get(TeamMessage, row.message_id)
+    if msg is None:
+        return {"turn": None}
+    msg.status = "in_progress"
+
+    history = session.execute(
+        select(TeamMessage)
+        .where(
+            TeamMessage.conversation_id == row.conversation_id,
+            TeamMessage.role.in_(("user", "router")),
+        )
+        .order_by(TeamMessage.created_at)
+    ).scalars().all()
+    messages: list[dict[str, str]] = []
+    for h in history:
+        if h.role == "user":
+            messages.append({"role": "user", "content": h.content})
+        elif h.role == "router":
+            # Router rows carry the routing summary + structured
+            # routed_agents JSON. The system note is what the bot
+            # sees so it knows the channel context + why it was
+            # picked (the routed_agents JSON is operator-facing,
+            # not bot-facing).
+            messages.append({
+                "role": "system",
+                "content": f"Polaris routing note: {h.content}",
+            })
+
+    # Prepend the agent's configured system prompt if any.
+    agent_row = session.get(Agent, (workspace_id, agent_name))
+    if (
+        agent_row is not None
+        and agent_row.system_prompt
+        and not (messages and messages[0].get("role") == "system")
+    ):
+        messages = [
+            {"role": "system", "content": agent_row.system_prompt},
+            *messages,
+        ]
+
+    session.flush()
+    return {
+        "turn": {
+            "message_id": msg.id,
+            "conversation_id": msg.conversation_id,
+            "messages": messages,
+        }
+    }
+
+
+@app.post("/team-messages/{message_id}/chunk")
+def append_team_message_chunk(
+    message_id: str,
+    body: ThreadMessageChunkIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Append streaming output to an in-progress assistant team
+    message. Reuses ThreadMessageChunkIn (delta:str) since the
+    payload is identical."""
+    msg = session.get(TeamMessage, message_id)
+    if msg is None:
+        raise HTTPException(status_code=404, detail="message not found")
+    conv = session.get(TeamConversation, msg.conversation_id)
+    if conv is None or conv.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="message not found")
+    if msg.status not in ("pending", "in_progress"):
+        raise HTTPException(
+            status_code=400, detail=f"message already {msg.status}"
+        )
+    if msg.status == "pending":
+        msg.status = "in_progress"
+    msg.content = (msg.content or "") + body.delta
+    conv.updated_at = utcnow()
+    session.flush()
+    return _serialize_team_message(msg)
+
+
+@app.post("/team-messages/{message_id}/complete")
+def complete_team_message(
+    message_id: str,
+    body: ThreadMessageCompleteIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    msg = session.get(TeamMessage, message_id)
+    if msg is None:
+        raise HTTPException(status_code=404, detail="message not found")
+    conv = session.get(TeamConversation, msg.conversation_id)
+    if conv is None or conv.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="message not found")
+    if msg.status not in ("pending", "in_progress"):
+        raise HTTPException(
+            status_code=400, detail=f"message already {msg.status}",
+        )
+    now = utcnow()
+    if body.error:
+        msg.status = "error"
+        msg.error = body.error
+    else:
+        msg.status = "completed"
+        if body.content is not None:
+            msg.content = body.content
+    msg.completed_at = now
+    conv.updated_at = now
+    session.flush()
+    return _serialize_team_message(msg)
+
+
 @app.get("/agents/{agent_name}/cost")
 def get_agent_cost(
     agent_name: str,
