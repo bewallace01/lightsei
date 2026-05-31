@@ -78,7 +78,12 @@ def resolve_workspace_by_public_id(
 # ---------- Origin enforcement ---------- #
 
 
-def check_widget_origin(workspace: Workspace, origin: Optional[str]) -> None:
+def check_widget_origin(
+    workspace: Workspace,
+    origin: Optional[str],
+    *,
+    is_authenticated_end_user: bool = False,
+) -> None:
     """Raise 403 if `origin` is not in the workspace's allowlist.
 
     The end user's browser sends an `Origin` header on every
@@ -94,7 +99,18 @@ def check_widget_origin(workspace: Workspace, origin: Optional[str]) -> None:
     A missing Origin header is also refused. Same-origin form posts
     sometimes omit it, but the widget is always cross-origin (iframe
     on app.lightsei.com served into a customer's page).
+
+    Phase 31.x bypass: when `is_authenticated_end_user=True` (the
+    caller already resolved a valid end-user bearer token), skip
+    Origin enforcement entirely. The Origin allowlist exists to
+    defend the anonymous iframe path against CSRF/embedding-from-
+    untrusted-sites; a request carrying a bearer is by definition a
+    first-party API client (native iOS app, web /c page) where that
+    threat model doesn't apply. Bearer auth is itself anti-CSRF.
     """
+    if is_authenticated_end_user:
+        return
+
     if not origin:
         raise HTTPException(
             status_code=403,

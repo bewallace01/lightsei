@@ -8038,7 +8038,16 @@ def widget_post_message(
     from end_user_auth import resolve_end_user_optional
 
     workspace = _we.resolve_workspace_by_public_id(session, public_id)
-    _we.check_widget_origin(workspace, request.headers.get("origin"))
+    # Phase 31.x: resolve end-user BEFORE the Origin check so an
+    # authenticated bearer (native iOS app, web /c page) bypasses
+    # the iframe-anti-CSRF allowlist. The same eu_auth is reused
+    # for the linkage gate below.
+    eu_auth = resolve_end_user_optional(authorization, session)
+    _we.check_widget_origin(
+        workspace,
+        request.headers.get("origin"),
+        is_authenticated_end_user=eu_auth is not None,
+    )
 
     if not workspace.customer_facing_agent_name:
         # No bot wired up yet. Surface a 503 rather than enqueueing a
@@ -8063,7 +8072,7 @@ def widget_post_message(
     # per Phase 27 spec. (The GET endpoint below uses
     # can_read_workspace, which includes soft-revoked links so an
     # unsubscribed end user keeps read access to past conversations.)
-    eu_auth = resolve_end_user_optional(authorization, session)
+    # `eu_auth` was already resolved above for the Origin bypass.
     linked = (
         eu_auth is not None
         and eu_auth.can_write_workspace(workspace.id)
@@ -8191,14 +8200,20 @@ def widget_get_conversation(
     from end_user_auth import resolve_end_user_optional
 
     workspace = _we.resolve_workspace_by_public_id(session, public_id)
-    _we.check_widget_origin(workspace, request.headers.get("origin"))
+    # Phase 31.x: resolve end-user BEFORE the Origin check so an
+    # authenticated bearer bypasses the iframe-anti-CSRF allowlist.
+    eu_auth = resolve_end_user_optional(authorization, session)
+    _we.check_widget_origin(
+        workspace,
+        request.headers.get("origin"),
+        is_authenticated_end_user=eu_auth is not None,
+    )
 
     # Phase 25.4 + Phase 27.6: identity gate. The GET path uses the
     # read-gate (active OR soft-revoked link) so an unsubscribed end
     # user can still read past conversations per Phase 27 spec. The
     # POST path uses the write-gate (active link only) so they can't
     # send new messages.
-    eu_auth = resolve_end_user_optional(authorization, session)
     can_read = (
         eu_auth is not None
         and eu_auth.can_read_workspace(workspace.id)

@@ -26,8 +26,13 @@ import pytest
 from sqlalchemy import select, text
 
 from db import session_scope
+from end_user_auth import hash_token
+from datetime import timedelta
 from models import (
     Agent,
+    EndUser,
+    EndUserSession,
+    EndUserVendorLink,
     GenerationJob,
     Workspace,
     WidgetConversation,
@@ -470,3 +475,101 @@ def test_config_bot_null_when_agent_deleted(client):
     )
     assert r.status_code == 200
     assert r.json()["bot"] is None
+
+
+# ---------- Phase 31.x: authenticated-bearer bypass for Origin ---------- #
+#
+# The Origin allowlist exists to defend the anonymous iframe path
+# against CSRF and embedding-from-untrusted-sites. A request that
+# carries a valid end-user bearer token (native iOS app, web /c page)
+# is by definition a first-party API client where that threat model
+# doesn't apply — bearer auth is itself anti-CSRF. These tests pin
+# the bypass behavior so a future refactor can't silently re-tighten
+# the check and break the iOS chat surface.
+
+
+def _seed_end_user_with_link(workspace_id: str) -> str:
+    """Create an end-user + active workspace link + session.
+    Returns the bearer token string."""
+    token = f"eust_test_{uuid.uuid4().hex}"
+    euid = str(uuid.uuid4())
+    with session_scope() as s:
+        s.add(EndUser(
+            id=euid,
+            email=f"bypass-{euid[:8]}@example.com",
+        ))
+        s.flush()
+        s.add(EndUserSession(
+            id=str(uuid.uuid4()),
+            end_user_id=euid,
+            token_hash=hash_token(token),
+            created_at=_now(),
+            expires_at=_now() + timedelta(days=30),
+        ))
+        s.add(EndUserVendorLink(
+            end_user_id=euid, workspace_id=workspace_id,
+        ))
+    return token
+
+
+def test_post_message_bearer_bypasses_missing_origin(client):
+    """End-user bearer + NO Origin header → 200 (the iOS app case).
+    Anonymous + NO Origin → 403 (the existing test_post_message_403_
+    origin_missing case). The presence of the bearer is what flips
+    the gate."""
+    ws_id = _make_widget_workspace()
+    token = _seed_end_user_with_link(ws_id)
+    r = client.post(
+        "/widget/wid_test_42/messages",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"text": "hi from iOS app"},
+    )
+    assert r.status_code == 202, r.text
+
+
+def test_post_message_bearer_bypasses_disallowed_origin(client):
+    """End-user bearer + Origin not in allowlist → 200. Confirms the
+    bypass isn't just for missing-Origin; any first-party authed
+    request skips the check (iOS apps may send any Origin, none, or
+    a sentinel — they all should work)."""
+    ws_id = _make_widget_workspace()
+    token = _seed_end_user_with_link(ws_id)
+    r = client.post(
+        "/widget/wid_test_42/messages",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "origin": "https://attacker.example.org",
+        },
+        json={"text": "hi"},
+    )
+    assert r.status_code == 202, r.text
+
+
+def test_get_conversation_bearer_bypasses_missing_origin(client):
+    """GET poll endpoint: end-user bearer + NO Origin → 200 (or
+    404 since the conversation doesn't exist, but NOT 403). Anything
+    other than 403 confirms the Origin check was skipped."""
+    ws_id = _make_widget_workspace()
+    token = _seed_end_user_with_link(ws_id)
+    fake_conv_id = str(uuid.uuid4())
+    r = client.get(
+        f"/widget/wid_test_42/conversations/{fake_conv_id}",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    # Either 200 (if the polling logic returns an empty thread) or
+    # 404 (unknown conversation) is fine. 403 would mean Origin
+    # bypass failed.
+    assert r.status_code in (200, 404), r.text
+
+
+def test_post_message_anonymous_missing_origin_still_403(client):
+    """Regression: removing the bearer must still 403 on missing
+    Origin. The 25.4 tests still cover the anonymous-with-Origin
+    happy path; this pins the negative case."""
+    _make_widget_workspace()
+    r = client.post(
+        "/widget/wid_test_42/messages",
+        json={"text": "hi"},
+    )
+    assert r.status_code == 403
+    assert r.json()["detail"]["error"] == "widget_origin_missing"
