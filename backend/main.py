@@ -951,6 +951,7 @@ def post_policy_check(
 def get_runs(
     limit: int = 50,
     trigger_id: Optional[str] = None,
+    with_summary: bool = False,
     session: Session = Depends(get_session),
     workspace_id: str = Depends(get_workspace_id),
 ) -> dict[str, Any]:
@@ -962,6 +963,17 @@ def get_runs(
     badge without a follow-up fetch. The badge for runs whose
     trigger has since been deleted falls back to the snapshotted
     `trigger_kind` with no name.
+
+    Phase 30.4.a adds `with_summary=true`. The default response is
+    unchanged (id / agent_name / started_at / ended_at / trigger_*),
+    matching what the dashboard's web /runs page consumes via
+    fetchRuns() + a follow-up per-run events fetch summarized
+    client-side. With `with_summary=true`, the handler does ONE
+    batched events lookup for the returned run set and inlines the
+    summary fields (model / input_tokens / output_tokens /
+    latency_ms / event_count / denied / denial) computed server-side
+    using the same rules as dashboard/app/api.ts summarize(). This
+    spares the iOS app from an N+1 round-trip per Runs-list refresh.
     """
     limit = max(1, min(limit, 500))
     q = (
@@ -975,20 +987,81 @@ def get_runs(
         q = q.where(Run.triggered_by_trigger_id == trigger_id)
 
     rows = session.execute(q).all()
-    return {
-        "runs": [
-            {
-                "id": r.id,
-                "agent_name": r.agent_name,
-                "started_at": r.started_at.isoformat(),
-                "ended_at": r.ended_at.isoformat() if r.ended_at else None,
-                "triggered_by_trigger_id": r.triggered_by_trigger_id,
-                "trigger_kind": r.trigger_kind,
-                "trigger_name": trig_name,
+
+    # Pre-aggregate events when summaries are requested. Mirrors
+    # dashboard/app/api.ts summarize(): latest model wins; tokens +
+    # latency sum across llm_call_completed events; first policy_denied
+    # row wins for the denial payload; event_count is the total events
+    # per run (NOT filtered to the two interesting kinds, so the field
+    # matches the web's events.length semantics).
+    summaries: dict[str, dict[str, Any]] = {}
+    if with_summary and rows:
+        run_ids = [r.id for r, _ in rows]
+        for rid in run_ids:
+            summaries[rid] = {
+                "model": None,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "latency_ms": 0.0,
+                "event_count": 0,
+                "denial": None,
             }
-            for r, trig_name in rows
-        ]
-    }
+        ev_rows = session.execute(
+            select(Event)
+            .where(
+                Event.workspace_id == workspace_id,
+                Event.run_id.in_(run_ids),
+            )
+            .order_by(Event.run_id, Event.timestamp)
+        ).scalars().all()
+        for ev in ev_rows:
+            agg = summaries.get(ev.run_id)
+            if agg is None:
+                continue
+            agg["event_count"] += 1
+            if ev.kind == "llm_call_completed":
+                p = ev.payload or {}
+                if p.get("model"):
+                    agg["model"] = p["model"]
+                agg["input_tokens"] += int(p.get("input_tokens") or 0)
+                agg["output_tokens"] += int(p.get("output_tokens") or 0)
+                dur = p.get("duration_s")
+                if isinstance(dur, (int, float)):
+                    agg["latency_ms"] += float(dur) * 1000.0
+            elif ev.kind == "policy_denied" and agg["denial"] is None:
+                p = ev.payload or {}
+                agg["denial"] = {
+                    "policy": p.get("policy"),
+                    "reason": p.get("reason"),
+                    "cap_usd": p.get("cap_usd"),
+                    "cost_so_far_usd": p.get("cost_so_far_usd"),
+                    "action": p.get("action"),
+                }
+
+    out: list[dict[str, Any]] = []
+    for r, trig_name in rows:
+        row: dict[str, Any] = {
+            "id": r.id,
+            "agent_name": r.agent_name,
+            "started_at": r.started_at.isoformat(),
+            "ended_at": r.ended_at.isoformat() if r.ended_at else None,
+            "triggered_by_trigger_id": r.triggered_by_trigger_id,
+            "trigger_kind": r.trigger_kind,
+            "trigger_name": trig_name,
+        }
+        if with_summary:
+            agg = summaries.get(r.id, {})
+            row.update({
+                "model": agg.get("model"),
+                "input_tokens": agg.get("input_tokens", 0),
+                "output_tokens": agg.get("output_tokens", 0),
+                "latency_ms": int(round(agg.get("latency_ms", 0.0))),
+                "event_count": agg.get("event_count", 0),
+                "denied": agg.get("denial") is not None,
+                "denial": agg.get("denial"),
+            })
+        out.append(row)
+    return {"runs": out}
 
 
 @app.get("/runs/{run_id}/events")
