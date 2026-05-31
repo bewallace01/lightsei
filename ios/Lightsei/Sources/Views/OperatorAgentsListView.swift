@@ -42,6 +42,15 @@ struct OperatorAgentsListView: View {
         }
         .task { await load() }
         .refreshable { await load() }
+        // Phase 30.5.c: list + detail are a self-contained pair.
+        // 30.5.d mounts the list inside SlackShellView's
+        // NavigationStack and this destination travels with it.
+        .navigationDestination(for: AgentsNavValue.self) { value in
+            switch value {
+            case .agentDetail(let name):
+                OperatorAgentDetailView(agentName: name)
+            }
+        }
     }
 
     private var list: some View {
