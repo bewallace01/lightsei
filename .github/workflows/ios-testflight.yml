@@ -17,7 +17,14 @@ on:
 
 jobs:
   upload:
-    runs-on: macos-latest
+    # `macos-latest` currently resolves to macos-14 with Xcode 16.4 (iOS
+    # 18.5 SDK). Apple's TestFlight upload validation rejects anything
+    # built with an SDK older than iOS 26 (Xcode 26+). Pin macos-26 so
+    # we get Xcode 26 by default. If macos-26 is unavailable on this
+    # repo's runner pool, fall back to setting `runs-on: macos-latest`
+    # with an explicit `sudo xcode-select -s /Applications/Xcode_26.app`
+    # step before the build.
+    runs-on: macos-26
     timeout-minutes: 45
 
     env:
