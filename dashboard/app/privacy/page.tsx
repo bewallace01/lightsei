@@ -1,9 +1,11 @@
 // Public privacy policy. Linked from the App Store Connect listing
-// and from in-app surfaces that ask end users to share personal data.
+// and from in-app surfaces that ask operators or end users to share
+// personal data.
 //
 // Plain HTML, no auth. The App Store reviewer will visit this URL
-// while the operator dashboard chrome is irrelevant — this page is
-// meant for end users + reviewers, not the operator.
+// while the operator dashboard chrome is irrelevant. The page covers
+// both operator usage (the primary audience) and end-user usage
+// (the secondary, dual-identity surface).
 
 export const metadata = {
   title: "Privacy Policy — Lightsei",
@@ -19,55 +21,82 @@ export default function PrivacyPolicyPage() {
       <p className="mt-2 text-sm text-gray-500">Effective: 2026-06-01</p>
 
       <p className="mt-8 leading-relaxed">
-        Lightsei is a chat platform that connects end users with the
-        brands they choose to do business with. This policy explains
-        what we collect, why, and what you control.
+        Lightsei is a platform for building and running a team of AI
+        agents for your business. This policy explains what we collect
+        from operators and end users, how we use it, and what you
+        control.
       </p>
 
       <Section title="1. What we collect">
         <p>
-          When you sign in, we collect your email address. You may also
-          choose Sign in with Apple, in which case we receive only the
-          identifiers Apple shares.
+          <span className="font-medium">Account.</span> When you sign
+          up, we collect your email address. If you sign in with Apple
+          or Google, we receive only the identifiers those providers
+          share with us.
         </p>
         <p>
-          When you chat with a brand, we store the messages you send and
-          receive so the brand can serve you and you can see your
-          history.
+          <span className="font-medium">Workspace data.</span> Agent
+          configurations you create, project READMEs you upload, trust
+          zone settings, capability allow-lists, secrets you store, and
+          run logs (including agent inputs, outputs, and traces).
         </p>
         <p>
-          When you allow notifications, we store a device push token
-          so we can deliver notifications to your device.
+          <span className="font-medium">Integration tokens.</span> When
+          you connect a third-party service (Slack, Google Workspace,
+          and similar), we store the OAuth tokens needed to call that
+          service on your behalf.
         </p>
         <p>
-          We do not collect contacts, location, photos, microphone, or
-          browsing history.
+          <span className="font-medium">Customer messages.</span> When
+          your agents handle a chat from one of your customers, we
+          store the message content so your agents can respond and you
+          can review what happened.
+        </p>
+        <p>
+          <span className="font-medium">End-user data.</span> If you
+          use Lightsei as the customer of a business that runs Lightsei
+          (signed in with a magic link from your phone), we store your
+          email address, your push token if you allow notifications,
+          and the chats you have with each business you connect to.
+        </p>
+        <p>
+          <span className="font-medium">Device telemetry.</span> Basic
+          request metadata (timestamps, user agent, IP at request time)
+          for security and debugging. We do not collect contacts,
+          location, photos, microphone, or browsing history.
         </p>
       </Section>
 
       <Section title="2. How we use it">
         <p>
-          We use your email to sign you in and to send notifications
-          you have opted into.
+          We use your account data to sign you in, deliver the
+          notifications you have opted into, and bill you for paid
+          plans.
         </p>
         <p>
-          We use chat content to deliver messages between you and the
-          brand you are chatting with. Each brand only sees the chats
-          they have with you.
+          We use your workspace data to run your agents, surface their
+          activity on your dashboard, and enforce the trust zones and
+          capability rules you have configured.
+        </p>
+        <p>
+          We use integration tokens only to make the API calls your
+          agents trigger. We never read connected accounts for any
+          other purpose.
         </p>
       </Section>
 
-      <Section title="3. Trust zones: who sees what">
+      <Section title="3. Trust zones: what each agent can see">
         <p>
-          Every brand on Lightsei has a labeled trust zone shown at the
-          top of every chat. The trust zone determines what kinds of
-          information the brand can see. We enforce this technically:
-          a brand cannot access information outside their zone, even
-          if it appears in a message.
+          Every agent in your workspace runs inside a labeled trust
+          zone. The trust zone is enforced technically: an agent
+          cannot read or write information outside its zone, even if
+          it appears in a message or a connected service. This is the
+          core safety property of Lightsei.
         </p>
         <p>
-          We do not sell your data. We do not share your data with
-          brands beyond the chats you have with them.
+          We do not sell your data. We do not share workspace data
+          across workspaces. End-user chats with a particular business
+          are visible only to that business.
         </p>
       </Section>
 
@@ -77,18 +106,24 @@ export default function PrivacyPolicyPage() {
           process data on our behalf under their own privacy policies.
         </p>
         <ul className="ml-5 list-disc">
-          <li>Apple Push Notification service, to deliver notifications.</li>
-          <li>Resend, to send sign-in emails.</li>
+          <li>Anthropic and OpenAI, for the language model calls that power your agents.</li>
+          <li>Apple Push Notification service, to deliver push notifications.</li>
+          <li>Resend, to send sign-in and notification emails.</li>
+          <li>Stripe, to process payments on paid plans.</li>
           <li>Railway and Cloudflare, to host the service.</li>
         </ul>
       </Section>
 
       <Section title="5. Data retention">
         <p>
-          Your chats remain available until you remove a brand from
-          your account (Settings on a brand chat, then Unsubscribe).
-          Removing a brand soft-deletes the chat so it is no longer
-          accessible to the brand or to you.
+          Workspace data, including run logs, persists until you
+          delete the agent, workspace, or account that owns it.
+        </p>
+        <p>
+          End-user chats remain until you remove a business from your
+          account (Settings on a business chat, then Unsubscribe). The
+          chat soft-deletes so it is no longer accessible to the
+          business or to you.
         </p>
         <p>
           You may request full deletion of your account and all
@@ -115,7 +150,7 @@ export default function PrivacyPolicyPage() {
           </li>
           <li>
             Notifications: turn off push notifications in your device
-            Settings, or per brand in the app.
+            Settings, or per surface in the app.
           </li>
         </ul>
       </Section>
