@@ -1,0 +1,102 @@
+name: ios-testflight
+
+# Builds the iOS app + uploads to TestFlight on every push of a tag
+# matching `ios-v*` (e.g. `ios-v0.1.0`). Also runnable manually via
+# workflow_dispatch.
+#
+# Uses the same `xcodebuild archive` + `-exportArchive` recipe proven
+# locally in Phase 31.3.c. Cloud Managed Apple Distribution signing
+# means no .p12 in CI; just the App Store Connect API key (.p8) for
+# the upload step.
+
+on:
+  push:
+    tags:
+      - 'ios-v*'
+  workflow_dispatch:
+
+jobs:
+  upload:
+    runs-on: macos-latest
+    timeout-minutes: 45
+
+    env:
+      XCODE_PROJECT: ios/Lightsei/Lightsei.xcodeproj
+      XCODE_SCHEME: Lightsei
+      XCODE_CONFIGURATION: Release
+      ARCHIVE_PATH: ${{ github.workspace }}/build/Lightsei.xcarchive
+      EXPORT_PATH: ${{ github.workspace }}/build/export
+      TEAM_ID: 25ZQDZQ92C
+      KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+      ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Decode App Store Connect API key
+        env:
+          KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY_BASE64 }}
+        run: |
+          mkdir -p ~/.appstoreconnect/private_keys
+          echo "$KEY_BASE64" | base64 --decode > ~/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8
+          chmod 600 ~/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8
+
+      - name: Bump build number to GITHUB_RUN_NUMBER
+        working-directory: ios/Lightsei
+        # TestFlight rejects duplicate build numbers for the same
+        # marketing version, so each CI run needs a monotonic value.
+        # GITHUB_RUN_NUMBER increments per workflow run and is unique
+        # within the repo's lifetime.
+        run: xcrun agvtool new-version -all "${GITHUB_RUN_NUMBER}"
+
+      - name: Archive
+        run: |
+          xcodebuild -project "$XCODE_PROJECT" \
+            -scheme "$XCODE_SCHEME" \
+            -configuration "$XCODE_CONFIGURATION" \
+            -destination "generic/platform=iOS" \
+            -archivePath "$ARCHIVE_PATH" \
+            -allowProvisioningUpdates \
+            archive
+
+      - name: Export + upload to TestFlight
+        run: |
+          cat > /tmp/export-options.plist <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store-connect</string>
+            <key>teamID</key>
+            <string>${TEAM_ID}</string>
+            <key>signingStyle</key>
+            <string>automatic</string>
+            <key>destination</key>
+            <string>upload</string>
+            <key>stripSwiftSymbols</key>
+            <true/>
+            <key>uploadSymbols</key>
+            <true/>
+            <key>authenticationKeyPath</key>
+            <string>${HOME}/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8</string>
+            <key>authenticationKeyID</key>
+            <string>${KEY_ID}</string>
+            <key>authenticationKeyIssuerID</key>
+            <string>${ISSUER_ID}</string>
+          </dict>
+          </plist>
+          EOF
+
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportPath "$EXPORT_PATH" \
+            -exportOptionsPlist /tmp/export-options.plist \
+            -allowProvisioningUpdates
+
+      - name: Clean up API key
+        if: always()
+        run: rm -f ~/.appstoreconnect/private_keys/AuthKey_${KEY_ID}.p8
