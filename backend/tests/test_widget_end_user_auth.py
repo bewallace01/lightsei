@@ -310,6 +310,54 @@ def test_unlinked_end_user_falls_back_to_anonymous(client):
         assert conv.anon_user_id == "anon-fb"
 
 
+def test_unlinked_end_user_does_not_bypass_origin_on_post(client):
+    """A valid bearer from an unrelated end user is still anonymous
+    for this workspace, so it must not bypass the Origin allowlist."""
+    ws_id, public_id = _make_widget_workspace()
+    _, token = _make_end_user_with_session(link_to_workspace_ids=[])
+
+    r = client.post(
+        f"/widget/{public_id}/messages",
+        headers=_auth(token),
+        json={"text": "hi", "anon_user_id": "anon-fb"},
+    )
+    assert r.status_code == 403
+    assert r.json()["detail"]["error"] == "widget_origin_missing"
+
+    with session_scope() as s:
+        rows = s.execute(
+            select(WidgetConversation).where(
+                WidgetConversation.workspace_id == ws_id,
+            )
+        ).scalars().all()
+    assert rows == []
+
+
+def test_unlinked_end_user_does_not_bypass_origin_on_poll(client):
+    """The GET path uses the read-link gate for the same bypass.
+    An unrelated bearer cannot skip Origin and poll anonymous threads."""
+    ws_id, public_id = _make_widget_workspace()
+    _, token = _make_end_user_with_session(link_to_workspace_ids=[])
+    r_open = client.post(
+        f"/widget/{public_id}/messages",
+        headers=_origin(),
+        json={"text": "anon", "anon_user_id": "anon-fb"},
+    )
+    assert r_open.status_code == 202
+    conv_id = r_open.json()["conversation_id"]
+
+    r = client.get(
+        f"/widget/{public_id}/conversations/{conv_id}",
+        headers=_auth(token),
+    )
+    assert r.status_code == 403
+    assert r.json()["detail"]["error"] == "widget_origin_missing"
+
+    with session_scope() as s:
+        conv = s.get(WidgetConversation, conv_id)
+        assert conv.workspace_id == ws_id
+
+
 # ---------- Invalid bearer is strict ---------- #
 
 

@@ -19,6 +19,7 @@ Surfaces these failure modes the caller must handle:
 
   RouterError("ANTHROPIC_API_KEY missing for this workspace.")
   RouterError("failed to decrypt ANTHROPIC_API_KEY")
+  RouterError("router LLM call failed: ...")
   RouterError("router returned no tool_use block")
 """
 from __future__ import annotations
@@ -193,16 +194,19 @@ def route_team_message(
     except Exception:
         pass
 
-    resp = client.messages.create(
-        model=model,
-        max_tokens=2048,
-        system=build_system_prompt(agents),
-        messages=[
-            {"role": "user", "content": build_user_message(content)},
-        ],
-        tools=[ROUTE_TEAM_TOOL],
-        tool_choice={"type": "tool", "name": "route_team_message"},
-    )
+    try:
+        resp = client.messages.create(
+            model=model,
+            max_tokens=2048,
+            system=build_system_prompt(agents),
+            messages=[
+                {"role": "user", "content": build_user_message(content)},
+            ],
+            tools=[ROUTE_TEAM_TOOL],
+            tool_choice={"type": "tool", "name": "route_team_message"},
+        )
+    except Exception as exc:
+        raise RouterError(f"router LLM call failed: {exc}") from exc
 
     valid_names = {a["name"] for a in agents}
     for block in (getattr(resp, "content", None) or []):
