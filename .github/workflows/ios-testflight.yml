@@ -36,6 +36,17 @@ jobs:
       - name: Show Xcode version
         run: xcodebuild -version
 
+      - name: Install xcodegen
+        # The .xcodeproj is generated from ios/Lightsei/project.yml and
+        # not checked in (per .gitignore). Regenerate it from project.yml
+        # on every CI run so build settings stay in lockstep with the
+        # source-of-truth YAML.
+        run: brew install xcodegen
+
+      - name: Generate xcodeproj
+        working-directory: ios/Lightsei
+        run: xcodegen generate
+
       - name: Decode App Store Connect API key
         env:
           KEY_BASE64: ${{ secrets.APP_STORE_CONNECT_PRIVATE_KEY_BASE64 }}
