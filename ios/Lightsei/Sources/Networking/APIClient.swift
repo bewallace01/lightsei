@@ -129,7 +129,38 @@ private struct AnyEncodable: Encodable {
 extension JSONDecoder {
     static var lightsei: JSONDecoder {
         let d = JSONDecoder()
-        d.dateDecodingStrategy = .iso8601
+        d.dateDecodingStrategy = .custom(LightseiDateDecoding.decode)
         return d
+    }
+}
+
+private enum LightseiDateDecoding {
+    private static let fractionalFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    private static let standardFormatter: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
+    static func decode(from decoder: Decoder) throws -> Date {
+        let c = try decoder.singleValueContainer()
+        let value = try c.decode(String.self)
+
+        if let date = fractionalFormatter.date(from: value) {
+            return date
+        }
+        if let date = standardFormatter.date(from: value) {
+            return date
+        }
+
+        throw DecodingError.dataCorruptedError(
+            in: c,
+            debugDescription: "Invalid ISO 8601 date: \(value)",
+        )
     }
 }
