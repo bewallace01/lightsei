@@ -129,7 +129,9 @@ private struct AnyEncodable: Encodable {
 extension JSONDecoder {
     static var lightsei: JSONDecoder {
         let d = JSONDecoder()
-        d.dateDecodingStrategy = .custom(LightseiDateDecoding.decode)
+        d.dateDecodingStrategy = .custom { decoder in
+            try LightseiDateDecoding.decode(from: decoder)
+        }
         return d
     }
 }
