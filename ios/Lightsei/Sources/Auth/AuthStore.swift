@@ -163,6 +163,24 @@ final class AuthStore: ObservableObject {
         )
     }
 
+    // Phase 31.5.x: parity with `signIn(magicLinkToken:)` for end
+    // users. Consumes an operator magic-link token + stores the
+    // returned session in the operator keychain slot.
+    func signInOperator(magicLinkToken token: String) async throws {
+        let resp = try await api.consumeOperatorMagicLink(token: token)
+        try Keychain.write(
+            resp.session_token, account: Keychain.operatorAccount,
+        )
+        api.bearer = resp.session_token
+        state = .operatorUser(
+            OperatorIdentity(user: resp.user, workspace: resp.workspace),
+        )
+        UserDefaults.standard.set(
+            LastIdentity.operatorUser.rawValue,
+            forKey: Self.lastIdentityKey,
+        )
+    }
+
     // MARK: sign-out
 
     /// Sign out the currently active identity. Leaves the dormant

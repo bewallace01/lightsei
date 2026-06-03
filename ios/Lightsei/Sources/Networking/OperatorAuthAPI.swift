@@ -61,6 +61,14 @@ struct OperatorAuthMeResponse: Codable {
     let credential: String?
 }
 
+struct OperatorMagicLinkRequest: Encodable {
+    let email: String
+}
+
+struct OperatorMagicLinkConsumeRequest: Encodable {
+    let token: String
+}
+
 extension APIClient {
     func operatorLogin(
         email: String, password: String,
@@ -69,6 +77,31 @@ extension APIClient {
             "auth/login",
             method: "POST",
             body: OperatorLoginRequest(email: email, password: password),
+        )
+    }
+
+    // Phase 31.5.x: parity with the end-user magic-link flow. The
+    // backend's POST /auth/magic-link/{request,consume} endpoints
+    // shipped in Phase 17.2 but had no iOS surface until now.
+    func requestOperatorMagicLink(email: String) async throws {
+        struct EmptyResponse: Codable {}
+        _ = try await request(
+            "auth/magic-link/request",
+            method: "POST",
+            body: OperatorMagicLinkRequest(email: email),
+        ) as EmptyResponse
+    }
+
+    func consumeOperatorMagicLink(
+        token: String,
+    ) async throws -> OperatorLoginResponse {
+        // Backend returns user + workspace + session_token (+ extras
+        // like session_expires_at and is_new_user that we don't need
+        // and Swift's Codable ignores). Same struct as operatorLogin.
+        try await request(
+            "auth/magic-link/consume",
+            method: "POST",
+            body: OperatorMagicLinkConsumeRequest(token: token),
         )
     }
 

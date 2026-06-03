@@ -37,6 +37,13 @@ struct LightseiApp: App {
                 // in some places (notably buttons + .tint shorthand)
                 // unless we explicitly inject our color.
                 .tint(Color("AccentColor"))
+                // Phase 31.5.x: Lightsei brand identity is a deep
+                // cosmos. Lock the iOS app to dark mode so every
+                // surface inherits the indigo/black palette + the
+                // accent pops as a bright star against a dark sky.
+                // (Light mode is parked as a future-toggle if any
+                // operator screams; the brand is dark-first.)
+                .preferredColorScheme(.dark)
                 .environmentObject(auth)
                 .task {
                     await auth.restore()

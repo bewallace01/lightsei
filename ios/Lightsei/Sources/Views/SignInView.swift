@@ -1,4 +1,4 @@
-// Phase 29.2a + 30.2: sign-in surface.
+// Phase 29.2a + 30.2 + 31.5.x: sign-in surface.
 //
 // Two identities, one screen. A segmented control flips between:
 //
@@ -6,8 +6,12 @@
 //               email, paste-link fallback). Hits the existing
 //               AuthStore.signIn(magicLinkToken:) / signInWithApple
 //               flows.
-//   Business  → operator email + password against POST /auth/login,
-//               flips AuthStore into .operatorUser on success.
+//   Business  → operator magic-link via email + paste-link fallback,
+//               hitting AuthStore.signInOperator(magicLinkToken:).
+//               The legacy email + password path remains on
+//               AuthStore.signInOperator(email:password:) for the
+//               dashboard at app.lightsei.com but is not exposed in
+//               the iOS UI as of 31.5.x.
 
 import SwiftUI
 import AuthenticationServices
@@ -34,32 +38,43 @@ struct SignInView: View {
     @State private var siwaError: String?
     @State private var siwaBusy: Bool = false
 
-    // Business state.
+    // Business state. Mirrors the customer-side magic-link flow:
+    // request a link, then either tap the link in email (deep-link
+    // path lives elsewhere) or paste the URL here as a fallback.
     @State private var bizEmail: String = ""
-    @State private var bizPassword: String = ""
-    @State private var bizSigningIn: Bool = false
-    @State private var bizError: String?
+    @State private var bizSending: Bool = false
+    @State private var bizSent: Bool = false
+    @State private var bizSendError: String?
+    @State private var bizPasted: String = ""
+    @State private var bizConsuming: Bool = false
+    @State private var bizPasteError: String?
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                header
-                modePicker
+        ZStack {
+            StarfieldBackground()
+                .ignoresSafeArea()
 
-                if mode == .customer {
-                    siwaSection
-                    divider
-                    requestSection
-                    divider
-                    pasteSection
-                } else {
-                    businessSection
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    header
+                    modePicker
+
+                    if mode == .customer {
+                        siwaSection
+                        divider
+                        requestSection
+                        divider
+                        pasteSection
+                    } else {
+                        bizRequestSection
+                        divider
+                        bizPasteSection
+                    }
                 }
+                .padding(24)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(24)
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Color(.systemBackground).ignoresSafeArea())
     }
 
     private var header: some View {
@@ -263,7 +278,7 @@ struct SignInView: View {
 
     // MARK: business lane
 
-    private var businessSection: some View {
+    private var bizRequestSection: some View {
         VStack(alignment: .leading, spacing: 12) {
             TextField("Work email", text: $bizEmail)
                 .textInputAutocapitalization(.never)
@@ -274,31 +289,28 @@ struct SignInView: View {
                     RoundedRectangle(cornerRadius: 8)
                         .strokeBorder(Color(.separator), lineWidth: 1),
                 )
-                .disabled(bizSigningIn)
+                .disabled(bizSending)
 
-            SecureField("Password", text: $bizPassword)
-                .padding(12)
-                .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(Color(.separator), lineWidth: 1),
-                )
-                .disabled(bizSigningIn)
-
-            if let bizError {
-                Text(bizError).font(.caption).foregroundStyle(.red)
+            if let bizSendError {
+                Text(bizSendError).font(.caption).foregroundStyle(.red)
+            }
+            if bizSent {
+                Text("Check your email for a sign-in link.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Button {
-                Task { await signInBusiness() }
+                Task { await requestBizLink() }
             } label: {
                 HStack(spacing: 8) {
-                    if bizSigningIn {
+                    if bizSending {
                         ProgressView()
                             .progressViewStyle(.circular)
                             .tint(.white)
                             .scaleEffect(0.8)
                     }
-                    Text(bizSigningIn ? "Signing in…" : "Sign in")
+                    Text(bizSending ? "Sending…" : "Send magic link")
                         .fontWeight(.medium)
                 }
                 .frame(maxWidth: .infinity)
@@ -306,9 +318,9 @@ struct SignInView: View {
                 .foregroundStyle(.white)
                 .background(Color.accentColor)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
-                .opacity(canSignInBiz ? 1 : 0.6)
+                .opacity(canSendBizLink ? 1 : 0.6)
             }
-            .disabled(!canSignInBiz)
+            .disabled(!canSendBizLink)
 
             Text("Don't have a workspace yet? Sign up at app.lightsei.com, then come back here.")
                 .font(.caption)
@@ -316,25 +328,81 @@ struct SignInView: View {
         }
     }
 
-    private var canSignInBiz: Bool {
-        !bizSigningIn
-            && !bizEmail.trimmingCharacters(
-                in: .whitespacesAndNewlines).isEmpty
-            && !bizPassword.isEmpty
+    private var canSendBizLink: Bool {
+        !bizSending && !bizEmail.trimmingCharacters(
+            in: .whitespacesAndNewlines).isEmpty
     }
 
-    private func signInBusiness() async {
+    private var bizPasteSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Already have a sign-in link? Paste it here.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            TextField("https://app.lightsei.com/auth/magic-link?token=…",
+                      text: $bizPasted, axis: .vertical)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .lineLimit(2...4)
+                .padding(12)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(Color(.separator), lineWidth: 1),
+                )
+                .disabled(bizConsuming)
+
+            if let bizPasteError {
+                Text(bizPasteError).font(.caption).foregroundStyle(.red)
+            }
+
+            Button {
+                Task { await consumeBizPasted() }
+            } label: {
+                HStack {
+                    if bizConsuming { ProgressView() }
+                    Text(bizConsuming ? "Signing in…" : "Sign in with pasted link")
+                        .fontWeight(.medium)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+                .background(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(Color(.separator), lineWidth: 1),
+                )
+            }
+            .disabled(bizConsuming || bizPasted.trimmingCharacters(
+                in: .whitespacesAndNewlines).isEmpty)
+        }
+    }
+
+    private func requestBizLink() async {
         let trimmed = bizEmail.trimmingCharacters(
             in: .whitespacesAndNewlines)
-        bizSigningIn = true
-        bizError = nil
-        defer { bizSigningIn = false }
+        guard !trimmed.isEmpty else { return }
+        bizSending = true
+        bizSendError = nil
+        defer { bizSending = false }
         do {
-            try await auth.signInOperator(
-                email: trimmed, password: bizPassword,
-            )
+            try await auth.client.requestOperatorMagicLink(email: trimmed)
+            bizSent = true
         } catch {
-            bizError = (error as? LocalizedError)?
+            bizSendError = (error as? LocalizedError)?
+                .errorDescription ?? "\(error)"
+        }
+    }
+
+    private func consumeBizPasted() async {
+        guard let token = MagicLink.extractToken(from: bizPasted) else {
+            bizPasteError = "Couldn't find a sign-in token in that. Paste the full link from your email."
+            return
+        }
+        bizConsuming = true
+        bizPasteError = nil
+        defer { bizConsuming = false }
+        do {
+            try await auth.signInOperator(magicLinkToken: token)
+        } catch {
+            bizPasteError = (error as? LocalizedError)?
                 .errorDescription ?? "\(error)"
         }
     }

@@ -76,10 +76,19 @@ struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
     private let railWidth: CGFloat = 64
 
     var body: some View {
-        HStack(spacing: 0) {
-            serverRail
-            Divider()
-            mainColumn
+        ZStack {
+            // Phase 31.5.x: every operator surface inherits the
+            // cosmos. The rail + main column draw their own
+            // translucent backgrounds on top, letting the starfield
+            // shine through at the edges.
+            StarfieldBackground()
+                .ignoresSafeArea()
+
+            HStack(spacing: 0) {
+                serverRail
+                Divider()
+                mainColumn
+            }
         }
         .task(id: reloadID) { await loadServers() }
     }
@@ -136,7 +145,9 @@ struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
         }
         .frame(width: railWidth)
         .frame(maxHeight: .infinity)
-        .background(Color(.secondarySystemBackground))
+        // Translucent black so the starfield reads through at the
+        // edges; the rail still feels distinct from the main pane.
+        .background(Color.black.opacity(0.35))
     }
 
     private func serverAvatar(_ server: ChatServer) -> some View {
