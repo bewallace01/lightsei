@@ -48,6 +48,13 @@ struct SignInView: View {
     @State private var bizPasted: String = ""
     @State private var bizConsuming: Bool = false
     @State private var bizPasteError: String?
+    // Hidden password fallback. Disclosed behind a small "Use password
+    // instead" link, kept so App Store reviewers + legacy operators
+    // can sign in without round-tripping a magic link to email.
+    @State private var bizShowPassword: Bool = false
+    @State private var bizPassword: String = ""
+    @State private var bizSigningInPassword: Bool = false
+    @State private var bizPasswordError: String?
 
     var body: some View {
         ZStack {
@@ -69,6 +76,7 @@ struct SignInView: View {
                         bizRequestSection
                         divider
                         bizPasteSection
+                        bizPasswordFallbackSection
                     }
                 }
                 .padding(24)
@@ -403,6 +411,100 @@ struct SignInView: View {
             try await auth.signInOperator(magicLinkToken: token)
         } catch {
             bizPasteError = (error as? LocalizedError)?
+                .errorDescription ?? "\(error)"
+        }
+    }
+
+    // MARK: legacy password fallback
+    //
+    // Hidden behind a small "Use password instead" disclosure so the
+    // default UX stays magic-link-only. Kept for: (a) App Store
+    // reviewers who can't easily process magic links, (b) legacy
+    // operators who set up their workspace before magic-link was
+    // exposed on iOS. Uses the bizEmail field shared with the magic-
+    // link request section so the operator doesn't retype.
+    private var bizPasswordFallbackSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if !bizShowPassword {
+                Button {
+                    bizShowPassword = true
+                } label: {
+                    Text("Use password instead")
+                        .font(.caption)
+                        .foregroundStyle(Color.accentColor)
+                }
+            } else {
+                Text("Sign in with your Lightsei password.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                SecureField("Password", text: $bizPassword)
+                    .padding(12)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8)
+                            .strokeBorder(Color(.separator), lineWidth: 1),
+                    )
+                    .disabled(bizSigningInPassword)
+
+                if let bizPasswordError {
+                    Text(bizPasswordError).font(.caption).foregroundStyle(.red)
+                }
+
+                Button {
+                    Task { await signInBusinessPassword() }
+                } label: {
+                    HStack(spacing: 8) {
+                        if bizSigningInPassword {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .tint(.white)
+                                .scaleEffect(0.8)
+                        }
+                        Text(bizSigningInPassword ? "Signing in…" : "Sign in")
+                            .fontWeight(.medium)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+                    .foregroundStyle(.white)
+                    .background(Color.accentColor)
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+                    .opacity(canSignInBizPassword ? 1 : 0.6)
+                }
+                .disabled(!canSignInBizPassword)
+
+                Button {
+                    bizShowPassword = false
+                    bizPassword = ""
+                    bizPasswordError = nil
+                } label: {
+                    Text("Use magic link instead")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+        .padding(.top, 8)
+    }
+
+    private var canSignInBizPassword: Bool {
+        !bizSigningInPassword
+            && !bizEmail.trimmingCharacters(
+                in: .whitespacesAndNewlines).isEmpty
+            && !bizPassword.isEmpty
+    }
+
+    private func signInBusinessPassword() async {
+        let trimmed = bizEmail.trimmingCharacters(
+            in: .whitespacesAndNewlines)
+        bizSigningInPassword = true
+        bizPasswordError = nil
+        defer { bizSigningInPassword = false }
+        do {
+            try await auth.signInOperator(
+                email: trimmed, password: bizPassword,
+            )
+        } catch {
+            bizPasswordError = (error as? LocalizedError)?
                 .errorDescription ?? "\(error)"
         }
     }
