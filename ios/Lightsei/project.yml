@@ -56,6 +56,11 @@ targets:
       path: Resources/Info.plist
       properties:
         CFBundleDisplayName: Lightsei
+        # Phase 31.5.f export compliance: the app's only encryption is
+        # OS-provided HTTPS/TLS (URLSession) + Keychain. No proprietary or
+        # bundled standard crypto, so it is exempt. false here stops App
+        # Store Connect prompting the encryption questionnaire each upload.
+        ITSAppUsesNonExemptEncryption: false
         CFBundleURLTypes:
           - CFBundleTypeRole: Editor
             CFBundleURLName: com.lightsei.app
