@@ -214,7 +214,7 @@ The dangerous + powerful slice. Lightsei proposes a config change ("switch atlas
 - Click apply (12D.3) or apply manually (12D.1 + dashboard pin).
 - One week later, the next 12D.2 tick reports actual savings vs projected and any quality regressions.
 
-## Phase 13: more agents ⬅ NOW (started 2026-06-07, while iOS v1.0.0 is in App Store review at 31.6.d)
+## Phase 13: more agents (13.1-13.4 shipped 2026-06-07; 13.5 deploy-demo deferred)
 
 Expand the constellation with four new specialized executor bots, each dropping in via the Phase 11 dispatch primitives alongside atlas (test runner) + hermes (notifier). Approach decided 2026-06-07: hand-write each bot following the proven `agents/atlas/bot.py` pattern (pure-function core + `tick()` DI seam + `main()` loop + mirrored `backend/tests/test_<name>.py`) rather than running the 12B generator first. This is the "curate + harden" the original note called for, just authored directly against the known-good pattern so each ships tested. Same contract every bot uses: `claim_command(agent_name)` → pure-function work → `emit(<name>.<event>)` → optional `send_command("hermes", "hermes.post", {channel, text, severity}, source_agent=<name>)` → `complete_command(id, result=...)`.
 
@@ -276,6 +276,19 @@ Sampler: determinism on fixed seed, per-agent coverage, doesn't pick the same ru
 - Click into a bot with a bad eval, see the judge's reasons.
 - Look at the next `polaris.cost_analysis` event (12D.2) — it now folds quality regressions into the waste callouts ("agent X quality dropped after recent change; consider revert").
 - 12D.3 is now unblocked: an applied recommendation can be quality-watched against the judge signal.
+
+## Phase 15: behavioral rules (guardrail layer 4) ⬅ NOW (started 2026-06-07)
+
+Layer 4 of MEMORY.md's five guardrails: streaming detection of bad *patterns across a run*, as opposed to layer 2's per-action gate and layer 3's per-output validation. Replaces Phase 11's heuristic dispatch-depth + per-day caps with proper detection. Three detectors to start: a run looping (the same action repeated past a threshold), runaway token spend within a single run, and escalating-permission patterns (a run climbing from low-sensitivity to high-sensitivity actions in multiple steps). Built the same disciplined way as Phase 13/14: a pure module first (settle the shape, fully tested), then storage + wiring + surface.
+
+- **15.1 Pure detector module.** ✅ NEXT — `backend/behavioral_rules.py`: `BehavioralViolation` dataclass + three pure detectors over a run's event list (`detect_loop`, `detect_runaway_tokens`, `detect_escalating_permissions`) + `evaluate_behavior(events, *, config)` returning the violations. No DB, no wiring (same pattern as `eval_sampler.py` / `validation_pipeline.evaluate_validators`). Mirrored tests.
+- **15.2 Storage.** `run_behavioral_violations` table + SQLAlchemy model + alembic migration: `{id, run_id, workspace_id, agent_name, rule, severity, reason, details(jsonb), created_at}`.
+- **15.3 Evaluation hook.** Evaluate a run's recent events after ingest. Decision to settle in 15.1/15.3: per-event on the `/events` hot path (cheap sliding window) vs a background pass keyed off run activity (like `eval_runner`). Default lean: cheap windowed pass in `POST /events` guarded by a recent-events cap, recording violations; halting stays advisory in v1 (record + surface, don't kill the run yet).
+- **15.4 Endpoints + dashboard surface.** `GET /workspaces/me/runs/{id}/behavior` + a "behavior" chip on the run/agent views (amber on warn, red on block) with the violation reasons.
+- **15.5 Tests.** Detector unit tests (15.1), storage/migration, hook state-machine, endpoint authz + shape.
+- **15.6 Demo.** Drive a bot into a loop + a runaway-token run; see the behavior chips light up with reasons.
+
+Background: iOS v1.0.0 (build 10) still in App Store review (31.6.d); Phase 13.5 (deploy the four new bots + live constellation demo) deferred pending an operational worker deploy.
 
 ## Phase 16: Trust zones as a first-class concept (now P0)
 
