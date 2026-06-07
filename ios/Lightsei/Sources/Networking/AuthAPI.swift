@@ -63,6 +63,13 @@ extension APIClient {
     func fetchEndUserMe() async throws -> EndUserMeResponse {
         try await request("me/end-user")
     }
+
+    // Phase 31.5.g: in-app account deletion (Apple 5.1.1(v)). Hard
+    // delete; the backend cascades sessions, vendor links, push, apns.
+    func deleteEndUserAccount() async throws {
+        struct EmptyResponse: Codable {}
+        _ = try await request("me/end-user", method: "DELETE") as EmptyResponse
+    }
 }
 
 struct EndUserMeResponse: Codable {
