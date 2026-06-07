@@ -3,7 +3,60 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Event, Run, UnauthorizedError, fetchRunEvents, handleAuthError } from "../../api";
+import {
+  Event,
+  Run,
+  RunBehavior,
+  UnauthorizedError,
+  fetchRunBehavior,
+  fetchRunEvents,
+  handleAuthError,
+} from "../../api";
+
+// Phase 15.4: behavior chip + panel for a run's layer-4 violations.
+function BehaviorPanel({ behavior }: { behavior: RunBehavior }) {
+  if (behavior.worst_severity === "none" || behavior.violations.length === 0) {
+    return null;
+  }
+  const isBlock = behavior.worst_severity === "block";
+  return (
+    <div
+      className={`mb-8 p-4 border rounded-lg ${
+        isBlock ? "border-red-200 bg-red-50" : "border-amber-200 bg-amber-50"
+      }`}
+    >
+      <div className="flex items-center gap-2 mb-2.5">
+        <span
+          className={`px-2 py-0.5 rounded-full text-[11px] font-semibold uppercase tracking-wide ${
+            isBlock
+              ? "bg-red-200 text-red-900"
+              : "bg-amber-200 text-amber-900"
+          }`}
+        >
+          {isBlock ? "behavior · blocked pattern" : "behavior · warning"}
+        </span>
+        <span className="text-xs text-gray-500">
+          {behavior.violations.length} rule
+          {behavior.violations.length !== 1 ? "s" : ""} tripped
+        </span>
+      </div>
+      <ul className="space-y-1.5">
+        {behavior.violations.map((v) => (
+          <li key={v.rule} className="text-sm">
+            <span
+              className={`font-mono text-xs ${
+                v.severity === "block" ? "text-red-700" : "text-amber-700"
+              }`}
+            >
+              {v.rule}
+            </span>
+            <span className="text-gray-700"> — {v.reason}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
 
 function fmtTime(iso: string): string {
   try {
@@ -91,6 +144,7 @@ export default function RunDetail({ params }: { params: { id: string } }) {
   const router = useRouter();
   const [run, setRun] = useState<Run | null>(null);
   const [events, setEvents] = useState<Event[]>([]);
+  const [behavior, setBehavior] = useState<RunBehavior | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
@@ -103,6 +157,13 @@ export default function RunDetail({ params }: { params: { id: string } }) {
         setRun(data.run);
         setEvents(data.events);
         setError(null);
+        // Behavior is non-critical: a failure here must not blank the run.
+        try {
+          const b = await fetchRunBehavior(runId);
+          if (alive) setBehavior(b);
+        } catch {
+          /* ignore */
+        }
       } catch (e) {
         if (!alive) return;
         if (handleAuthError(e, router)) return;
@@ -156,6 +217,8 @@ export default function RunDetail({ params }: { params: { id: string } }) {
           )}
         </div>
       )}
+
+      {behavior && <BehaviorPanel behavior={behavior} />}
 
       {error && (
         <div className="mb-6 p-3 border border-red-200 bg-red-50 text-red-700 text-sm rounded-md">
