@@ -216,6 +216,32 @@ export async function fetchRunEvents(
   return (await r.json()) as { run: Run; events: Event[] };
 }
 
+// ---------- Phase 15.4: behavioral rules (guardrail layer 4) ---------- //
+
+export type BehavioralViolation = {
+  rule: string;
+  severity: "warn" | "block";
+  reason: string;
+  details: Record<string, unknown>;
+  created_at: string;
+};
+
+export type RunBehavior = {
+  run_id: string;
+  worst_severity: "none" | "warn" | "block";
+  violations: BehavioralViolation[];
+};
+
+export async function fetchRunBehavior(runId: string): Promise<RunBehavior> {
+  const r = await fetch(`${API_URL}/runs/${runId}/behavior`, {
+    cache: "no-store",
+    headers: authHeaders(),
+  });
+  if (r.status === 401) throw new UnauthorizedError();
+  if (!r.ok) throw new Error(`/runs/${runId}/behavior returned ${r.status}`);
+  return (await r.json()) as RunBehavior;
+}
+
 export function summarize(run: Run, events: Event[]): RunSummary {
   let model: string | undefined;
   let input_tokens = 0;
