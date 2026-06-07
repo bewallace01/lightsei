@@ -200,5 +200,28 @@ final class AuthStore: ObservableObject {
         UserDefaults.standard.removeObject(forKey: Self.lastIdentityKey)
     }
 
+    // MARK: account deletion
+
+    /// Delete the currently active identity's account on the backend,
+    /// then clear local credentials (Apple guideline 5.1.1(v)). Throws
+    /// if the network call fails, so the caller can keep the user
+    /// signed in and surface the error instead of silently wiping
+    /// local state while the account still exists server-side.
+    func deleteAccount() async throws {
+        switch state {
+        case .endUser:
+            try await api.deleteEndUserAccount()
+            Keychain.clear(account: Keychain.endUserAccount)
+        case .operatorUser:
+            try await api.deleteOperatorAccount()
+            Keychain.clear(account: Keychain.operatorAccount)
+        default:
+            return
+        }
+        api.bearer = nil
+        state = .signedOut
+        UserDefaults.standard.removeObject(forKey: Self.lastIdentityKey)
+    }
+
     var client: APIClient { api }
 }

@@ -126,4 +126,12 @@ extension APIClient {
     func fetchOperatorAuthMe() async throws -> OperatorAuthMeResponse {
         try await request("auth/me")
     }
+
+    // Phase 31.5.g: in-app account deletion (Apple 5.1.1(v)). Hard
+    // delete; the backend cascades the user's owned workspaces + all
+    // their data, plus sessions + memberships.
+    func deleteOperatorAccount() async throws {
+        struct EmptyResponse: Codable {}
+        _ = try await request("auth/account", method: "DELETE") as EmptyResponse
+    }
 }

@@ -4663,6 +4663,48 @@ def logout(
     return {"status": "ok"}
 
 
+@app.delete("/auth/account")
+def delete_my_account(
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 31.5.g: in-app account deletion for operators.
+
+    Apple guideline 5.1.1(v) requires any app that lets users create an
+    account to let them delete it from inside the app. Session-only: an
+    api key has no user identity to delete.
+
+    Capture the workspaces this user owns first (deleting the user
+    cascades away the workspace_members rows that record ownership),
+    delete the user (cascade removes their sessions + memberships and
+    nulls the audit pointers that reference them), then delete each
+    owned workspace (cascade removes its agents / runs / events /
+    deployments / remaining members). Hard delete, no grace period in
+    v1; the user re-signs-up to start over.
+    """
+    _require_session_user(auth)
+    user_id = auth.user.id
+
+    owned_ids = session.execute(
+        select(WorkspaceMember.workspace_id)
+        .where(WorkspaceMember.user_id == user_id)
+        .where(WorkspaceMember.role == "owner")
+    ).scalars().all()
+
+    user = session.get(User, user_id)
+    if user is not None:
+        session.delete(user)
+    session.flush()
+
+    for ws_id in owned_ids:
+        ws = session.get(Workspace, ws_id)
+        if ws is not None:
+            session.delete(ws)
+    session.flush()
+
+    return {"deleted": True}
+
+
 # ---------- Phase 17.2: magic-link auth ---------- #
 
 
@@ -5127,6 +5169,28 @@ def me_end_user(
         "push_vapid_public_key": _push.get_vapid_public_key(),
         "has_active_push_subscription": has_active_push,
     }
+
+
+@app.delete("/me/end-user")
+def delete_my_end_user_account(
+    auth: EndUserAuthResult = Depends(get_end_user),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 31.5.g: in-app account deletion for end users.
+
+    Apple guideline 5.1.1(v), same requirement as the operator path.
+    Deleting the EndUser row cascades their sessions, vendor links,
+    push subscriptions, and APNS tokens via the existing FKs. Widget
+    conversations keep their transcript with `end_user_id` set NULL
+    (the column is ON DELETE SET NULL) so the vendor's history /
+    analytics aren't punched full of holes; the row no longer points
+    back at a person. Hard delete, no grace period in v1.
+    """
+    end_user = session.get(EndUser, auth.end_user.id)
+    if end_user is not None:
+        session.delete(end_user)
+    session.flush()
+    return {"deleted": True}
 
 
 @app.get("/me/end-user/vendors/{slug}")

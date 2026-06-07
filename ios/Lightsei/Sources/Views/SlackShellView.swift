@@ -72,6 +72,10 @@ struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
     @State private var loading: Bool = true
     @State private var loadError: String?
     @State private var path: [ChatTarget] = []
+    // Phase 31.5.g: account deletion (Apple 5.1.1(v)).
+    @State private var showDeleteConfirm: Bool = false
+    @State private var deleting: Bool = false
+    @State private var deleteError: String?
 
     private let railWidth: CGFloat = 64
 
@@ -91,6 +95,43 @@ struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
             }
         }
         .task(id: reloadID) { await loadServers() }
+        .confirmationDialog(
+            "Delete account?",
+            isPresented: $showDeleteConfirm,
+            titleVisibility: .visible,
+        ) {
+            Button("Delete account", role: .destructive) {
+                Task { await deleteAccount() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This permanently deletes your account and all of its data. This can't be undone.")
+        }
+        .alert(
+            "Couldn't delete account",
+            isPresented: Binding(
+                get: { deleteError != nil },
+                set: { if !$0 { deleteError = nil } },
+            ),
+        ) {
+            Button("OK", role: .cancel) { deleteError = nil }
+        } message: {
+            Text(deleteError ?? "")
+        }
+    }
+
+    private func deleteAccount() async {
+        guard !deleting else { return }
+        deleting = true
+        defer { deleting = false }
+        do {
+            // On success AuthStore flips state to .signedOut, which
+            // ContentView observes and swaps back to the sign-in screen.
+            try await auth.deleteAccount()
+        } catch {
+            deleteError = (error as? LocalizedError)?.errorDescription
+                ?? error.localizedDescription
+        }
     }
 
     // MARK: server rail
@@ -135,6 +176,9 @@ struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
             Menu {
                 Text(accountLabel)
                 Button("Sign out", role: .destructive) { auth.signOut() }
+                Button("Delete account…", role: .destructive) {
+                    showDeleteConfirm = true
+                }
             } label: {
                 Image(systemName: "ellipsis.circle")
                     .font(.system(size: 22))
