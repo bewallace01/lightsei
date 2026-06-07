@@ -56,6 +56,11 @@ private let paneModeOrder: [(MainPaneMode, String)] = [
 
 struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
     @EnvironmentObject var auth: AuthStore
+    // Phase 31.6: on regular width (iPad) the panes were stretching
+    // edge-to-edge and drawing an opaque background over the starfield,
+    // so a short list looked lost in a flat-black void. Cap the content
+    // to a readable centered column and let the cosmos show through.
+    @Environment(\.horizontalSizeClass) private var hSize
     let source: Source
     let accountLabel: String
     let addServerAction: (() -> Void)?
@@ -269,6 +274,13 @@ struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
                         channelList
                     }
                 }
+                // iPad: keep content in a centered, readable column over
+                // the starfield instead of stretching edge to edge.
+                .frame(
+                    maxWidth: hSize == .regular ? 760 : .infinity,
+                    maxHeight: .infinity,
+                )
+                .frame(maxWidth: .infinity)
             }
             .navigationDestination(for: ChatTarget.self) { target in
                 switch target {
@@ -360,6 +372,9 @@ struct SlackShellView<Source: ChatDataSource & AnyObject>: View {
             }
         }
         .listStyle(.insetGrouped)
+        // Let the app's starfield show through the empty list area
+        // rather than an opaque flat-black background.
+        .scrollContentBackground(.hidden)
         .navigationTitle(server?.name ?? "")
         .navigationBarTitleDisplayMode(.inline)
     }
