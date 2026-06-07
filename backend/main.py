@@ -15,6 +15,7 @@ from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import desc, func, select, text
 from sqlalchemy.orm import Session
 
+import behavioral_rules
 import limits
 import policies
 import secrets_crypto
@@ -68,6 +69,7 @@ from models import (
     NotificationDelivery,
     OAuthPendingState,
     Run,
+    RunBehavioralViolation,
     SlackChannel,
     SlackEvent,
     SlackOAuthPendingState,
@@ -799,6 +801,62 @@ def _rate_limited_workspace_id(
     return auth.workspace_id
 
 
+def _record_run_behavior(
+    session: Session, workspace_id: str, run_id: str, agent_name: str
+) -> list[RunBehavioralViolation]:
+    """Phase 15.3: evaluate layer-4 behavioral rules over a finished run's
+    events and upsert any violations into run_behavioral_violations.
+
+    Called once at run-end (not per event) so it stays off the ingest hot
+    path. Upserts on the unique (run_id, rule) index so a re-fired
+    run-end event refreshes rather than duplicates. Advisory in v1: this
+    records + surfaces violations; it does not halt the run.
+    """
+    rows = session.execute(
+        select(Event)
+        .where(Event.run_id == run_id)
+        .order_by(Event.timestamp, Event.id)
+    ).scalars().all()
+    events = [
+        {"kind": e.kind, "agent_name": e.agent_name, "payload": e.payload}
+        for e in rows
+    ]
+    violations = behavioral_rules.evaluate_behavior(events)
+    if not violations:
+        return []
+    now = utcnow()
+    written: list[RunBehavioralViolation] = []
+    for v in violations:
+        existing = session.execute(
+            select(RunBehavioralViolation).where(
+                RunBehavioralViolation.run_id == run_id,
+                RunBehavioralViolation.rule == v.rule,
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            existing.severity = v.severity
+            existing.reason = v.reason
+            existing.details = v.details
+            existing.created_at = now
+            written.append(existing)
+        else:
+            row = RunBehavioralViolation(
+                id=str(uuid.uuid4()),
+                run_id=run_id,
+                workspace_id=workspace_id,
+                agent_name=agent_name,
+                rule=v.rule,
+                severity=v.severity,
+                reason=v.reason,
+                details=v.details,
+                created_at=now,
+            )
+            session.add(row)
+            written.append(row)
+    session.flush()
+    return written
+
+
 @app.post("/events")
 def post_event(
     event: EventIn,
@@ -926,6 +984,12 @@ def post_event(
             background_tasks.add_task(
                 notification_triggers.dispatch_and_persist, plan,
             )
+
+    # Phase 15.3: layer-4 behavioral rules. Evaluate the whole run once,
+    # at run-end, so the per-event ingest path stays cheap. Advisory in
+    # v1: record + surface, don't halt the run.
+    if event.kind in ("run_ended", "run_completed", "run_failed"):
+        _record_run_behavior(session, workspace_id, event.run_id, run.agent_name)
 
     return {"id": row.id, "status": "ok"}
 
@@ -1095,6 +1159,49 @@ def get_run_events(
                 "timestamp": e.timestamp.isoformat(),
             }
             for e in rows
+        ],
+    }
+
+
+@app.get("/runs/{run_id}/behavior")
+def get_run_behavior(
+    run_id: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 15.4: layer-4 behavioral-rule violations recorded for a run.
+
+    Returns the violations (loop / runaway_tokens / escalating_permissions)
+    plus a rollup the dashboard's behavior chip reads: worst severity in
+    {none, warn, block}."""
+    run = session.get(Run, run_id)
+    if run is None or run.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="run not found")
+    rows = session.execute(
+        select(RunBehavioralViolation)
+        .where(
+            RunBehavioralViolation.workspace_id == workspace_id,
+            RunBehavioralViolation.run_id == run_id,
+        )
+        .order_by(RunBehavioralViolation.created_at)
+    ).scalars().all()
+    worst = "none"
+    if any(r.severity == "block" for r in rows):
+        worst = "block"
+    elif rows:
+        worst = "warn"
+    return {
+        "run_id": run_id,
+        "worst_severity": worst,
+        "violations": [
+            {
+                "rule": r.rule,
+                "severity": r.severity,
+                "reason": r.reason,
+                "details": r.details or {},
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in rows
         ],
     }
 
