@@ -214,16 +214,17 @@ The dangerous + powerful slice. Lightsei proposes a config change ("switch atlas
 - Click apply (12D.3) or apply manually (12D.1 + dashboard pin).
 - One week later, the next 12D.2 tick reports actual savings vs projected and any quality regressions.
 
-## Phase 13: more agents (deferred)
+## Phase 13: more agents ⬅ NOW (started 2026-06-07, while iOS v1.0.0 is in App Store review at 31.6.d)
 
-Originally next, now deferred behind 12B + 12C since most of these can be generated rather than hand-written once those phases ship. Keeping the names + roles around because the constellation still wants seeded teammates for the home page to feel populated:
+Expand the constellation with four new specialized executor bots, each dropping in via the Phase 11 dispatch primitives alongside atlas (test runner) + hermes (notifier). Approach decided 2026-06-07: hand-write each bot following the proven `agents/atlas/bot.py` pattern (pure-function core + `tick()` DI seam + `main()` loop + mirrored `backend/tests/test_<name>.py`) rather than running the 12B generator first. This is the "curate + harden" the original note called for, just authored directly against the known-good pattern so each ships tested. Same contract every bot uses: `claim_command(agent_name)` → pure-function work → `emit(<name>.<event>)` → optional `send_command("hermes", "hermes.post", {channel, text, severity}, source_agent=<name>)` → `complete_command(id, result=...)`.
 
-- Argus (security + secret scanner)
-- Vega (PR reviewer)
-- Sirius (alert triager + on-call)
-- Cassiopeia (incident scribe)
+- **13.1 Argus — security + secret scanner.** `agents/argus/bot.py`. Claims `argus.scan` (payload: `text` or `files: [{path, content}]`, optional `commit`). Pure `scan_for_secrets(text) -> [findings]` with a curated regex set (AWS keys, generic API keys/tokens, private-key blocks, high-entropy assignments). Emits `argus.scan_complete` with findings; if any high-severity finding, dispatches a `hermes.post` security alert. Tests mirror `test_atlas.py`: the scanner's pattern matching in isolation + the tick happy/empty/unknown-kind/crash paths.
+- **13.2 Vega — PR reviewer.** Claims `vega.review` (a diff/patch). Heuristic review pass (oversized diff, missing tests, debug prints / leftover TODOs, risky patterns) producing structured comments; emits `vega.review_complete`; dispatches hermes summary. Pure `review_diff(patch) -> [comments]`.
+- **13.3 Sirius — alert triager / on-call.** Claims `sirius.triage` (an incoming alert). Classifies severity + dedupes against a recent window; dispatches hermes (or escalates) by severity. Pure `triage_alert(alert) -> {severity, action}`.
+- **13.4 Cassiopeia — incident scribe.** Claims `cassiopeia.record` (an incident event). Appends to a running incident timeline (emits `cassiopeia.timeline_entry`); composes a tidy running summary. Pure `format_entry(event) -> str`.
+- **13.5 Demo.** Deploy the four bots, wire one dispatch chain (e.g. push → argus.scan → on findings → hermes alert), watch the new stars + edges render on the constellation map.
 
-Each will be a 12B-generated bot we curate + harden rather than a hand-written one.
+Note: 31.6.d (iOS App Store review) continues in the background — this phase is the active work while waiting. If Apple sends a rejection, pause 13 and triage 31.6.d first.
 
 ## Phase 14: continuous evaluation (judge-LLM quality signal)
 
