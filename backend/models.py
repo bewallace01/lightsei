@@ -1285,6 +1285,85 @@ class GitHubAgentPath(Base):
     )
 
 
+class GithubConnection(Base):
+    """Phase 10B: workspace-level GitHub connection (the OAuth/PAT token).
+
+    Replaces the per-repo token that lived on `github_integrations`. One
+    connection per workspace holds the credential (an OAuth access token
+    or a pasted PAT); the repos a workspace watches live in `github_repos`
+    and reference this connection. Splitting the token from the repo is
+    what lets one workspace watch many repos with a single auth.
+    """
+
+    __tablename__ = "github_connections"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    encrypted_token: Mapped[str] = mapped_column(Text, nullable=False)
+    auth_kind: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pat"
+    )  # 'oauth' | 'pat'
+    # The GitHub login that authorized the OAuth grant; null for PAT.
+    github_login: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+
+class GithubRepo(Base):
+    """Phase 10B: one repo a workspace watches, under a GithubConnection.
+
+    N rows per workspace (the multi-repo upgrade from the single
+    `github_integrations` row). The webhook still routes by
+    (repo_owner, repo_name); the per-repo webhook secret verifies the
+    push signature, and the token comes from the parent connection.
+    """
+
+    __tablename__ = "github_repos"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    connection_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("github_connections.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    repo_owner: Mapped[str] = mapped_column(String(255), nullable=False)
+    repo_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    branch: Mapped[str] = mapped_column(String(255), nullable=False, default="main")
+    encrypted_webhook_secret: Mapped[str] = mapped_column(Text, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        # One row per (workspace, repo). The webhook looks repos up by
+        # (repo_owner, repo_name); this index also serves that probe.
+        Index(
+            "uq_github_repos_ws_owner_name",
+            "workspace_id", "repo_owner", "repo_name",
+            unique=True,
+        ),
+        Index("ix_github_repos_owner_name", "repo_owner", "repo_name"),
+    )
+
+
 class ModelPricing(Base):
     """Per-model token pricing. The `pricing.PRICING` literal is the source
     of truth; this table is a mirror that gets re-asserted on every
