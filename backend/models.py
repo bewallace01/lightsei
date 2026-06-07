@@ -1475,6 +1475,52 @@ class RunEvaluation(Base):
     )
 
 
+class RunBehavioralViolation(Base):
+    """Phase 15.2: a layer-4 behavioral-rule violation on a Run.
+
+    One row per (run_id, rule) violation detected by
+    `backend/behavioral_rules.py` across a run's event stream: a loop,
+    runaway token spend, or an escalating-permission pattern. Advisory in
+    v1 (recorded + surfaced on the run/agent views, the run is not
+    halted). The unique (run_id, rule) index means re-evaluating a run
+    updates rather than duplicates a given rule's violation.
+    """
+
+    __tablename__ = "run_behavioral_violations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String, ForeignKey("runs.id", ondelete="CASCADE"), nullable=False
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        String, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False
+    )
+    agent_name: Mapped[str] = mapped_column(String, nullable=False)
+    # 'loop' | 'runaway_tokens' | 'escalating_permissions'. Short string,
+    # not an enum, so a new rule is a code-only change.
+    rule: Mapped[str] = mapped_column(String(48), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)  # 'warn' | 'block'
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    details: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        Index(
+            "idx_behavioral_ws_agent_created",
+            "workspace_id", "agent_name", created_at.desc(),
+        ),
+        Index(
+            "idx_behavioral_run_rule",
+            "run_id", "rule",
+            unique=True,
+        ),
+    )
+
+
 # ---------- Phase 19.1: Slack chat surface schema ---------- #
 
 
