@@ -290,6 +290,18 @@ Layer 4 of MEMORY.md's five guardrails: streaming detection of bad *patterns acr
 
 Background: iOS v1.0.0 (build 10) still in App Store review (31.6.d); Phase 13.5 (deploy the four new bots + live constellation demo) deferred pending an operational worker deploy.
 
+## Phase 10B: GitHub OAuth + multi-repo ⬅ NOW (started 2026-06-07)
+
+Replace the Phase 10 GitHub PAT-paste with a proper OAuth web flow, and grow from one-repo-per-workspace to multiple repos with per-environment branch->agent mapping. Built on the codebase's existing OAuth pattern (`google_oauth.py` / `slack_oauth.py` + the `oauth_pending_states` table + the `/connectors/*/start|callback` endpoints). The existing `github_integrations` row (repo_owner/repo_name/branch/encrypted_pat/encrypted_webhook_secret) is the storage base; an OAuth access token slots into `encrypted_pat` since `github_api.py` treats it the same as a PAT.
+
+- **10B.1 OAuth module.** ⬅ NEXT — `backend/github_oauth.py` mirroring `google_oauth.py`: `build_authorization_url(state, redirect_uri, scopes)`, `exchange_code_for_token(code, redirect_uri) -> access_token`, `is_configured()`, `new_state()`, client id/secret from `LIGHTSEI_GITHUB_CLIENT_ID` / `LIGHTSEI_GITHUB_CLIENT_SECRET`. GitHub's classic web flow (state for CSRF, client_secret on exchange; no PKCE). Pure + tested (stub the token endpoint).
+- **10B.2 OAuth endpoints.** `GET /workspaces/me/github/oauth/start` (auth'd; mints state in `oauth_pending_states` bound to the workspace, returns the authorize URL) + `GET /github/oauth/callback` (verifies state, exchanges code, stores token in the `github_integrations` row, redirects to the dashboard). PAT `PUT /workspaces/me/github` stays as a fallback.
+- **10B.3 Multi-repo schema.** `github_repos` table (N repos per workspace) + migration; webhook routing keyed by repo. (Bigger schema change — natural pause/checkpoint before this.)
+- **10B.4 Per-env branch -> agent mapping.** A repo's `main` vs `staging` branch deploy to different agents.
+- **10B.5 Dashboard.** "Connect GitHub" OAuth button replacing the PAT form; repo list.
+- **10B.6 Tests.** OAuth module, endpoints (state/CSRF + callback), multi-repo, webhook routing.
+- **10B.7 Demo.** Connect via OAuth, add two repos, push to each, watch the right agents deploy.
+
 ## Phase 16: Trust zones as a first-class concept (now P0)
 
 Operationalizes the trust-zone work that landed as P0 in the 2026-05-17 strategic-direction decision. See MEMORY.md "Target customer shape" and "Competitive north star". The wedge against Viktor is having this shipped, with sensible presets, before non-technical users have to configure anything. Scope expanded 2026-05-17 to include the framework-level enforcement pieces (capability model, cross-zone dispatch block, handoff span) after a design pass on the canonical CRM-bot scenario showed that data tagging alone is not enough; the trust zones have to actually refuse forbidden operations, not just visualize them.
