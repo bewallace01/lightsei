@@ -35,6 +35,10 @@ struct OperatorChatView: View {
     @State private var sending: Bool = false
     @State private var sendError: String?
     @State private var pollTask: Task<Void, Never>?
+    // Phase 31.6: stop "thinking…" hanging forever when no deployed bot
+    // instance ever claims the message. After a bounded wait we surface a
+    // clear "not responding" state instead of an infinite spinner.
+    @State private var pollTimedOut: Bool = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -91,7 +95,22 @@ struct OperatorChatView: View {
         return HStack(alignment: .top, spacing: 0) {
             if isUser { Spacer(minLength: 40) }
             VStack(alignment: isUser ? .trailing : .leading, spacing: 2) {
-                if m.status == "pending" {
+                if m.status == "pending" && pollTimedOut {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("\(agentName) isn't responding. It may not be running right now.")
+                            .font(.system(size: 14))
+                            .foregroundStyle(.secondary)
+                        Button("Try again") {
+                            pollTimedOut = false
+                            startPollingIfPending()
+                        }
+                        .font(.caption.weight(.medium))
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color(.tertiarySystemBackground))
+                    .clipShape(RoundedRectangle(cornerRadius: 14))
+                } else if m.status == "pending" {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
                         Text("thinking…")
@@ -223,6 +242,7 @@ struct OperatorChatView: View {
             )
             messages.append(resp.user_message)
             messages.append(resp.pending_message)
+            pollTimedOut = false
             startPollingIfPending()
         } catch {
             sendError = (error as? LocalizedError)?
@@ -240,6 +260,11 @@ struct OperatorChatView: View {
         // Restart the loop so we don't stack overlapping pollers.
         pollTask?.cancel()
         pollTask = Task {
+            // Bounded: ~30s (15 polls * 2s). If nothing claims the
+            // pending message by then, surface a "not responding" state
+            // rather than spinning forever.
+            let maxAttempts = 15
+            var attempts = 0
             while !Task.isCancelled {
                 try? await Task.sleep(nanoseconds: 2_000_000_000)
                 if Task.isCancelled { break }
@@ -255,6 +280,11 @@ struct OperatorChatView: View {
                     messages = detail.messages
                 }
                 if !detail.messages.contains(where: { $0.status == "pending" }) {
+                    break
+                }
+                attempts += 1
+                if attempts >= maxAttempts {
+                    await MainActor.run { pollTimedOut = true }
                     break
                 }
             }
