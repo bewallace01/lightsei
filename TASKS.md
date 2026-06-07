@@ -214,7 +214,7 @@ The dangerous + powerful slice. Lightsei proposes a config change ("switch atlas
 - Click apply (12D.3) or apply manually (12D.1 + dashboard pin).
 - One week later, the next 12D.2 tick reports actual savings vs projected and any quality regressions.
 
-## Phase 13: more agents (13.1-13.4 shipped 2026-06-07; 13.5 deploy-demo deferred)
+## Phase 13: more agents ✅ COMPLETE (2026-06-07) — 4 bots (argus/vega/sirius/cassiopeia) shipped, deployed live on the worker, dispatch chain demoed
 
 Expand the constellation with four new specialized executor bots, each dropping in via the Phase 11 dispatch primitives alongside atlas (test runner) + hermes (notifier). Approach decided 2026-06-07: hand-write each bot following the proven `agents/atlas/bot.py` pattern (pure-function core + `tick()` DI seam + `main()` loop + mirrored `backend/tests/test_<name>.py`) rather than running the 12B generator first. This is the "curate + harden" the original note called for, just authored directly against the known-good pattern so each ships tested. Same contract every bot uses: `claim_command(agent_name)` → pure-function work → `emit(<name>.<event>)` → optional `send_command("hermes", "hermes.post", {channel, text, severity}, source_agent=<name>)` → `complete_command(id, result=...)`.
 
@@ -222,7 +222,7 @@ Expand the constellation with four new specialized executor bots, each dropping 
 - **13.2 Vega — PR reviewer.** ✅ done (2026-06-07, PR #41). `agents/vega/bot.py` + tests (13). `review_diff` parses a unified diff, flags eval/exec + swallowed exceptions + skipped tests (high), debug statements (medium), TODOs / source-without-tests / oversized diff (low); dispatches hermes verdict when there are comments.
 - **13.3 Sirius — alert triager / on-call.** ✅ done (2026-06-07, PR #42). `agents/sirius/bot.py` + tests (13). Classifies severity, dedups fingerprints in a window, maps high->page / medium->notify / low->log / duplicate->suppress; dispatches hermes for page/notify.
 - **13.4 Cassiopeia — incident scribe.** ✅ done (2026-06-07, PR #43). `agents/cassiopeia/bot.py` + tests (8). Appends events to a per-incident timeline, emits `cassiopeia.timeline_entry`, dispatches hermes only on open/close milestones.
-- **13.5 Demo.** ⬅ NOW — Deploy the four bots to the worker + register their agents in a workspace, wire one dispatch chain (e.g. push → argus.scan → on findings → hermes alert), watch the new stars + edges render on the constellation map. Needs operator: bot deployment to the `lightsei-worker` Railway service (4 bots' code + per-bot agent rows + LIGHTSEI_API_KEY) — the build/test side is all green, this is the operational deploy + live demo run.
+- **13.5 Demo.** ✅ done (2026-06-07). Deployed all 4 bots + hermes to the `lightsei-worker` Railway service (worker confirmed live: argus claimed queued->building->running in ~10s) into a fresh "Constellation Demo" workspace (`58c56519...`, kept separate from the under-App-Review `appreview` workspace; LIGHTSEI_API_KEY secret set so the worker injects it). Live chain verified: `argus.scan` with a planted AWS key -> argus scanned, masked the finding (`AKIA**************LE`), completed, and dispatched a `hermes.post` security alert ("🚨 argus: 1 hardcoded secret found ...") to hermes (pending, the correct human-in-the-loop default — no auto-approval rule). Deploy mechanism: zip bundle (bot.py + requirements.txt) -> `POST /workspaces/me/deployments` -> worker claims + venvs + runs.
 
 Note: 31.6.d (iOS App Store review) continues in the background — this phase is the active work while waiting. If Apple sends a rejection, pause 13 and triage 31.6.d first.
 
@@ -277,7 +277,7 @@ Sampler: determinism on fixed seed, per-agent coverage, doesn't pick the same ru
 - Look at the next `polaris.cost_analysis` event (12D.2) — it now folds quality regressions into the waste callouts ("agent X quality dropped after recent change; consider revert").
 - 12D.3 is now unblocked: an applied recommendation can be quality-watched against the judge signal.
 
-## Phase 15: behavioral rules (guardrail layer 4) ⬅ NOW (started 2026-06-07)
+## Phase 15: behavioral rules (guardrail layer 4) ✅ COMPLETE (2026-06-07) — detectors + storage + run-end hook + endpoint + dashboard chip, demoed live on prod
 
 Layer 4 of MEMORY.md's five guardrails: streaming detection of bad *patterns across a run*, as opposed to layer 2's per-action gate and layer 3's per-output validation. Replaces Phase 11's heuristic dispatch-depth + per-day caps with proper detection. Three detectors to start: a run looping (the same action repeated past a threshold), runaway token spend within a single run, and escalating-permission patterns (a run climbing from low-sensitivity to high-sensitivity actions in multiple steps). Built the same disciplined way as Phase 13/14: a pure module first (settle the shape, fully tested), then storage + wiring + surface.
 
@@ -286,7 +286,7 @@ Layer 4 of MEMORY.md's five guardrails: streaming detection of bad *patterns acr
 - **15.3 Evaluation hook.** ✅ done (2026-06-07, PR #46). Decision (operator, 2026-06-07): evaluate **on run-end** (not per-event, not background) — cheapest hot-path cost, and v1 is advisory (record + surface, no halt) so once-per-run catches everything. `_record_run_behavior` in `POST /events` fires on run_ended/run_completed/run_failed and upserts violations.
 - **15.4 Endpoints + dashboard surface.** ✅ done — backend `GET /runs/{id}/behavior` (PR #46) + dashboard behavior chip on the run detail view (PR #47): amber "behavior · warning" / red "behavior · blocked pattern" with each tripped rule + reason, polled alongside events, fetch-failure-tolerant. Verified tsc + next build clean. (An agent-level aggregate chip would need a new rollup endpoint; per-run surface is complete for what the backend provides.)
 - **15.5 Tests.** ✅ done (2026-06-07) — detector units (14), storage/migration (3), end-to-end hook via `/events` + endpoint authz (4); events/cost ingest regression green. 21 behavioral tests total.
-- **15.6 Demo.** Drive a bot into a loop + a runaway-token run; see the behavior chips light up with reasons. (Needs the dashboard chip from 15.4 + a deployed bot to loop — pairs with the deferred Phase 13.5 worker deploy.)
+- **15.6 Demo.** ✅ done (2026-06-07). Drove a looping + runaway-token run on prod (6 identical plans + 300k tokens + run_ended) in the Constellation Demo workspace; the run-end hook fired and `GET /runs/{id}/behavior` returned `worst_severity: block` with both violations (loop warn + runaway_tokens block) — exactly what the dashboard behavior chip renders.
 
 Background: iOS v1.0.0 (build 10) still in App Store review (31.6.d); Phase 13.5 (deploy the four new bots + live constellation demo) deferred pending an operational worker deploy.
 
