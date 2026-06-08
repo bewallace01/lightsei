@@ -63,6 +63,8 @@ from models import (
     GenerationJob,
     GitHubAgentPath,
     GitHubIntegration,
+    GithubConnection,
+    GithubRepo,
     NotificationChannel,
     ConnectorInstallation,
     ConnectorOAuthPendingState,
@@ -94,6 +96,7 @@ from models import (
     VendorInviteCode,
 )
 import github_api
+import github_oauth
 import notifications
 import validators
 from notifications import triggers as notification_triggers
@@ -537,6 +540,18 @@ class GitHubIntegrationSetIn(BaseModel):
     # PAT is plaintext on the wire and never echoed back; we encrypt
     # before storing.
     pat: str = Field(min_length=1, max_length=512)
+
+
+class GitHubRepoAddIn(BaseModel):
+    """POST /workspaces/me/github/repos body (Phase 10B.2).
+
+    Registers a repo under the workspace's existing GitHub connection
+    (the token comes from the connection, not the body). The server
+    generates the per-repo webhook secret and reveals it once.
+    """
+    repo_owner: str = Field(min_length=1, max_length=255)
+    repo_name: str = Field(min_length=1, max_length=255)
+    branch: str = Field(default="main", min_length=1, max_length=255)
 
 
 class GitHubAgentPathSetIn(BaseModel):
@@ -3965,6 +3980,270 @@ def _queue_github_redeploy(
     session.add(dep)
     session.flush()
     return dep.id
+
+
+# ---------- Phase 10B.2: GitHub OAuth connect + multi-repo ---------- #
+
+
+def _serialize_github_connection(c: GithubConnection) -> dict[str, Any]:
+    """Non-secret view of a connection. The token never leaves storage."""
+    return {
+        "id": c.id,
+        "auth_kind": c.auth_kind,
+        "github_login": c.github_login,
+        "created_at": c.created_at.isoformat(),
+        "updated_at": c.updated_at.isoformat(),
+    }
+
+
+def _serialize_github_repo(r: GithubRepo, *, webhook_secret: Optional[str] = None) -> dict[str, Any]:
+    out = {
+        "id": r.id,
+        "repo_owner": r.repo_owner,
+        "repo_name": r.repo_name,
+        "branch": r.branch,
+        "is_active": r.is_active,
+        "created_at": r.created_at.isoformat(),
+    }
+    if webhook_secret is not None:
+        out["webhook_secret"] = webhook_secret  # returned exactly once
+    return out
+
+
+@app.get("/workspaces/me/github/oauth/start")
+def github_oauth_start(
+    redirect_after: Optional[str] = None,
+    auth: AuthResult = Depends(get_authenticated),
+    session: Session = Depends(get_session),
+) -> dict[str, Any]:
+    """Phase 10B.2: begin the GitHub OAuth connect.
+
+    Mints a CSRF state bound to the workspace (reusing the connector
+    pending-state table with connector_type='github'; GitHub's web flow
+    has no PKCE so code_verifier is empty), and returns the authorize URL
+    the dashboard navigates the browser to.
+    """
+    if not github_oauth.is_configured():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "GitHub OAuth is not configured on this backend. Set "
+                "LIGHTSEI_GITHUB_CLIENT_ID + LIGHTSEI_GITHUB_CLIENT_SECRET."
+            ),
+        )
+    if auth.user is None:
+        raise HTTPException(
+            status_code=400,
+            detail="GitHub connect must be initiated by a logged-in user",
+        )
+    now = utcnow()
+    state = github_oauth.new_state()
+    session.add(ConnectorOAuthPendingState(
+        state=state,
+        workspace_id=auth.workspace_id,
+        installed_by_user_id=auth.user.id,
+        connector_type="github",
+        code_verifier="",  # GitHub web flow has no PKCE
+        redirect_after=redirect_after,
+        created_at=now,
+        expires_at=now + CONNECTOR_OAUTH_STATE_TTL,
+    ))
+    session.flush()
+    return {
+        "authorization_url": github_oauth.build_authorization_url(state=state),
+        "state": state,
+    }
+
+
+@app.get("/github/oauth/callback")
+def github_oauth_callback(
+    code: Optional[str] = None,
+    state: Optional[str] = None,
+    error: Optional[str] = None,
+    session: Session = Depends(get_session),
+) -> Response:
+    """Phase 10B.2: complete the GitHub OAuth connect.
+
+    Validates + single-uses the state, exchanges the code for a token,
+    upserts the workspace's `github_connections` row (one per workspace),
+    and redirects back to the dashboard. Repos are added separately via
+    POST /workspaces/me/github/repos.
+    """
+    dashboard_base = _dashboard_base_url()
+
+    def _html_error(title: str, message: str) -> Response:
+        body = (
+            "<!doctype html><html><head><meta charset='utf-8'>"
+            f"<title>{title} — Lightsei</title></head><body style='font-family:sans-serif;max-width:32rem;margin:4rem auto'>"
+            f"<h2>{title}</h2><p>{message}</p>"
+            f"<p><a href='{dashboard_base}/github'>Back to GitHub settings</a></p>"
+            "</body></html>"
+        )
+        return Response(content=body, media_type="text/html", status_code=400)
+
+    if error:
+        return _html_error("GitHub connect cancelled", f"GitHub returned: {error}. You can try again.")
+    if not code or not state:
+        return _html_error("Invalid connect link", "The callback was missing required parameters. Start the connect again.")
+
+    pending = session.get(ConnectorOAuthPendingState, state)
+    if pending is None or pending.connector_type != "github" or pending.expires_at < utcnow():
+        return _html_error("Connect link expired", "The link is no longer valid (expired or already used). Start a fresh connect.")
+
+    workspace_id = pending.workspace_id
+    redirect_after = pending.redirect_after
+    session.delete(pending)  # single-use
+    session.flush()
+
+    try:
+        token = github_oauth.exchange_code_for_token(code=code)
+    except github_oauth.GitHubOAuthError as exc:
+        return _html_error("Connect didn't complete", f"The token exchange with GitHub failed: {exc}. Try again.")
+
+    # Best-effort: label the connection with the GitHub login. A failure
+    # here doesn't block the connect (login stays null).
+    login: Optional[str] = None
+    try:
+        import httpx as _httpx
+        r = _httpx.get(
+            "https://api.github.com/user",
+            headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json"},
+            timeout=10.0,
+        )
+        if r.status_code < 400:
+            login = r.json().get("login")
+    except Exception:
+        pass
+
+    now = utcnow()
+    encrypted = secrets_crypto.encrypt(token)
+    existing = session.execute(
+        select(GithubConnection).where(GithubConnection.workspace_id == workspace_id)
+    ).scalar_one_or_none()
+    if existing is not None:
+        existing.encrypted_token = encrypted
+        existing.auth_kind = "oauth"
+        existing.github_login = login or existing.github_login
+        existing.updated_at = now
+    else:
+        session.add(GithubConnection(
+            id=str(uuid.uuid4()),
+            workspace_id=workspace_id,
+            encrypted_token=encrypted,
+            auth_kind="oauth",
+            github_login=login,
+            created_at=now,
+            updated_at=now,
+        ))
+    session.flush()
+
+    target = redirect_after or f"{dashboard_base}/github?connected=1"
+    return RedirectResponse(target, status_code=303)
+
+
+@app.get("/workspaces/me/github/connection")
+def get_github_connection(
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Connection state + the repos under it (no secrets)."""
+    conn = session.execute(
+        select(GithubConnection).where(GithubConnection.workspace_id == workspace_id)
+    ).scalar_one_or_none()
+    repos = session.execute(
+        select(GithubRepo).where(GithubRepo.workspace_id == workspace_id)
+        .order_by(GithubRepo.created_at)
+    ).scalars().all()
+    return {
+        "connection": _serialize_github_connection(conn) if conn else None,
+        "repos": [_serialize_github_repo(r) for r in repos],
+    }
+
+
+@app.post("/workspaces/me/github/repos")
+def add_github_repo(
+    body: GitHubRepoAddIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 10B.2: register a repo under the workspace's connection.
+
+    Validates the repo is reachable with the connection's token, generates
+    a fresh per-repo webhook secret (returned plaintext exactly once), and
+    inserts a github_repos row. Idempotent on (workspace, owner, name):
+    re-adding updates the branch + keeps the existing webhook secret.
+    """
+    if not GITHUB_OWNER_RE.match(body.repo_owner):
+        raise HTTPException(status_code=400, detail="repo_owner has an invalid GitHub username shape")
+    if not GITHUB_REPO_RE.match(body.repo_name):
+        raise HTTPException(status_code=400, detail="repo_name has an invalid GitHub repo shape")
+    if not GITHUB_BRANCH_RE.match(body.branch):
+        raise HTTPException(status_code=400, detail="branch has an invalid format")
+    if not secrets_crypto.is_available():
+        raise HTTPException(status_code=503, detail="secrets store unavailable: LIGHTSEI_SECRETS_KEY is not configured")
+
+    conn = session.execute(
+        select(GithubConnection).where(GithubConnection.workspace_id == workspace_id)
+    ).scalar_one_or_none()
+    if conn is None:
+        raise HTTPException(status_code=400, detail="connect GitHub first (no token on this workspace)")
+
+    token = secrets_crypto.decrypt(conn.encrypted_token)
+    try:
+        github_api.validate_pat(
+            repo_owner=body.repo_owner, repo_name=body.repo_name, pat=token,
+        )
+    except github_api.GitHubAPIError as exc:
+        if exc.kind == "transport":
+            raise HTTPException(status_code=502, detail=exc.message) from exc
+        raise HTTPException(status_code=400, detail=exc.message) from exc
+
+    now = utcnow()
+    existing = session.execute(
+        select(GithubRepo).where(
+            GithubRepo.workspace_id == workspace_id,
+            GithubRepo.repo_owner == body.repo_owner,
+            GithubRepo.repo_name == body.repo_name,
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        existing.branch = body.branch
+        existing.connection_id = conn.id
+        existing.is_active = True
+        existing.updated_at = now
+        session.flush()
+        return _serialize_github_repo(existing)
+
+    webhook_secret = _generate_webhook_secret()
+    row = GithubRepo(
+        id=str(uuid.uuid4()),
+        workspace_id=workspace_id,
+        connection_id=conn.id,
+        repo_owner=body.repo_owner,
+        repo_name=body.repo_name,
+        branch=body.branch,
+        encrypted_webhook_secret=secrets_crypto.encrypt(webhook_secret),
+        is_active=True,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(row)
+    session.flush()
+    return _serialize_github_repo(row, webhook_secret=webhook_secret)
+
+
+@app.delete("/workspaces/me/github/repos/{repo_id}")
+def remove_github_repo(
+    repo_id: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    row = session.get(GithubRepo, repo_id)
+    if row is None or row.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="repo not found")
+    session.delete(row)
+    session.flush()
+    return {"deleted": repo_id}
 
 
 @app.post("/webhooks/github")
