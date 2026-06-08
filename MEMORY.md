@@ -6,9 +6,35 @@ This file is the source of truth for the project. Read it at the start of every 
 
 ## What we're building
 
-A platform where non-technical users assemble and operate teams of AI coworkers. The dashboard (and eventually a chat client surface like Slack or Teams) is the product. The SDK, backend, observability, and guardrails are the engine room that makes the coworkers safe, reliable, and inspectable; most customers never see them directly.
+**Lightsei is an AI employee platform for small businesses — "Your AI Business Team."** A small business owner signs up, answers a few questions about their business, and immediately has a team of AI assistants working for them: an AI website assistant that talks to their customers, plus a behind-the-scenes operations team (inbox, marketing, website-monitoring, lead-management, reputation, business-intelligence). The dashboard + the chat-with-your-team surface are the product. The SDK, backend, bots/dispatch, observability, guardrails, trust zones, worker, and connectors are the engine room — most customers never see them. See "Product vision: Your AI Business Team (2026-06-07)" below for the full, current framing; it supersedes the earlier "configure-your-team AI coworkers" wording where they differ (the engine is the same; the customer-facing positioning is sharper).
 
-Think Viktor (viktor.com), but built around a configurable team of specialized bots instead of one generalist coworker, and with security and trust zones as defaults rather than later upgrades. See "Competitive north star" section below for the full positioning and "Target customer shape" for the buyer profile.
+(Older sections — "Competitive north star", "Target customer shape" — are the lineage of this direction, kept as historical record. The 2026-06-07 vision section is the authoritative product framing.)
+
+## Product vision: Your AI Business Team (2026-06-07)
+
+Defining product vision from the founder. **Read this first when deciding anything customer-facing.**
+
+**Goal:** make AI automation as simple as installing a website plugin. The buyer is a non-technical small business owner (and agencies serving them) who has no time to learn automation tools, workflows, APIs, or "agent frameworks." Sign up → answer a few questions about the business → immediately have a working AI team. It should feel like *hiring a digital operations team, not configuring software.*
+
+**Positioning (load-bearing):** Position Lightsei as **"Your AI Business Team."** Do **NOT** market it as "AI agents," "autonomous agents," "workflows," or "automation" — small business owners don't care about those and the words add friction. In every customer-facing surface (dashboard copy, marketing, onboarding), talk about a *team of AI assistants/employees* doing jobs, not "agents." (Internally/in code, "agent" and the constellation remain fine; it's the customer-facing language that changes.)
+
+**Two core products every business gets:**
+1. **AI Website Assistant** — an embeddable chatbot for any website. Answers customer questions, books appointments, captures + qualifies leads, gives business info, routes requests, learns from the business's website + uploaded docs, escalates to a human when needed. (Maps to the existing widget + operator-inbox work, Phase 21.)
+2. **AI Operations Team** — specialized assistants working behind the scenes. The customer-facing roster is **business-ops personas, not dev-tooling bots** (the current argus/vega/atlas dev bots become internal/demo examples, not the product):
+   - **Inbox** — monitors email, categorizes, drafts replies, flags urgent, makes tasks, summarizes.
+   - **Marketing** — ad copy, social content, campaign ideas, traffic/engagement monitoring, opportunity spotting.
+   - **Website** — uptime, broken pages/links, form + lead-capture monitoring, alerts.
+   - **Lead Management** — tracks new leads, auto follow-up, scores quality, suggests next actions, stops leads falling through cracks.
+   - **Reputation** — monitors reviews, alerts on negative feedback, drafts responses, tracks sentiment.
+   - **Business Intelligence** — weekly summaries, trends, opportunities/risks, answers business questions from company data.
+
+**User experience:** chat-first (plain English is the primary interaction — "How many leads came in this week?", "Create a Facebook ad for our summer promo", "Why has traffic dropped?", "Follow up with leads who haven't responded"). Proactive, not reactive — the team surfaces recommendations + notifications. The dashboard is **insights + actions, not technical configuration**. Owners never see AI-model settings, never build workflows, never need to understand the tech unless they want to.
+
+**Product philosophy:** an employee not a tool; proactive not reactive; simple not technical; automated but transparent; powerful enough for agencies, easy enough for a local business owner.
+
+**Design direction:** clean, modern, premium-but-approachable; Apple / Notion / Linear simplicity; AI-first interface with chat as the primary interaction.
+
+**How this reconciles with what's built:** the engine is already there (bots + dispatch + worker, the customer widget + operator inbox from Phase 21, connectors Gmail/Calendar/Drive from Phase 20, trust zones from Phase 16, guardrails, GitHub). The gaps to this vision are (a) the customer-facing **business-persona** roster (the 6 above) vs today's dev bots, (b) the **"AI Business Team" reframe** of dashboard copy/IA (drop "agent" language), (c) **business-shaped onboarding** ("tell us about your business → get your team" vs the dev README flow), and (d) the **chat-first, insights+actions** dashboard polish. These are the natural next phases.
 
 ## Why this exists
 
