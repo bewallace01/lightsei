@@ -1364,6 +1364,46 @@ class GithubRepo(Base):
     )
 
 
+class GithubRepoBranchTarget(Base):
+    """Phase 10B.4: per-environment branch -> agent routing.
+
+    Maps a repo's branch to the agent(s) that should deploy when that
+    branch is pushed (e.g. `main` -> `atlas`, `staging` -> `atlas-staging`).
+    Additive: a repo with no branch targets keeps the legacy behavior
+    (deploy by touched path on the single tracked `github_repos.branch`).
+    A repo with targets routes per-branch, deploying only the mapped
+    agents whose path the push touched.
+    """
+
+    __tablename__ = "github_repo_branch_targets"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    repo_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("github_repos.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    branch: Mapped[str] = mapped_column(String(255), nullable=False)
+    agent_name: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+
+    __table_args__ = (
+        Index(
+            "uq_github_branch_targets_repo_branch_agent",
+            "repo_id", "branch", "agent_name",
+            unique=True,
+        ),
+        Index("ix_github_branch_targets_repo_branch", "repo_id", "branch"),
+    )
+
+
 class ModelPricing(Base):
     """Per-model token pricing. The `pricing.PRICING` literal is the source
     of truth; this table is a mirror that gets re-asserted on every

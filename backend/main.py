@@ -66,6 +66,7 @@ from models import (
     GitHubIntegration,
     GithubConnection,
     GithubRepo,
+    GithubRepoBranchTarget,
     NotificationChannel,
     ConnectorInstallation,
     ConnectorOAuthPendingState,
@@ -553,6 +554,15 @@ class GitHubRepoAddIn(BaseModel):
     repo_owner: str = Field(min_length=1, max_length=255)
     repo_name: str = Field(min_length=1, max_length=255)
     branch: str = Field(default="main", min_length=1, max_length=255)
+
+
+class GitHubBranchTargetAddIn(BaseModel):
+    """POST .../repos/{repo_id}/branch-targets (Phase 10B.4).
+
+    Map a branch to an agent that deploys when that branch is pushed.
+    """
+    branch: str = Field(min_length=1, max_length=255)
+    agent_name: str = Field(min_length=1, max_length=255)
 
 
 class GitHubAgentPathSetIn(BaseModel):
@@ -4247,6 +4257,91 @@ def remove_github_repo(
     return {"deleted": repo_id}
 
 
+def _serialize_branch_target(t: GithubRepoBranchTarget) -> dict[str, Any]:
+    return {
+        "id": t.id,
+        "repo_id": t.repo_id,
+        "branch": t.branch,
+        "agent_name": t.agent_name,
+        "created_at": t.created_at.isoformat(),
+    }
+
+
+def _owned_github_repo(session: Session, repo_id: str, workspace_id: str) -> GithubRepo:
+    repo = session.get(GithubRepo, repo_id)
+    if repo is None or repo.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="repo not found")
+    return repo
+
+
+@app.get("/workspaces/me/github/repos/{repo_id}/branch-targets")
+def list_github_branch_targets(
+    repo_id: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    _owned_github_repo(session, repo_id, workspace_id)
+    rows = session.execute(
+        select(GithubRepoBranchTarget)
+        .where(GithubRepoBranchTarget.repo_id == repo_id)
+        .order_by(GithubRepoBranchTarget.branch, GithubRepoBranchTarget.agent_name)
+    ).scalars().all()
+    return {"branch_targets": [_serialize_branch_target(t) for t in rows]}
+
+
+@app.post("/workspaces/me/github/repos/{repo_id}/branch-targets")
+def add_github_branch_target(
+    repo_id: str,
+    body: GitHubBranchTargetAddIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 10B.4: map a branch -> agent for this repo. Once any target
+    exists on a repo, the webhook routes per-branch (only mapped agents
+    deploy, on their branch). Idempotent on (repo, branch, agent)."""
+    if not GITHUB_BRANCH_RE.match(body.branch):
+        raise HTTPException(status_code=400, detail="branch has an invalid format")
+    repo = _owned_github_repo(session, repo_id, workspace_id)
+    existing = session.execute(
+        select(GithubRepoBranchTarget).where(
+            GithubRepoBranchTarget.repo_id == repo_id,
+            GithubRepoBranchTarget.branch == body.branch,
+            GithubRepoBranchTarget.agent_name == body.agent_name,
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        return _serialize_branch_target(existing)
+    now = utcnow()
+    ensure_agent(session, workspace_id, body.agent_name, now)
+    row = GithubRepoBranchTarget(
+        id=str(uuid.uuid4()),
+        repo_id=repo_id,
+        workspace_id=repo.workspace_id,
+        branch=body.branch,
+        agent_name=body.agent_name,
+        created_at=now,
+    )
+    session.add(row)
+    session.flush()
+    return _serialize_branch_target(row)
+
+
+@app.delete("/workspaces/me/github/repos/{repo_id}/branch-targets/{target_id}")
+def remove_github_branch_target(
+    repo_id: str,
+    target_id: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    _owned_github_repo(session, repo_id, workspace_id)
+    row = session.get(GithubRepoBranchTarget, target_id)
+    if row is None or row.repo_id != repo_id or row.workspace_id != workspace_id:
+        raise HTTPException(status_code=404, detail="branch target not found")
+    session.delete(row)
+    session.flush()
+    return {"deleted": target_id}
+
+
 def _resolve_github_target(
     session: Session, *, owner: str, name: str, raw_body: bytes, sig_header: Optional[str]
 ):
@@ -4283,6 +4378,7 @@ def _resolve_github_target(
             if conn is None:
                 raise HTTPException(status_code=500, detail="github connection missing for repo")
             return types.SimpleNamespace(
+                repo_id=r.id,
                 workspace_id=r.workspace_id,
                 repo_owner=r.repo_owner,
                 repo_name=r.repo_name,
@@ -4371,9 +4467,35 @@ async def github_webhook(
             "skipped": "event_type_not_handled",
         }
 
-    ref = payload.get("ref")
-    expected_ref = f"refs/heads/{integration.branch}"
-    if ref != expected_ref:
+    ref = payload.get("ref") or ""
+    push_branch = ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref
+
+    # Phase 10B.4: per-env routing. When the repo has branch targets, only
+    # the push branch's mapped agents are eligible; otherwise fall back to
+    # the legacy single tracked branch + all agent paths.
+    repo_id = getattr(integration, "repo_id", None)
+    branch_targets: list[GithubRepoBranchTarget] = []
+    if repo_id:
+        branch_targets = session.execute(
+            select(GithubRepoBranchTarget).where(
+                GithubRepoBranchTarget.repo_id == repo_id
+            )
+        ).scalars().all()
+
+    eligible_agents: Optional[set[str]] = None  # None = no filter (legacy)
+    if branch_targets:
+        eligible_agents = {
+            bt.agent_name for bt in branch_targets if bt.branch == push_branch
+        }
+        if not eligible_agents:
+            return {
+                "status": "ok",
+                "event": "push",
+                "skipped": "branch_not_tracked",
+                "ref": ref,
+                "tracked_branches": sorted({bt.branch for bt in branch_targets}),
+            }
+    elif ref != f"refs/heads/{integration.branch}":
         return {
             "status": "ok",
             "event": "push",
@@ -4404,6 +4526,8 @@ async def github_webhook(
 
     queued: list[dict[str, Any]] = []
     for ap in paths:
+        if eligible_agents is not None and ap.agent_name not in eligible_agents:
+            continue  # per-env: this agent isn't mapped to the push branch
         if _push_touched_path(commits or [], ap.path):
             deployment_id = _queue_github_redeploy(
                 session,
@@ -4438,7 +4562,7 @@ async def github_webhook(
     )
     push_payload = {
         "commit_sha": commit_sha,
-        "branch": integration.branch,
+        "branch": push_branch,
         "repo": f"{owner}/{name}",
         "touched_paths": touched_paths,
         "author": head_author if isinstance(head_author, dict) else None,
