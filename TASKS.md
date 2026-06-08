@@ -11,7 +11,8 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 >
 > - **32.1 Website assistant** ✅ done (PR #54). `agents/website/bot.py` + 15 tests. Uptime/latency + conservative broken-link detection (GET probes, flags only error/404/410/5xx) + form presence; hermes alert only when down/broken. Caught a real issue live: lightsei.com /login /signup /agents /runs 404.
 > - **32.2 Lead-Management assistant** ✅ done (PR #55). `agents/lead/bot.py` + 14 tests. `score_lead` (0-100, hot/warm/cold + reasons) + `needs_followup` (window since last contact, skip closed) + `suggest_next_action`; emits `lead.scored`; pages hermes only for hot/warm leads that are due.
-> - **32.3 Reputation assistant** — monitors reviews/sentiment (pure sentiment + alert on negative); 32.4 **Inbox**, 32.5 **Marketing**, 32.6 **Business-Intelligence** (these lean on connectors/LLM, sequenced after the self-contained two).
+> - **32.3 Reputation assistant** ✅ done (PR #56). `agents/reputation/bot.py` + 10 tests. Heuristic sentiment (rating primary + keyword refine), `draft_response_hint`, emits `reputation.analyzed`, alerts hermes only on negative reviews.
+> - **32.4 Inbox**, **32.5 Marketing**, **32.6 Business-Intelligence** ⬅ remaining — these lean on connectors (Gmail) + LLM (drafting/generation), so they're a complexity step up from the 3 self-contained heuristic personas above. Next up; will need real connector/LLM wiring or stubbed harnesses.
 > - **32.7 Reframe hook** — surface these as "assistants" with business-friendly display names; ties into the future "AI Business Team" dashboard reframe.
 >
 > **Old NOW (Phase 31.5) moved to the Phase 31 sub-plan below — iOS v1.0.0 build 10 is in App Store review (31.6).**
