@@ -290,7 +290,7 @@ Layer 4 of MEMORY.md's five guardrails: streaming detection of bad *patterns acr
 
 Background: iOS v1.0.0 (build 10) still in App Store review (31.6.d); Phase 13.5 (deploy the four new bots + live constellation demo) deferred pending an operational worker deploy.
 
-## Phase 10B: GitHub OAuth + multi-repo ⬅ NOW (started 2026-06-07)
+## Phase 10B: GitHub OAuth + multi-repo ✅ COMPLETE (2026-06-07) — OAuth + multi-repo + per-env branch routing, PRs #48-53
 
 Replace the Phase 10 GitHub PAT-paste with a proper OAuth web flow, and grow from one-repo-per-workspace to multiple repos with per-environment branch->agent mapping. Built on the codebase's existing OAuth pattern (`google_oauth.py` / `slack_oauth.py` + the `oauth_pending_states` table + the `/connectors/*/start|callback` endpoints). The existing `github_integrations` row (repo_owner/repo_name/branch/encrypted_pat/encrypted_webhook_secret) is the storage base; an OAuth access token slots into `encrypted_pat` since `github_api.py` treats it the same as a PAT.
 
@@ -302,9 +302,9 @@ Data-model decision (operator, 2026-06-07): **full multi-repo now** — a worksp
 - **10B.3b Webhook cutover.** ✅ done (PR #51). `/webhooks/github` resolves via `github_repos` first (token from parent `github_connections`), falling back to legacy `github_integrations`; signature-based selection picks the right repo when several workspaces watch one repo. Non-breaking by construction (0049 backfill copied secrets verbatim; no-match falls to the exact old path). Existing 33 webhook tests green via fallback + 5 new tests. TODO OPERATOR: watch the first real prod push after this deploys (designed to be a no-op for existing connections, but it's the live push-to-deploy path).
 - **10B.5 Dashboard.** ✅ done (PR #52). `GithubOAuthBlock` on `/github`: Connect-GitHub (OAuth) button, connection status (@login · oauth), watched-repos list (add/remove), per-repo webhook secret revealed once. Legacy PAT form kept as fallback. tsc + next build green.
 - **10B.6 Tests.** ✅ done across 10B.1/10B.2/10B.3/10B.3b — oauth module (8), schema (6), endpoints (10), webhook multirepo (5) + existing webhook (33) green.
-- **10B.4 Per-env branch -> agent mapping.** ⬅ remaining (distinct sub-feature) — a repo's `main` vs `staging` branch deploy to different agents. Needs multi-branch-per-repo + a branch->agent mapping table + webhook deploy-selection rework (today agents deploy by touched path on the single tracked branch).
+- **10B.4 Per-env branch -> agent mapping.** ✅ done (PR #53). `GithubRepoBranchTarget` model + alembic 0050 + branch-target CRUD endpoints + webhook routing: a repo with branch targets deploys only the push branch's mapped agents (main->atlas, staging->atlas-staging); a repo with none keeps the legacy single-tracked-branch behavior. Additive/non-breaking (33 webhook + 5 multirepo tests still green + 5 new branch-target tests).
 
-**Phase 10B headline (OAuth + multi-repo) is functionally COMPLETE end-to-end** (connect via OAuth -> add repos -> push deploys via the cutover -> dashboard). 10B.4 per-env is the one optional sub-feature left. Operator still needs to register a GitHub OAuth App + set LIGHTSEI_GITHUB_CLIENT_ID/SECRET to use OAuth live.
+**Phase 10B COMPLETE** (PRs #48-53): OAuth module + multi-repo schema + OAuth/repo endpoints + webhook cutover + dashboard + per-env branch routing, all functional end-to-end and tested. Operator follow-ups (not code): register a GitHub OAuth App + set LIGHTSEI_GITHUB_CLIENT_ID/SECRET to use OAuth live; watch the first prod push after the cutover (PR #51) deployed.
 - **10B.7 Demo.** Connect via OAuth, add two repos, push to each, watch the right agents deploy. (Needs the OAuth App registered + a live push.)
 
 ## Phase 16: Trust zones as a first-class concept (now P0)
