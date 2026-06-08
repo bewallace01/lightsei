@@ -3,6 +3,7 @@ import hmac
 import json
 import os
 import secrets as _stdlib_secrets
+import types
 import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -4246,6 +4247,71 @@ def remove_github_repo(
     return {"deleted": repo_id}
 
 
+def _resolve_github_target(
+    session: Session, *, owner: str, name: str, raw_body: bytes, sig_header: Optional[str]
+):
+    """Phase 10B.3b: resolve an incoming push to its registered target,
+    authenticated by signature.
+
+    Prefers the multi-repo `github_repos` model: of the rows for
+    (owner, name) — there can be several across workspaces — the one
+    whose webhook secret verifies the signature is the target (the token
+    comes from its parent `github_connections`). Falls back to the legacy
+    `github_integrations` row; the 0049 backfill copied secrets verbatim,
+    so existing connections verify under either path, making the cutover
+    non-breaking.
+
+    Returns an integration-shaped object (the attributes the webhook
+    handler + `_queue_github_redeploy` read: workspace_id, repo_owner,
+    repo_name, branch, is_active, encrypted_pat, encrypted_webhook_secret).
+    Raises 404 (no such repo registered anywhere) or 401 (bad signature).
+    """
+    saw_candidate = False
+    repo_rows = session.execute(
+        select(GithubRepo).where(
+            GithubRepo.repo_owner == owner, GithubRepo.repo_name == name,
+        )
+    ).scalars().all()
+    for r in repo_rows:
+        saw_candidate = True
+        try:
+            secret = secrets_crypto.decrypt(r.encrypted_webhook_secret)
+        except Exception:
+            continue  # undecryptable secret on this row; try the others
+        if _verify_github_signature(raw_body=raw_body, header_value=sig_header, secret=secret):
+            conn = session.get(GithubConnection, r.connection_id)
+            if conn is None:
+                raise HTTPException(status_code=500, detail="github connection missing for repo")
+            return types.SimpleNamespace(
+                workspace_id=r.workspace_id,
+                repo_owner=r.repo_owner,
+                repo_name=r.repo_name,
+                branch=r.branch,
+                is_active=r.is_active,
+                encrypted_pat=conn.encrypted_token,
+                encrypted_webhook_secret=r.encrypted_webhook_secret,
+            )
+
+    # Legacy fallback: the pre-10B single-row integration.
+    legacy = session.execute(
+        select(GitHubIntegration).where(
+            GitHubIntegration.repo_owner == owner, GitHubIntegration.repo_name == name,
+        )
+    ).scalar_one_or_none()
+    if legacy is not None:
+        saw_candidate = True
+        try:
+            secret = secrets_crypto.decrypt(legacy.encrypted_webhook_secret)
+        except Exception:
+            raise HTTPException(status_code=500, detail="integration secret unavailable")
+        if _verify_github_signature(raw_body=raw_body, header_value=sig_header, secret=secret):
+            return legacy
+
+    if not saw_candidate:
+        raise HTTPException(status_code=404, detail=f"no integration for {owner}/{name}")
+    raise HTTPException(status_code=401, detail="invalid signature")
+
+
 @app.post("/webhooks/github")
 async def github_webhook(
     request: Request,
@@ -4266,36 +4332,14 @@ async def github_webhook(
         )
     owner, name = parsed
 
-    integration = session.execute(
-        select(GitHubIntegration).where(
-            GitHubIntegration.repo_owner == owner,
-            GitHubIntegration.repo_name == name,
-        )
-    ).scalar_one_or_none()
-    if integration is None:
-        # No workspace has registered this repo. Tell GitHub explicitly
-        # so the webhook surfaces the misconfiguration in its UI rather
-        # than silently swallowing.
-        raise HTTPException(
-            status_code=404, detail=f"no integration for {owner}/{name}"
-        )
-
-    try:
-        webhook_secret = secrets_crypto.decrypt(integration.encrypted_webhook_secret)
-    except Exception:
-        # Encryption-key rotation gone wrong, or DB row corruption. We
-        # can't verify the signature without the secret, so we can't
-        # trust anything in the body. 500 because this is a server
-        # config issue, not a caller issue.
-        raise HTTPException(
-            status_code=500, detail="integration secret unavailable"
-        )
-
+    # Phase 10B.3b: resolve + authenticate against github_repos first
+    # (multi-repo, OAuth or PAT via the connection), falling back to the
+    # legacy github_integrations row. Signature-based selection is what
+    # lets several workspaces watch the same repo with distinct secrets.
     sig_header = request.headers.get("x-hub-signature-256")
-    if not _verify_github_signature(
-        raw_body=raw_body, header_value=sig_header, secret=webhook_secret
-    ):
-        raise HTTPException(status_code=401, detail="invalid signature")
+    integration = _resolve_github_target(
+        session, owner=owner, name=name, raw_body=raw_body, sig_header=sig_header,
+    )
 
     # ----- past this line the request is authenticated ----- #
 
