@@ -7,7 +7,14 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 
 ## NOW
 
-> **Phase 31.5 — App Store metadata + privacy + reviewer creds + age rating.** Phase 31.4 closed 2026-06-01 (run #7 `26787730073` green end-to-end, 3m 13s, build 7 uploaded to TestFlight). Pipeline lives at `.github/workflows/ios-testflight.yml` on `macos-26`, gh workflow run as the manual trigger, `ios-v*` tag push as the production trigger. 31.5 fills out App Store Connect so Apple's reviewer has everything they need to evaluate the app: marketing copy (subtitle / description / keywords / support URL / privacy policy URL), screenshots (6.5" iPhone required, optionally 6.7" + iPad), App Privacy nutrition labels (what data we collect + tracking), Age Rating (questionnaire), demo end-user credentials for review, Pricing & Availability, Export Compliance. All web UI work in App Store Connect; light on code beyond drafting copy.
+> **Phase 32: Business-persona assistants (the AI Business Team roster) ⬅ NOW.** Per the 2026-06-07 product vision (MEMORY.md "Your AI Business Team"), build the customer-facing roster of business-ops assistants that the vision promises — replacing the dev-tooling bots (argus/vega/atlas) as the *product*. Each follows the proven `agents/<name>/bot.py` pattern (pure-function core + `tick()` + mirrored tests), named by business function (clear to a small business owner), starting with the most self-contained + testable. (iOS Phase 31 remains in App Store review in the background — see its sub-plan below.)
+>
+> - **32.1 Website assistant** ⬅ NEXT — `agents/website/bot.py`. Claims `website.check`; pure checks for uptime (status/latency), broken links (extract + probe `<a href>`), and forms/lead-capture presence; emits `website.check_complete`; alerts via hermes on a down site or broken links. No LLM, no connectors — pure HTTP, fully testable with a stubbed fetcher.
+> - **32.2 Lead-Management assistant** — `agents/lead/bot.py`. Claims `lead.process` (a captured lead); pure `score_lead` (quality 0-100 + reasons) + `needs_followup`; emits `lead.scored`; alerts/suggests next action via hermes.
+> - **32.3 Reputation assistant** — monitors reviews/sentiment (pure sentiment + alert on negative); 32.4 **Inbox**, 32.5 **Marketing**, 32.6 **Business-Intelligence** (these lean on connectors/LLM, sequenced after the self-contained two).
+> - **32.7 Reframe hook** — surface these as "assistants" with business-friendly display names; ties into the future "AI Business Team" dashboard reframe.
+>
+> **Old NOW (Phase 31.5) moved to the Phase 31 sub-plan below — iOS v1.0.0 build 10 is in App Store review (31.6).**
 >
 > **Phase 31 sub-task plan:**
 > - 31.1 ✅ Real-iPhone APNS smoke (2026-05-31)
