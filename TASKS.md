@@ -13,7 +13,10 @@ Read MEMORY.md first if it's been a while. (Older Done Log entries call the proj
 > - **32.2 Lead-Management assistant** ✅ done (PR #55). `agents/lead/bot.py` + 14 tests. `score_lead` (0-100, hot/warm/cold + reasons) + `needs_followup` (window since last contact, skip closed) + `suggest_next_action`; emits `lead.scored`; pages hermes only for hot/warm leads that are due.
 > - **32.3 Reputation assistant** ✅ done (PR #56). `agents/reputation/bot.py` + 10 tests. Heuristic sentiment (rating primary + keyword refine), `draft_response_hint`, emits `reputation.analyzed`, alerts hermes only on negative reviews.
 > - **32.5 Marketing assistant** ✅ done (PR #57). `agents/marketing/bot.py` + 10 tests. First LLM-backed persona: claims `marketing.create` (ad_copy/social_post/campaign_idea/email_copy), calls Claude via the workspace's ANTHROPIC_API_KEY through an injectable factory (stubbed in tests), emits `marketing.created`, notifies hermes "draft ready". Clean error when no key.
-> - **32.6 Business-Intelligence** + **32.4 Inbox** ⬅ remaining — BI = LLM summary over the workspace's own Lightsei data (no external connector). Inbox = needs the Gmail connector (Phase 20) + LLM. Follow the marketing LLM-in-bot pattern.
+> - **32.6 Business-Intelligence assistant** ✅ done (PR #58). `agents/bi/bot.py` + 11 tests. LLM analyst: claims `bi.summarize`, produces a weekly summary OR answers a question over the supplied data (caller gathers the data; BI reads it). Same LLM-in-bot pattern as marketing.
+> - **32.4 Inbox assistant** ⬅ remaining (last persona) — needs the Gmail connector (Phase 20) + LLM (categorize, draft replies, flag urgent, summarize). The bot calls the backend connector endpoint with its workspace token. Most involved (external dependency); a design step from the rest.
+>
+> **AI Business Team roster: 5 of 6 personas shipped** (website, lead, reputation, marketing, bi). Only Inbox (Gmail-dependent) remains. The dev bots (argus/vega/sirius/cassiopeia) stay as internal/demo per the vision.
 > - **32.7 Reframe hook** — surface these as "assistants" with business-friendly display names; ties into the future "AI Business Team" dashboard reframe.
 >
 > **Old NOW (Phase 31.5) moved to the Phase 31 sub-plan below — iOS v1.0.0 build 10 is in App Store review (31.6).**
