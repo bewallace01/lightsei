@@ -9,16 +9,22 @@ import {
   GitHubAgentPath,
   GitHubIntegration,
   GitHubIntegrationFresh,
+  GithubConnectionState,
+  GithubRepo,
   UnauthorizedError,
+  addGithubRepo,
   deleteGitHubAgentPath,
   deleteGitHubIntegration,
   fetchAgents,
   fetchDeployments,
   fetchGitHubIntegration,
+  fetchGithubConnection,
   handleAuthError,
   listGitHubAgentPaths,
   putGitHubAgentPath,
   putGitHubIntegration,
+  removeGithubRepo,
+  startGithubOAuth,
 } from "../api";
 
 
@@ -607,6 +613,183 @@ function RecentDeploysBlock({ deploys }: { deploys: Deployment[] }) {
 // ----- Page ----- //
 
 
+// Phase 10B.5: OAuth connect + multi-repo. Self-contained: fetches its
+// own connection state so it can sit above the legacy PAT flow.
+function GithubOAuthBlock() {
+  const router = useRouter();
+  const [state, setState] = useState<GithubConnectionState | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [owner, setOwner] = useState("");
+  const [name, setName] = useState("");
+  const [branch, setBranch] = useState("main");
+  const [adding, setAdding] = useState(false);
+  const [newSecret, setNewSecret] = useState<{ repo: string; secret: string } | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setState(await fetchGithubConnection());
+      setError(null);
+    } catch (e) {
+      if (handleAuthError(e, router)) return;
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }, [router]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const connect = async () => {
+    try {
+      const { authorization_url } = await startGithubOAuth(
+        typeof window !== "undefined" ? window.location.href : undefined,
+      );
+      window.location.href = authorization_url;
+    } catch (e) {
+      if (handleAuthError(e, router)) return;
+      setError(String(e));
+    }
+  };
+
+  const add = async () => {
+    if (!owner.trim() || !name.trim()) return;
+    setAdding(true);
+    setError(null);
+    try {
+      const repo = await addGithubRepo({
+        repo_owner: owner.trim(),
+        repo_name: name.trim(),
+        branch: branch.trim() || "main",
+      });
+      if (repo.webhook_secret) {
+        setNewSecret({ repo: `${repo.repo_owner}/${repo.repo_name}`, secret: repo.webhook_secret });
+      }
+      setOwner("");
+      setName("");
+      await load();
+    } catch (e) {
+      if (handleAuthError(e, router)) return;
+      setError(String(e));
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const remove = async (repo: GithubRepo) => {
+    try {
+      await removeGithubRepo(repo.id);
+      await load();
+    } catch (e) {
+      if (handleAuthError(e, router)) return;
+      setError(String(e));
+    }
+  };
+
+  if (loading) return <div className="text-sm text-gray-500">loading GitHub connection…</div>;
+
+  const conn = state?.connection ?? null;
+
+  return (
+    <div className="rounded-lg border border-gray-200 bg-white p-5 space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-sm font-semibold text-gray-900">GitHub connection (OAuth)</h2>
+        {conn ? (
+          <span className="text-xs text-gray-500">
+            connected
+            {conn.github_login ? <> as <span className="font-mono text-gray-700">@{conn.github_login}</span></> : null}
+            {" "}· {conn.auth_kind}
+          </span>
+        ) : null}
+      </div>
+
+      {error && (
+        <div className="rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>
+      )}
+
+      {!conn ? (
+        <div className="space-y-3">
+          <p className="text-sm text-gray-600">
+            Connect your GitHub account once, then watch multiple repos. The
+            classic PAT flow below still works as a fallback.
+          </p>
+          <button
+            onClick={connect}
+            className="px-4 py-2 text-sm font-medium rounded-md bg-gray-900 text-white hover:bg-gray-800"
+          >
+            Connect GitHub
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-4">
+          <div>
+            <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">Watched repos</h3>
+            {state && state.repos.length > 0 ? (
+              <div className="border border-gray-200 rounded-md divide-y divide-gray-100">
+                {state.repos.map((r) => (
+                  <div key={r.id} className="flex items-center justify-between px-3 py-2 text-sm">
+                    <span className="font-mono text-gray-800">
+                      {r.repo_owner}/{r.repo_name}
+                      <span className="text-gray-400"> · {r.branch}</span>
+                      {!r.is_active && <span className="ml-2 text-amber-600">(inactive)</span>}
+                    </span>
+                    <button onClick={() => remove(r)} className="text-xs text-red-600 hover:text-red-800">
+                      remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-gray-500">No repos yet. Add one below.</p>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-end gap-2">
+            <input
+              value={owner}
+              onChange={(e) => setOwner(e.target.value)}
+              placeholder="owner"
+              className="px-3 py-2 border border-gray-300 rounded-md text-sm font-mono w-32"
+            />
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="repo"
+              className="px-3 py-2 border border-gray-300 rounded-md text-sm font-mono w-40"
+            />
+            <input
+              value={branch}
+              onChange={(e) => setBranch(e.target.value)}
+              placeholder="branch"
+              className="px-3 py-2 border border-gray-300 rounded-md text-sm font-mono w-28"
+            />
+            <button
+              onClick={add}
+              disabled={adding || !owner.trim() || !name.trim()}
+              className="px-3 py-2 text-sm border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            >
+              {adding ? "adding…" : "Add repo"}
+            </button>
+          </div>
+
+          {newSecret && (
+            <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 space-y-1">
+              <div>
+                Webhook secret for <span className="font-mono">{newSecret.repo}</span> (shown once — paste it
+                into the repo&apos;s webhook settings):
+              </div>
+              <div className="font-mono break-all">{newSecret.secret}</div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
 export default function GitHubPage() {
   const router = useRouter();
   const [integration, setIntegration] = useState<GitHubIntegration | null>(null);
@@ -674,8 +857,8 @@ export default function GitHubPage() {
         <h1 className="text-2xl font-semibold text-gray-900">GitHub</h1>
         <p className="mt-1 text-sm text-gray-600">
           Connect a GitHub repo to push-to-deploy bots and let Polaris read
-          docs straight from the repo. One repo per workspace, one branch
-          tracked.
+          docs straight from the repo. Connect once via OAuth and watch
+          multiple repos, or use the classic PAT flow below.
         </p>
       </div>
 
@@ -684,6 +867,10 @@ export default function GitHubPage() {
           {error}
         </div>
       )}
+
+      <div className="mb-6">
+        <GithubOAuthBlock />
+      </div>
 
       {loading ? (
         <div className="text-sm text-gray-500">loading…</div>

@@ -1593,6 +1593,64 @@ export async function deleteGitHubIntegration(): Promise<void> {
   await authedJson("/workspaces/me/github", { method: "DELETE" });
 }
 
+// ---------- Phase 10B: GitHub OAuth + multi-repo ---------- //
+
+export type GithubConnection = {
+  id: string;
+  auth_kind: "oauth" | "pat";
+  github_login: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type GithubRepo = {
+  id: string;
+  repo_owner: string;
+  repo_name: string;
+  branch: string;
+  is_active: boolean;
+  created_at: string;
+  // Present only on the POST response, revealed exactly once.
+  webhook_secret?: string;
+};
+
+export type GithubConnectionState = {
+  connection: GithubConnection | null;
+  repos: GithubRepo[];
+};
+
+export async function startGithubOAuth(
+  redirectAfter?: string,
+): Promise<{ authorization_url: string; state: string }> {
+  const q = redirectAfter ? `?redirect_after=${encodeURIComponent(redirectAfter)}` : "";
+  return (await authedJson(`/workspaces/me/github/oauth/start${q}`)) as {
+    authorization_url: string;
+    state: string;
+  };
+}
+
+export async function fetchGithubConnection(): Promise<GithubConnectionState> {
+  return (await authedJson("/workspaces/me/github/connection")) as GithubConnectionState;
+}
+
+export async function addGithubRepo(input: {
+  repo_owner: string;
+  repo_name: string;
+  branch: string;
+}): Promise<GithubRepo> {
+  return (await authedJson("/workspaces/me/github/repos", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  })) as GithubRepo;
+}
+
+export async function removeGithubRepo(repoId: string): Promise<void> {
+  await authedJson(`/workspaces/me/github/repos/${encodeURIComponent(repoId)}`, {
+    method: "DELETE",
+  });
+}
+
 export async function listGitHubAgentPaths(): Promise<GitHubAgentPath[]> {
   const body = (await authedJson(
     "/workspaces/me/github/agents",
