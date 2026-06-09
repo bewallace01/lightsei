@@ -110,6 +110,7 @@ def test_tick_hot_due_lead_pages_hermes(fake_lightsei):
         "message": "want a demo asap, budget $2k", "status": "new"})
     bot.tick(fake, hermes_channel="sales")
     fake.emit.assert_called_once()
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     out = fake.emit.call_args.args[1]
     assert out["quality"] == "hot" and out["needs_followup"] is True
     assert out["severity"] == "error"
@@ -124,6 +125,7 @@ def test_tick_cold_lead_no_page(fake_lightsei):
     fake, bot = fake_lightsei
     fake.claim_command.return_value = _cmd(payload={"message": "hi", "status": "new"})
     bot.tick(fake)
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     assert fake.emit.call_args.args[1]["quality"] == "cold"
     fake.send_command.assert_not_called()
 
@@ -135,6 +137,7 @@ def test_tick_recently_contacted_warm_no_page(fake_lightsei):
         "email": "p@co.com", "company": "Co", "message": "looking around",
         "status": "contacted", "last_contact_at": recent})
     bot.tick(fake)
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     assert fake.emit.call_args.args[1]["needs_followup"] is False
     fake.send_command.assert_not_called()  # not due -> no page
 
@@ -159,5 +162,6 @@ def test_tick_crash_emits_lead_crash(fake_lightsei, monkeypatch):
     monkeypatch.setattr(bot, "score_lead", MagicMock(side_effect=RuntimeError("boom")))
     bot.tick(fake)
     assert fake.emit.call_args.args[0] == "lead.crash"
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     fake.send_command.assert_called_once()
     assert "error" in fake.complete_command.call_args.kwargs

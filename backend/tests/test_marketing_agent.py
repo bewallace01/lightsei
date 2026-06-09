@@ -44,6 +44,18 @@ def _factory(text="Headline!\nBuy now and save.", in_tok=12, out_tok=34):
     return lambda api_key: client
 
 
+def _capturing_factory(captured, text="Headline!\nBuy now and save."):
+    block = SimpleNamespace(type="text", text=text)
+    resp = SimpleNamespace(content=[block], usage=SimpleNamespace(input_tokens=12, output_tokens=34))
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return resp
+
+    client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    return lambda api_key: client
+
+
 # ---------- build_prompt ---------- #
 
 
@@ -72,6 +84,16 @@ def test_generate_content_returns_text_and_tokens(fake_lightsei):
     assert out["input_tokens"] == 12 and out["output_tokens"] == 34
 
 
+def test_generate_content_passes_timeout(fake_lightsei):
+    _, bot = fake_lightsei
+    captured = {}
+    bot.generate_content(
+        "ad_copy", {"topic": "x"}, factory=_capturing_factory(captured),
+        api_key="sk", model="m", timeout_s=12.5,
+    )
+    assert captured["timeout"] == 12.5
+
+
 def test_generate_content_empty_raises(fake_lightsei):
     _, bot = fake_lightsei
     with pytest.raises(bot.MarketingError):
@@ -91,6 +113,7 @@ def test_tick_generates_and_notifies(fake_lightsei, monkeypatch):
     fake.claim_command.return_value = _cmd(payload={"task": "ad_copy", "topic": "summer promo"})
     bot.tick(fake, factory=_factory("Buy now!"), hermes_channel="mkt")
     fake.emit.assert_called_once()
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     out = fake.emit.call_args.args[1]
     assert fake.emit.call_args.args[0] == "marketing.created"
     assert out["content"] == "Buy now!" and out["task"] == "ad_copy"
@@ -109,6 +132,7 @@ def test_tick_no_api_key_fails_cleanly(fake_lightsei, monkeypatch):
     bot.tick(fake, factory=_factory())
     # No generation; clean error on the command + a crash event, no hermes draft.
     assert fake.emit.call_args.args[0] == "marketing.crash"
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     assert "ANTHROPIC_API_KEY" in fake.complete_command.call_args.kwargs["error"]
 
 
@@ -141,5 +165,6 @@ def test_tick_generation_crash_emits_marketing_crash(fake_lightsei, monkeypatch)
         raise RuntimeError("anthropic down")
     bot.tick(fake, factory=boom_factory)
     assert fake.emit.call_args.args[0] == "marketing.crash"
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     fake.send_command.assert_called_once()
     assert "error" in fake.complete_command.call_args.kwargs

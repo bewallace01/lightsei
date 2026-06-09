@@ -22,6 +22,7 @@ Env (defaults in parens):
   INBOX_HERMES_CHANNEL channel passed to Hermes (default)
   INBOX_MODEL          Claude model (claude-sonnet-4-6)
   INBOX_MAX_TOKENS     output cap (700)
+  INBOX_TIMEOUT_S      Anthropic request timeout (60)
 
 Workspace secrets (injected by the worker):
   LIGHTSEI_API_KEY    required (bot auth).
@@ -57,6 +58,7 @@ POLL_S = float(os.environ.get("INBOX_POLL_S", "5"))
 HERMES_CHANNEL = os.environ.get("INBOX_HERMES_CHANNEL", "default")
 MODEL = os.environ.get("INBOX_MODEL", "claude-sonnet-4-6")
 MAX_TOKENS = int(os.environ.get("INBOX_MAX_TOKENS", "700"))
+TIMEOUT_S = float(os.environ.get("INBOX_TIMEOUT_S", "60"))
 
 _CATEGORIES = ("sales", "support", "billing", "spam", "personal", "other")
 _URGENCIES = ("high", "normal", "low")
@@ -118,7 +120,7 @@ ClientFactory = Callable[[str], Any]
 
 def _default_factory(api_key: str) -> Any:
     import anthropic
-    return anthropic.Anthropic(api_key=api_key, max_retries=3)
+    return anthropic.Anthropic(api_key=api_key, max_retries=3, timeout=TIMEOUT_S)
 
 
 class InboxError(Exception):
@@ -132,12 +134,14 @@ def generate_triage(
     api_key: str,
     model: str = MODEL,
     max_tokens: int = MAX_TOKENS,
+    timeout_s: float = TIMEOUT_S,
 ) -> dict[str, Any]:
     system, user = build_prompt(email)
     client = factory(api_key)
     resp = client.messages.create(
         model=model, max_tokens=max_tokens, system=system,
         messages=[{"role": "user", "content": user}],
+        timeout=timeout_s,
     )
     text = "".join(
         getattr(b, "text", "")
@@ -164,6 +168,7 @@ def tick(
     hermes_channel: str = "default",
     model: str = MODEL,
     max_tokens: int = MAX_TOKENS,
+    timeout_s: float = TIMEOUT_S,
 ) -> Optional[dict[str, Any]]:
     cmd = lightsei.claim_command(agent_name="inbox")
     if cmd is None:
@@ -179,15 +184,18 @@ def tick(
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        lightsei.emit("inbox.crash", {"command_id": cmd_id, "error": "ANTHROPIC_API_KEY not set on this workspace"})
+        lightsei.emit("inbox.crash", {"command_id": cmd_id, "error": "ANTHROPIC_API_KEY not set on this workspace"}, run_id=cmd_id)
         lightsei.complete_command(cmd_id, error="ANTHROPIC_API_KEY not set on this workspace; add it in account settings")
         return cmd
 
     try:
-        triage = generate_triage(email, factory=factory, api_key=api_key, model=model, max_tokens=max_tokens)
+        triage = generate_triage(
+            email, factory=factory, api_key=api_key, model=model,
+            max_tokens=max_tokens, timeout_s=timeout_s,
+        )
     except Exception as e:
         lightsei.emit("inbox.crash", {"command_id": cmd_id, "error": repr(e),
-                                      "traceback": traceback.format_exc()})
+                                      "traceback": traceback.format_exc()}, run_id=cmd_id)
         try:
             _send_with_source("hermes", "hermes.post",
                               {"channel": hermes_channel,
@@ -213,7 +221,7 @@ def tick(
         "model": model,
         "severity": "error" if flagged else "info",
     }
-    lightsei.emit("inbox.processed", outcome)
+    lightsei.emit("inbox.processed", outcome, run_id=cmd_id)
 
     # Only interrupt the owner for urgent / needs-a-human mail. Everything
     # else is triaged + drafted in the event stream without a ping.
@@ -247,7 +255,10 @@ def main() -> None:
 
     while True:
         try:
-            handled = tick(lightsei, hermes_channel=HERMES_CHANNEL, model=MODEL, max_tokens=MAX_TOKENS)
+            handled = tick(
+                lightsei, hermes_channel=HERMES_CHANNEL, model=MODEL,
+                max_tokens=MAX_TOKENS, timeout_s=TIMEOUT_S,
+            )
             if handled is None:
                 time.sleep(POLL_S)
         except Exception:

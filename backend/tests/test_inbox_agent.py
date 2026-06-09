@@ -40,6 +40,19 @@ def _factory(triage: dict, in_tok=15, out_tok=40, *, raw=None):
     return lambda api_key: client
 
 
+def _capturing_factory(captured, triage: dict):
+    text = json.dumps(triage)
+    block = SimpleNamespace(type="text", text=text)
+    resp = SimpleNamespace(content=[block], usage=SimpleNamespace(input_tokens=15, output_tokens=40))
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return resp
+
+    client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    return lambda api_key: client
+
+
 # ---------- build_prompt / parse_triage ---------- #
 
 
@@ -80,6 +93,21 @@ def test_generate_triage_returns_fields_and_tokens(fake_lightsei):
     assert out["input_tokens"] == 15 and out["output_tokens"] == 40
 
 
+def test_generate_triage_passes_timeout(fake_lightsei):
+    _, bot = fake_lightsei
+    captured = {}
+    bot.generate_triage(
+        {"subject": "x"},
+        factory=_capturing_factory(
+            captured,
+            {"category": "billing", "urgency": "high", "summary": "x",
+             "draft_reply": "y", "needs_human": True},
+        ),
+        api_key="sk", model="m", timeout_s=12.5,
+    )
+    assert captured["timeout"] == 12.5
+
+
 def test_generate_triage_unparseable_raises(fake_lightsei):
     _, bot = fake_lightsei
     with pytest.raises(bot.InboxError):
@@ -101,6 +129,7 @@ def test_tick_urgent_email_pages_owner(fake_lightsei, monkeypatch):
     bot.tick(fake, factory=_factory({"category": "billing", "urgency": "high",
                                      "summary": "double charge", "draft_reply": "Sorry!", "needs_human": True}),
              hermes_channel="inbox")
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     out = fake.emit.call_args.args[1]
     assert fake.emit.call_args.args[0] == "inbox.processed"
     assert out["category"] == "billing" and out["severity"] == "error"
@@ -115,6 +144,7 @@ def test_tick_normal_email_no_page(fake_lightsei, monkeypatch):
     fake.claim_command.return_value = _cmd(payload={"subject": "newsletter"})
     bot.tick(fake, factory=_factory({"category": "other", "urgency": "low",
                                      "summary": "a newsletter", "draft_reply": "", "needs_human": False}))
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     out = fake.emit.call_args.args[1]
     assert out["severity"] == "info"
     fake.send_command.assert_not_called()  # triaged + drafted silently
@@ -126,6 +156,7 @@ def test_tick_no_api_key_fails_cleanly(fake_lightsei, monkeypatch):
     fake.claim_command.return_value = _cmd(payload={"subject": "x"})
     bot.tick(fake, factory=_factory({}))
     assert fake.emit.call_args.args[0] == "inbox.crash"
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     assert "ANTHROPIC_API_KEY" in fake.complete_command.call_args.kwargs["error"]
 
 
@@ -148,5 +179,6 @@ def test_tick_unparseable_triage_emits_crash(fake_lightsei, monkeypatch):
     fake.claim_command.return_value = _cmd(payload={"subject": "x"})
     bot.tick(fake, factory=_factory({}, raw="garbage"))
     assert fake.emit.call_args.args[0] == "inbox.crash"
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     fake.send_command.assert_called_once()
     assert "error" in fake.complete_command.call_args.kwargs

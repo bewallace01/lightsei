@@ -38,6 +38,18 @@ def _factory(text="Headline: a good week.", in_tok=20, out_tok=60):
     return lambda api_key: client
 
 
+def _capturing_factory(captured, text="Headline: a good week."):
+    block = SimpleNamespace(type="text", text=text)
+    resp = SimpleNamespace(content=[block], usage=SimpleNamespace(input_tokens=20, output_tokens=60))
+
+    def create(**kwargs):
+        captured.update(kwargs)
+        return resp
+
+    client = SimpleNamespace(messages=SimpleNamespace(create=create))
+    return lambda api_key: client
+
+
 # ---------- build_prompt ---------- #
 
 
@@ -71,6 +83,16 @@ def test_generate_summary_returns_text_and_tokens(fake_lightsei):
     assert out["input_tokens"] == 20 and out["output_tokens"] == 60
 
 
+def test_generate_summary_passes_timeout(fake_lightsei):
+    _, bot = fake_lightsei
+    captured = {}
+    bot.generate_summary(
+        {"data": {"x": 1}}, factory=_capturing_factory(captured),
+        api_key="sk", model="m", timeout_s=12.5,
+    )
+    assert captured["timeout"] == 12.5
+
+
 def test_generate_summary_empty_raises(fake_lightsei):
     _, bot = fake_lightsei
     with pytest.raises(bot.BIError):
@@ -89,6 +111,7 @@ def test_tick_summary_emits_and_notifies(fake_lightsei, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
     fake.claim_command.return_value = _cmd(payload={"period": "this week", "data": {"leads": 12}})
     bot.tick(fake, factory=_factory("Weekly read"), hermes_channel="bi")
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     out = fake.emit.call_args.args[1]
     assert fake.emit.call_args.args[0] == "bi.summary"
     assert out["kind"] == "summary" and out["summary"] == "Weekly read"
@@ -102,6 +125,7 @@ def test_tick_question_mode_marks_answer(fake_lightsei, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk")
     fake.claim_command.return_value = _cmd(payload={"question": "How many leads?", "data": {"leads": 5}})
     bot.tick(fake, factory=_factory("5 leads."))
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     assert fake.emit.call_args.args[1]["kind"] == "answer"
     assert "answered your question" in fake.send_command.call_args.args[2]["text"]
 
@@ -112,6 +136,7 @@ def test_tick_no_api_key_fails_cleanly(fake_lightsei, monkeypatch):
     fake.claim_command.return_value = _cmd(payload={"data": {}})
     bot.tick(fake, factory=_factory())
     assert fake.emit.call_args.args[0] == "bi.crash"
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     assert "ANTHROPIC_API_KEY" in fake.complete_command.call_args.kwargs["error"]
 
 
@@ -136,5 +161,6 @@ def test_tick_crash_emits_bi_crash(fake_lightsei, monkeypatch):
         raise RuntimeError("down")
     bot.tick(fake, factory=boom)
     assert fake.emit.call_args.args[0] == "bi.crash"
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     fake.send_command.assert_called_once()
     assert "error" in fake.complete_command.call_args.kwargs

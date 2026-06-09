@@ -139,7 +139,7 @@ def tick(client: Any, *, hermes_channel: str = "default") -> Optional[dict[str, 
         hint = draft_response_hint(analysis["sentiment"])
     except Exception as e:
         lightsei.emit("reputation.crash", {"command_id": cmd_id, "error": repr(e),
-                                           "traceback": traceback.format_exc()})
+                                           "traceback": traceback.format_exc()}, run_id=cmd_id)
         try:
             _send_with_source("hermes", "hermes.post",
                               {"channel": hermes_channel,
@@ -161,7 +161,7 @@ def tick(client: Any, *, hermes_channel: str = "default") -> Optional[dict[str, 
         "response_hint": hint,
         "severity": "error" if analysis["sentiment"] == "negative" else "info",
     }
-    lightsei.emit("reputation.analyzed", outcome)
+    lightsei.emit("reputation.analyzed", outcome, run_id=cmd_id)
 
     # Page the owner only on negative reviews — those need a fast,
     # human response. Positive/neutral accrue in the event stream.

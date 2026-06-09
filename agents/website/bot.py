@@ -34,7 +34,9 @@ Public surface (for tests):
   main()
 """
 import os
+import ipaddress
 import re
+import socket
 import sys
 import time
 import traceback
@@ -64,6 +66,52 @@ TIMEOUT_S = float(os.environ.get("WEBSITE_TIMEOUT_S", "10"))
 _HREF_RE = re.compile(r"""<a\b[^>]*?\bhref\s*=\s*["']([^"'#]+)["']""", re.IGNORECASE)
 _FORM_RE = re.compile(r"""<form\b([^>]*)>""", re.IGNORECASE)
 _ATTR_RE = re.compile(r"""(\w+)\s*=\s*["']([^"']*)["']""")
+_BLOCKED_HOSTS = {"localhost", "metadata.google.internal"}
+_BLOCKED_HOST_SUFFIXES = (".localhost", ".local", ".internal")
+
+
+def _is_public_ip(value: str) -> bool:
+    try:
+        return ipaddress.ip_address(value).is_global
+    except ValueError:
+        return False
+
+
+def validate_public_http_url(url: str, *, resolve: bool = False) -> Optional[str]:
+    """Return a rejection reason when `url` is unsafe for worker-side fetches."""
+    parsed = urlparse(str(url or "").strip())
+    if parsed.scheme not in ("http", "https"):
+        return "url must use http or https"
+    if parsed.username or parsed.password:
+        return "url must not include credentials"
+    host = parsed.hostname
+    if not host:
+        return "url must include a host"
+
+    host_l = host.rstrip(".").lower()
+    if host_l in _BLOCKED_HOSTS or host_l.endswith(_BLOCKED_HOST_SUFFIXES):
+        return "host is not public"
+
+    try:
+        ip = ipaddress.ip_address(host_l)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if not ip.is_global:
+            return "host is not public"
+        return None
+
+    if resolve:
+        try:
+            infos = socket.getaddrinfo(host_l, parsed.port, type=socket.SOCK_STREAM)
+        except OSError as e:
+            return f"could not resolve host: {e}"
+        addresses = {info[4][0] for info in infos}
+        if not addresses:
+            return "could not resolve host"
+        if any(not _is_public_ip(address) for address in addresses):
+            return "host resolves to a non-public address"
+    return None
 
 
 def extract_links(html: str, base_url: str) -> list[str]:
@@ -126,6 +174,9 @@ Fetcher = Callable[..., dict[str, Any]]
 def check_site(url: str, fetch: Fetcher, *, max_links: int = 25) -> dict[str, Any]:
     """Core check. GETs the page (uptime + html), probes up to `max_links`
     links (HEAD), and detects forms. Pure given an injected `fetch`."""
+    invalid = validate_public_http_url(url)
+    if invalid:
+        raise ValueError(f"unsafe website.check url: {invalid}")
     page = fetch(url, method="GET")
     status = classify_status(page.get("status_code"), page.get("error"))
     report: dict[str, Any] = {
@@ -145,12 +196,13 @@ def check_site(url: str, fetch: Fetcher, *, max_links: int = 25) -> dict[str, An
     html = page.get("text") or ""
     report["forms_found"] = len(extract_forms(html))
 
-    links = extract_links(html, url)[:max_links]
+    links = [
+        link for link in extract_links(html, url)
+        if validate_public_http_url(link) is None
+    ][:max_links]
     broken: list[dict[str, Any]] = []
     for link in links:
-        # GET (like a real browser) rather than HEAD: many servers reject
-        # HEAD with 405, which would be a false "broken" alert.
-        res = fetch(link, method="GET")
+        res = fetch(link, method="HEAD")
         if is_broken_link(res.get("status_code"), res.get("error")):
             broken.append({"url": link, "status": res.get("status_code"), "error": res.get("error")})
     report["links_checked"] = len(links)
@@ -173,6 +225,10 @@ def hermes_text_for(report: dict[str, Any]) -> str:
 def _httpx_fetch(url: str, *, method: str = "GET") -> dict[str, Any]:
     import httpx
     started = time.monotonic()
+    invalid = validate_public_http_url(url, resolve=True)
+    if invalid:
+        return {"status_code": None, "error": f"BlockedURL: {invalid}", "text": "",
+                "latency_ms": int((time.monotonic() - started) * 1000)}
     try:
         resp = httpx.request(
             method, url, timeout=TIMEOUT_S, follow_redirects=True,
@@ -207,12 +263,16 @@ def tick(client: Any, fetch: Fetcher = _httpx_fetch, *, hermes_channel: str = "d
     if not url:
         lightsei.complete_command(cmd_id, error="website.check requires a url")
         return cmd
+    invalid = validate_public_http_url(url)
+    if invalid:
+        lightsei.complete_command(cmd_id, error=f"website.check url rejected: {invalid}")
+        return cmd
 
     try:
         report = check_site(url, fetch, max_links=MAX_LINKS)
     except Exception as e:
         lightsei.emit("website.crash", {"command_id": cmd_id, "error": repr(e),
-                                        "traceback": traceback.format_exc()})
+                                        "traceback": traceback.format_exc()}, run_id=cmd_id)
         try:
             _send_with_source("hermes", "hermes.post",
                               {"channel": hermes_channel,
@@ -224,7 +284,7 @@ def tick(client: Any, fetch: Fetcher = _httpx_fetch, *, hermes_channel: str = "d
         return cmd
 
     report["command_id"] = cmd_id
-    lightsei.emit("website.check_complete", report)
+    lightsei.emit("website.check_complete", report, run_id=cmd_id)
 
     # Only wake the owner when something is actually wrong.
     if not report["up"] or report["broken_links"]:
