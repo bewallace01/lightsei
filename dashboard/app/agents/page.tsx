@@ -259,8 +259,8 @@ export default function AgentsPage() {
         <div className="min-w-0">
           <h1 className="text-2xl font-semibold tracking-tight">Your AI Business Team</h1>
           <p className="text-sm text-gray-500 mt-1">
-            The assistants working for your business. Click one to see what
-            it has been doing, or fine-tune it from the rows below.
+            The assistants that make up your constellation. Click one to see
+            what it has been doing, or fine-tune it from the rows below.
           </p>
         </div>
         <div className="flex items-center gap-3 shrink-0">

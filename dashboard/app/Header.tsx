@@ -45,7 +45,7 @@ const NAV: NavItem[] = [
       {
         href: "/agents/team-from-readme",
         label: "✨ build my team",
-        hint: "Describe your business, get a tailored team",
+        hint: "Describe your business, get a tailored constellation",
       },
       {
         href: "/agents/generate",
