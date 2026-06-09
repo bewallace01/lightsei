@@ -2342,6 +2342,100 @@ def get_workspace_cost(
     return workspace_cost_mtd(session, workspace_id)
 
 
+@app.post("/workspaces/me/feeder/digest")
+def run_feeder_digest(
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Generate a weekly business digest on demand.
+
+    The feeder normally enqueues this on a weekly cadence (it rides the
+    scheduler loop), which is what makes the AI Business Team proactive.
+    This endpoint is the manual pull: the owner clicks "generate now" and
+    gets a fresh `bi.summarize` queued immediately, bypassing the dedup
+    window (force=True). The BI assistant picks it up on its next poll and
+    writes the summary.
+
+    Returns the new command id + the rolled-up digest data so the caller
+    can show "here's what we're summarizing" without a second fetch. If
+    the BI assistant isn't deployed there's nothing to claim the command,
+    so we report that plainly instead of silently queueing into the void.
+    """
+    import feeder
+
+    now = utcnow()
+    has_bi = session.execute(
+        text("SELECT 1 FROM agents WHERE workspace_id = :ws AND name = :name"),
+        {"ws": workspace_id, "name": feeder.DIGEST_AGENT},
+    ).first() is not None
+
+    cmd_id = feeder.enqueue_digest_for_workspace(
+        session, workspace_id, now, force=True
+    )
+    session.commit()
+
+    return {
+        "status": "queued",
+        "command_id": cmd_id,
+        "bi_assistant_deployed": has_bi,
+        "note": (
+            None if has_bi
+            else "The Business Intelligence assistant is not deployed yet, "
+            "so this digest will sit pending until it is."
+        ),
+    }
+
+
+@app.get("/workspaces/me/feeder/digest/status")
+def get_feeder_digest_status(
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Most recent feeder-sourced digest for this workspace.
+
+    Lets the dashboard render "last digest: 2 days ago, completed" and
+    decide whether the "generate now" button should warn about the dedup
+    window. Returns nulls when the feeder has never run here.
+    """
+    import feeder
+
+    row = session.execute(
+        text(
+            """
+            SELECT id, status, created_at, completed_at
+              FROM commands
+             WHERE workspace_id = :ws
+               AND agent_name = :agent
+               AND kind = :kind
+               AND payload ->> 'source' = :source
+             ORDER BY created_at DESC
+             LIMIT 1
+            """
+        ),
+        {
+            "ws": workspace_id,
+            "agent": feeder.DIGEST_AGENT,
+            "kind": feeder.DIGEST_KIND,
+            "source": feeder.DIGEST_SOURCE,
+        },
+    ).mappings().first()
+
+    if row is None:
+        return {"last_digest": None, "period_days": feeder.PERIOD_DAYS}
+
+    return {
+        "last_digest": {
+            "command_id": row["id"],
+            "status": row["status"],
+            "created_at": row["created_at"].isoformat(),
+            "completed_at": (
+                row["completed_at"].isoformat() if row["completed_at"] else None
+            ),
+        },
+        "period_days": feeder.PERIOD_DAYS,
+    }
+
+
 @app.get("/workspaces/me/zone-presets")
 def get_zone_presets(
     workspace_id: str = Depends(get_workspace_id),
