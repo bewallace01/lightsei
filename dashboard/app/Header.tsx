@@ -35,22 +35,22 @@ type NavItem =
 const NAV: NavItem[] = [
   {
     kind: "group",
-    label: "My team",
+    label: "Your AI Business Team",
     children: [
       {
         href: "/agents",
-        label: "all agents",
-        hint: "Roster, pinned models, schedules, recent activity",
+        label: "all assistants",
+        hint: "Your team, what they do, and recent activity",
       },
       {
         href: "/agents/team-from-readme",
-        label: "✨ propose a team from README",
-        hint: "Drop a README, get a constellation",
+        label: "✨ build my team",
+        hint: "Describe your business, get a tailored team",
       },
       {
         href: "/agents/generate",
-        label: "✨ generate one bot from a description",
-        hint: "Describe a bot, Lightsei generates one",
+        label: "✨ add an assistant",
+        hint: "Describe what you need, get an assistant",
       },
       {
         href: "/polaris",
