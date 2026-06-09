@@ -20,6 +20,7 @@ Env (defaults in parens):
   MARKETING_HERMES_CHANNEL channel passed to Hermes (default)
   MARKETING_MODEL          Claude model (claude-sonnet-4-6)
   MARKETING_MAX_TOKENS     output cap (800)
+  MARKETING_TIMEOUT_S      Anthropic request timeout (60)
 
 Workspace secrets (injected by the worker):
   LIGHTSEI_API_KEY    required (bot auth).
@@ -53,6 +54,7 @@ POLL_S = float(os.environ.get("MARKETING_POLL_S", "5"))
 HERMES_CHANNEL = os.environ.get("MARKETING_HERMES_CHANNEL", "default")
 MODEL = os.environ.get("MARKETING_MODEL", "claude-sonnet-4-6")
 MAX_TOKENS = int(os.environ.get("MARKETING_MAX_TOKENS", "800"))
+TIMEOUT_S = float(os.environ.get("MARKETING_TIMEOUT_S", "60"))
 
 _TASKS = ("ad_copy", "social_post", "campaign_idea", "email_copy")
 
@@ -102,7 +104,7 @@ ClientFactory = Callable[[str], Any]
 
 def _default_factory(api_key: str) -> Any:
     import anthropic
-    return anthropic.Anthropic(api_key=api_key, max_retries=3)
+    return anthropic.Anthropic(api_key=api_key, max_retries=3, timeout=TIMEOUT_S)
 
 
 class MarketingError(Exception):
@@ -117,6 +119,7 @@ def generate_content(
     api_key: str,
     model: str = MODEL,
     max_tokens: int = MAX_TOKENS,
+    timeout_s: float = TIMEOUT_S,
 ) -> dict[str, Any]:
     """Call Claude to produce the content. Returns {content, input_tokens,
     output_tokens}. Raises MarketingError on an empty/odd response."""
@@ -125,6 +128,7 @@ def generate_content(
     resp = client.messages.create(
         model=model, max_tokens=max_tokens, system=system,
         messages=[{"role": "user", "content": user}],
+        timeout=timeout_s,
     )
     text = "".join(
         getattr(b, "text", "")
@@ -151,6 +155,7 @@ def tick(
     hermes_channel: str = "default",
     model: str = MODEL,
     max_tokens: int = MAX_TOKENS,
+    timeout_s: float = TIMEOUT_S,
 ) -> Optional[dict[str, Any]]:
     cmd = lightsei.claim_command(agent_name="marketing")
     if cmd is None:
@@ -171,15 +176,18 @@ def tick(
     if not api_key:
         # Clean, actionable failure rather than a crash: the owner needs to
         # connect a key. Surface it on the command + an event.
-        lightsei.emit("marketing.crash", {"command_id": cmd_id, "error": "ANTHROPIC_API_KEY not set on this workspace"})
+        lightsei.emit("marketing.crash", {"command_id": cmd_id, "error": "ANTHROPIC_API_KEY not set on this workspace"}, run_id=cmd_id)
         lightsei.complete_command(cmd_id, error="ANTHROPIC_API_KEY not set on this workspace; add it in account settings")
         return cmd
 
     try:
-        result = generate_content(task, payload, factory=factory, api_key=api_key, model=model, max_tokens=max_tokens)
+        result = generate_content(
+            task, payload, factory=factory, api_key=api_key, model=model,
+            max_tokens=max_tokens, timeout_s=timeout_s,
+        )
     except Exception as e:
         lightsei.emit("marketing.crash", {"command_id": cmd_id, "error": repr(e),
-                                          "traceback": traceback.format_exc()})
+                                          "traceback": traceback.format_exc()}, run_id=cmd_id)
         try:
             _send_with_source("hermes", "hermes.post",
                               {"channel": hermes_channel,
@@ -199,7 +207,7 @@ def tick(
         "model": model,
         "severity": "info",
     }
-    lightsei.emit("marketing.created", outcome)
+    lightsei.emit("marketing.created", outcome, run_id=cmd_id)
 
     try:
         _send_with_source("hermes", "hermes.post",
@@ -229,7 +237,10 @@ def main() -> None:
 
     while True:
         try:
-            handled = tick(lightsei, hermes_channel=HERMES_CHANNEL, model=MODEL, max_tokens=MAX_TOKENS)
+            handled = tick(
+                lightsei, hermes_channel=HERMES_CHANNEL, model=MODEL,
+                max_tokens=MAX_TOKENS, timeout_s=TIMEOUT_S,
+            )
             if handled is None:
                 time.sleep(POLL_S)
         except Exception:

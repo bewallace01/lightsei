@@ -36,13 +36,17 @@ def fake_lightsei(monkeypatch):
 
 def _fetcher(status_map):
     """status_map: url -> {status_code|error|text}. Default 200 + empty."""
+    calls = []
+
     def fetch(url, *, method="GET"):
+        calls.append((method, url))
         entry = dict(status_map.get(url, {"status_code": 200, "text": ""}))
         entry.setdefault("status_code", 200)
         entry.setdefault("error", None)
         entry.setdefault("text", "")
         entry.setdefault("latency_ms", 12)
         return entry
+    fetch.calls = calls
     return fetch
 
 
@@ -92,6 +96,16 @@ def test_is_broken_link_is_conservative(fake_lightsei):
     assert bot.is_broken_link(401, None) is False
 
 
+def test_validate_public_http_url_blocks_worker_ssrf_targets(fake_lightsei):
+    _, bot = fake_lightsei
+    assert bot.validate_public_http_url("https://example.com/") is None
+    assert "http or https" in bot.validate_public_http_url("file:///etc/passwd")
+    assert "credentials" in bot.validate_public_http_url("https://u:p@example.com/")
+    assert "not public" in bot.validate_public_http_url("http://localhost/admin")
+    assert "not public" in bot.validate_public_http_url("http://127.0.0.1:8000/admin")
+    assert "not public" in bot.validate_public_http_url("http://169.254.169.254/latest/meta-data")
+
+
 def test_check_site_does_not_flag_405_or_403(fake_lightsei):
     _, bot = fake_lightsei
     html = '<a href="/auth">a</a><a href="/head-reject">b</a>'
@@ -130,6 +144,24 @@ def test_check_site_broken_link(fake_lightsei):
     assert r["links_checked"] == 2
     assert [b["url"] for b in r["broken_links"]] == ["https://s.com/gone"]
     assert r["severity"] == "error"
+    assert fetch.calls == [
+        ("GET", "https://s.com/"),
+        ("HEAD", "https://s.com/ok"),
+        ("HEAD", "https://s.com/gone"),
+    ]
+
+
+def test_check_site_filters_private_extracted_links(fake_lightsei):
+    _, bot = fake_lightsei
+    html = '<a href="/ok">ok</a><a href="http://127.0.0.1/admin">admin</a>'
+    fetch = _fetcher({
+        "https://s.com/": {"status_code": 200, "text": html},
+        "https://s.com/ok": {"status_code": 200},
+        "http://127.0.0.1/admin": {"status_code": 200},
+    })
+    r = bot.check_site("https://s.com/", fetch)
+    assert r["links_checked"] == 1
+    assert fetch.calls == [("GET", "https://s.com/"), ("HEAD", "https://s.com/ok")]
 
 
 def test_check_site_healthy(fake_lightsei):
@@ -163,6 +195,7 @@ def test_tick_down_site_alerts_hermes(fake_lightsei):
     bot.tick(fake, fetch, hermes_channel="alerts")
     fake.emit.assert_called_once()
     assert fake.emit.call_args.args[0] == "website.check_complete"
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     fake.send_command.assert_called_once()
     target, kind, hp = fake.send_command.call_args.args[:3]
     assert target == "hermes" and hp["severity"] == "error" and "DOWN" in hp["text"]
@@ -176,6 +209,7 @@ def test_tick_healthy_site_no_alert(fake_lightsei):
                       "https://s.com/ok": {"status_code": 200}})
     bot.tick(fake, fetch)
     fake.emit.assert_called_once()
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     fake.send_command.assert_not_called()
 
 
@@ -185,6 +219,17 @@ def test_tick_missing_url_completes_failed(fake_lightsei):
     bot.tick(fake, _fetcher({}))
     fake.emit.assert_not_called()
     assert "requires a url" in fake.complete_command.call_args.kwargs["error"]
+
+
+def test_tick_rejects_private_url_without_fetching(fake_lightsei):
+    fake, bot = fake_lightsei
+    fake.claim_command.return_value = _cmd(payload={"url": "http://127.0.0.1:8000/admin"})
+    fetch = MagicMock()
+    bot.tick(fake, fetch)
+    fetch.assert_not_called()
+    fake.emit.assert_not_called()
+    fake.send_command.assert_not_called()
+    assert "url rejected" in fake.complete_command.call_args.kwargs["error"]
 
 
 def test_tick_unknown_kind_completes_failed(fake_lightsei):
@@ -207,5 +252,6 @@ def test_tick_crash_emits_website_crash(fake_lightsei, monkeypatch):
     monkeypatch.setattr(bot, "check_site", MagicMock(side_effect=RuntimeError("boom")))
     bot.tick(fake, _fetcher({}))
     assert fake.emit.call_args.args[0] == "website.crash"
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     fake.send_command.assert_called_once()
     assert "error" in fake.complete_command.call_args.kwargs

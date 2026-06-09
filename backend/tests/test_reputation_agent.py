@@ -77,6 +77,7 @@ def test_tick_negative_review_alerts(fake_lightsei):
         "author": "Sam", "rating": 1, "source": "Google", "text": "Rude and slow, never again"})
     bot.tick(fake, hermes_channel="reviews")
     fake.emit.assert_called_once()
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     out = fake.emit.call_args.args[1]
     assert out["sentiment"] == "negative" and out["severity"] == "error"
     fake.send_command.assert_called_once()
@@ -89,6 +90,7 @@ def test_tick_positive_review_no_alert(fake_lightsei):
     fake, bot = fake_lightsei
     fake.claim_command.return_value = _cmd(payload={"rating": 5, "text": "amazing, recommend"})
     bot.tick(fake)
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     assert fake.emit.call_args.args[1]["sentiment"] == "positive"
     fake.send_command.assert_not_called()
 
@@ -113,5 +115,6 @@ def test_tick_crash_emits_reputation_crash(fake_lightsei, monkeypatch):
     monkeypatch.setattr(bot, "analyze_sentiment", MagicMock(side_effect=RuntimeError("boom")))
     bot.tick(fake)
     assert fake.emit.call_args.args[0] == "reputation.crash"
+    assert fake.emit.call_args.kwargs["run_id"] == "cmd-1"
     fake.send_command.assert_called_once()
     assert "error" in fake.complete_command.call_args.kwargs

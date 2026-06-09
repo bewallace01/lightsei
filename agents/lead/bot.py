@@ -160,7 +160,7 @@ def tick(client: Any, *, hermes_channel: str = "default", followup_hours: float 
         action = suggest_next_action(scored["quality"], due)
     except Exception as e:
         lightsei.emit("lead.crash", {"command_id": cmd_id, "error": repr(e),
-                                     "traceback": traceback.format_exc()})
+                                     "traceback": traceback.format_exc()}, run_id=cmd_id)
         try:
             _send_with_source("hermes", "hermes.post",
                               {"channel": hermes_channel,
@@ -181,7 +181,7 @@ def tick(client: Any, *, hermes_channel: str = "default", followup_hours: float 
         "suggested_action": action,
         "severity": "error" if (scored["quality"] == "hot" and due) else "info",
     }
-    lightsei.emit("lead.scored", outcome)
+    lightsei.emit("lead.scored", outcome, run_id=cmd_id)
 
     # Surface the leads worth acting on now: hot or warm + due. Cold leads
     # and not-yet-due leads accrue in the event stream without paging.
