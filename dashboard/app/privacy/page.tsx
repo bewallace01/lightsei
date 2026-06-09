@@ -85,7 +85,7 @@ export default function PrivacyPolicyPage() {
         </p>
       </Section>
 
-      <Section title="3. Trust zones: what each agent can see">
+      <Section title="3. Trust zones: what each assistant can see">
         <p>
           Every agent in your workspace runs inside a labeled trust
           zone. The trust zone is enforced technically: an agent
@@ -106,7 +106,7 @@ export default function PrivacyPolicyPage() {
           process data on our behalf under their own privacy policies.
         </p>
         <ul className="ml-5 list-disc">
-          <li>Anthropic and OpenAI, for the language model calls that power your agents.</li>
+          <li>Anthropic and OpenAI, for the language model calls that power your assistants.</li>
           <li>Apple Push Notification service, to deliver push notifications.</li>
           <li>Resend, to send sign-in and notification emails.</li>
           <li>Stripe, to process payments on paid plans.</li>

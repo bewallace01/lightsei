@@ -168,7 +168,7 @@ export default function DeploymentDetailPage({
 
       {dep && (
         <section className="mb-6 grid grid-cols-2 gap-x-8 gap-y-2 text-sm border border-gray-200 rounded-lg p-4">
-          <div className="text-gray-500">agent</div>
+          <div className="text-gray-500">assistant</div>
           <div className="font-mono">{dep.agent_name}</div>
 
           <div className="text-gray-500">desired</div>

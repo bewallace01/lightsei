@@ -138,7 +138,7 @@ export default function DeploymentsPage() {
           <table className="w-full text-left text-sm">
             <thead className="bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500">
               <tr>
-                <th className="px-4 py-3 font-medium">Agent</th>
+                <th className="px-4 py-3 font-medium">Assistant</th>
                 <th className="px-4 py-3 font-medium">Status</th>
                 <th className="px-4 py-3 font-medium">Source</th>
                 <th className="px-4 py-3 font-medium">Heartbeat</th>

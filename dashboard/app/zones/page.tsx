@@ -102,7 +102,7 @@ export default function ZonesPage(): JSX.Element {
         <p className="text-sm text-gray-500">loading…</p>
       ) : agents.length === 0 ? (
         <EmptyState
-          title="No agents yet"
+          title="No assistants yet"
           body={
             <>
               Your team&apos;s trust-zone topology will appear here once you
@@ -192,7 +192,7 @@ function ZoneLane({
               {a.dispatches_cross_zone && (
                 <span
                   className="inline-block mt-2 text-[10px] text-amber-700 bg-amber-50 border border-amber-200 rounded px-1.5 py-0.5"
-                  title="this agent's send_command can target other zones"
+                  title="this assistant's send_command can target other zones"
                 >
                   ↔ cross-zone enabled
                 </span>

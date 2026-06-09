@@ -126,7 +126,7 @@ function RunsPageInner() {
             <thead className="bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500">
               <tr>
                 <th className="px-4 py-3 font-medium">Started</th>
-                <th className="px-4 py-3 font-medium">Agent</th>
+                <th className="px-4 py-3 font-medium">Assistant</th>
                 <th className="px-4 py-3 font-medium">Model</th>
                 <th className="px-4 py-3 font-medium">Events</th>
                 <th className="px-4 py-3 font-medium">Tokens</th>

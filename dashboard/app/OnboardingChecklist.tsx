@@ -90,7 +90,7 @@ function detectSteps(secretNames: string[], agents: Agent[]): Step[] {
     },
     {
       id: "configure_zone",
-      label: "Configure a trust zone on at least one bot",
+      label: "Configure a trust zone on at least one assistant",
       detail:
         "Pick a sensitivity level + capability list (or use the Compliance preset, which does this for you).",
       href: "/agents",

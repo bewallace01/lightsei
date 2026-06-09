@@ -66,7 +66,7 @@ const ISSUE_LABELS: Record<keyof PulseIssues, { label: string; href: string }> =
     href: "/account",
   },
   stale_agents: {
-    label: "stale agent",
+    label: "stale assistant",
     // /deployments shows desired vs actual state per bot — the right
     // surface for "agent stopped heart-beating" diagnostics.
     href: "/deployments",
@@ -214,7 +214,7 @@ export default function Hero() {
               <Link
                 href="/agents"
                 className="hover:text-indigo-100 transition-colors"
-                title="See every agent — change pinned model, schedule, system prompt"
+                title="See every assistant — change pinned model, schedule, system prompt"
               >
                 {pluralize(pulse.agent_count, "agent")}
               </Link>
