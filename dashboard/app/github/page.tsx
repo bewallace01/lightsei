@@ -486,7 +486,7 @@ function AgentPathsBlock({
                 className="w-full px-2 py-1.5 border border-gray-300 rounded-md text-sm font-mono bg-white"
               >
                 {availableAgents.length === 0 && (
-                  <option value="">no available agents</option>
+                  <option value="">no available assistants</option>
                 )}
                 {availableAgents.map((a) => (
                   <option key={a.name} value={a.name}>

@@ -559,7 +559,7 @@ function AutoApprovalRulesPanel({ onChange }: { onChange: () => void }) {
 
       <div className="grid grid-cols-5 gap-2 mb-2 text-xs">
         <input
-          placeholder="source agent (* for any)"
+          placeholder="source assistant (* for any)"
           value={draft.source_agent}
           onChange={(e) =>
             setDraft({ ...draft, source_agent: e.target.value })
@@ -567,7 +567,7 @@ function AutoApprovalRulesPanel({ onChange }: { onChange: () => void }) {
           className="px-2 py-1 border border-gray-300 rounded"
         />
         <input
-          placeholder="target agent"
+          placeholder="target assistant"
           value={draft.target_agent}
           onChange={(e) =>
             setDraft({ ...draft, target_agent: e.target.value })

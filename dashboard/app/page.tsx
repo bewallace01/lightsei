@@ -162,7 +162,7 @@ export default function Home() {
                 <Link
                   href="/agents"
                   className="text-[11px] uppercase tracking-[0.18em] text-indigo-200/85 font-medium hover:text-indigo-100 transition-colors"
-                  title="See every agent — change pinned model, schedule, system prompt"
+                  title="See every assistant — change pinned model, schedule, system prompt"
                 >
                   Constellation →
                 </Link>
@@ -207,7 +207,7 @@ export default function Home() {
         <div className="text-gray-400 text-sm">loading…</div>
       ) : rows.length === 0 ? (
         <EmptyState
-          title="No bot runs yet"
+          title="No assistant runs yet"
           body={
             <>
               Drop a project README and Lightsei proposes a team of bots
@@ -219,7 +219,7 @@ export default function Home() {
             href: "/agents/team-from-readme",
             label: "✨ Drop a README to build your team",
           }}
-          secondary={{ href: "/agents", label: "See my agents" }}
+          secondary={{ href: "/agents", label: "See my assistants" }}
         />
       ) : (
         <div className="rounded-lg border border-gray-200 overflow-x-auto">
@@ -227,7 +227,7 @@ export default function Home() {
             <thead className="bg-gray-50 text-[11px] uppercase tracking-wider text-gray-500">
               <tr>
                 <th className="px-4 py-3 font-medium">Started</th>
-                <th className="px-4 py-3 font-medium">Agent</th>
+                <th className="px-4 py-3 font-medium">Assistant</th>
                 <th className="px-4 py-3 font-medium hidden sm:table-cell">Model</th>
                 <th className="px-4 py-3 font-medium hidden sm:table-cell">Events</th>
                 <th className="px-4 py-3 font-medium hidden sm:table-cell">Tokens</th>

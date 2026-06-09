@@ -36,7 +36,7 @@ export default function SupportPage() {
             The workspace name (operators) or the business name (end
             users), if applicable.
           </li>
-          <li>The agent or chat you are asking about, if applicable.</li>
+          <li>The assistant or chat you are asking about, if applicable.</li>
           <li>A description of what happened and what you expected.</li>
         </ul>
       </section>
