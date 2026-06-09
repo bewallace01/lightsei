@@ -236,11 +236,30 @@ async def scheduler_loop() -> None:
 def _run_tick_in_thread() -> None:
     """Sync wrapper for use inside asyncio.to_thread. Each tick gets
     its own short-lived session so a stuck DB call can't hold the
-    transaction open across the sleep."""
+    transaction open across the sleep.
+
+    The feeder rides this same loop (one extra pass per tick): it makes
+    the business personas proactive by enqueueing scheduled digests. It
+    gets its own session + commit so a feeder failure can never roll
+    back the trigger scheduler's work, and vice versa.
+    """
     now = datetime.now(timezone.utc)
     s = SessionLocal()
     try:
         tick(s, now)
+    finally:
+        s.close()
+
+    s = SessionLocal()
+    try:
+        import feeder
+        enqueued = feeder.tick(s, now)
+        s.commit()
+        if enqueued:
+            logger.info("scheduler: feeder enqueued %d digest(s)", enqueued)
+    except Exception:
+        s.rollback()
+        logger.exception("scheduler: feeder tick failed")
     finally:
         s.close()
 
