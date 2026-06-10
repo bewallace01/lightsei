@@ -13,6 +13,7 @@ import {
 } from "../api";
 import EndUserInvitesSection from "./EndUserInvitesSection";
 import VendorSlugSection from "./VendorSlugSection";
+import FeedersSettingsSection from "../FeedersSettingsSection";
 
 export default function WorkspaceSettingsPage() {
   const router = useRouter();
@@ -205,6 +206,9 @@ export default function WorkspaceSettingsPage() {
 
       {/* ---------- End-user invites (Phase 27.3) ---------- */}
       <EndUserInvitesSection />
+
+      {/* ---------- Proactive feeders (Phase 32.11) ---------- */}
+      <FeedersSettingsSection />
 
       {/* ---------- Danger zone ---------- */}
       <section>

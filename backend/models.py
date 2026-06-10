@@ -2558,3 +2558,38 @@ class EndUserApnsToken(Base):
             postgresql_where=text("revoked_at IS NULL"),
         ),
     )
+
+
+class FeederSetting(Base):
+    """Phase 32.11: per-workspace on/off for one proactive feeder.
+
+    Feeders (the weekly digest, the cost-spike alert) make the AI Business
+    Team proactive. By default every feeder runs for a workspace that has
+    the assistant it feeds; this table is the owner's opt-out.
+
+    Absence of a row means "default" (enabled) — so the table is purely
+    additive: existing workspaces keep their current behavior with zero
+    backfill, and a row only appears once the owner toggles a feeder.
+
+    Composite PK (workspace_id, feeder_kind): one row per feeder per
+    workspace. `feeder_kind` is from feeder.FEEDER_CATALOG, not a DB enum,
+    so adding a feeder needs no migration.
+    """
+
+    __tablename__ = "feeder_settings"
+
+    workspace_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    feeder_kind: Mapped[str] = mapped_column(String(64), primary_key=True)
+    enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true"),
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=text("now()"),
+    )

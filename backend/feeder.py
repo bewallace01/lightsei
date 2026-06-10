@@ -47,6 +47,34 @@ logger = logging.getLogger("lightsei.feeder")
 DIGEST_AGENT = "bi"
 DIGEST_KIND = "bi.summarize"
 
+# --- Feeder catalog --- #
+# Stable identifiers for each feeder, used as feeder_settings.feeder_kind
+# and surfaced in the settings API/UI. These are NOT command kinds (both
+# feeders emit bi.summarize); they name the *behavior* so an owner can
+# toggle each independently. Adding a feeder = add an entry here, no
+# migration (feeder_kind is a plain string column).
+FEEDER_WEEKLY_DIGEST = "weekly_digest"
+FEEDER_COST_SPIKE = "cost_spike"
+
+FEEDER_CATALOG = [
+    {
+        "kind": FEEDER_WEEKLY_DIGEST,
+        "name": "Weekly business digest",
+        "description": (
+            "Your Business Intelligence assistant summarizes the last 7 days "
+            "of activity once a week, on its own."
+        ),
+    },
+    {
+        "kind": FEEDER_COST_SPIKE,
+        "name": "Spend spike alert",
+        "description": (
+            "When weekly LLM spend jumps sharply over the prior week, the "
+            "assistant explains what drove it. Stays quiet otherwise."
+        ),
+    },
+]
+
 # Stamped into every feeder-enqueued command's payload so we can tell a
 # proactive digest apart from a human/dashboard-requested summarize when
 # we dedup (and so the dashboard can badge it "automatic").
@@ -286,6 +314,70 @@ def enqueue_cost_alert_for_workspace(
     return cmd_id
 
 
+def is_feeder_enabled(
+    session: Session, workspace_id: str, feeder_kind: str
+) -> bool:
+    """Whether a feeder is on for a workspace.
+
+    Default is ON: a workspace with no feeder_settings row keeps every
+    feeder enabled, so the table is a pure opt-out and existing behavior
+    needs no backfill. A row only exists once the owner toggles.
+    """
+    row = session.execute(
+        text(
+            "SELECT enabled FROM feeder_settings "
+            "WHERE workspace_id = :ws AND feeder_kind = :kind"
+        ),
+        {"ws": workspace_id, "kind": feeder_kind},
+    ).first()
+    return True if row is None else bool(row[0])
+
+
+def get_feeder_settings(
+    session: Session, workspace_id: str
+) -> list[dict[str, Any]]:
+    """The catalog annotated with this workspace's enabled state.
+
+    Powers the settings API/UI: every known feeder, in catalog order, with
+    its current on/off (defaulting to on where no row exists).
+    """
+    rows = session.execute(
+        text(
+            "SELECT feeder_kind, enabled FROM feeder_settings "
+            "WHERE workspace_id = :ws"
+        ),
+        {"ws": workspace_id},
+    ).mappings().all()
+    enabled_by_kind = {r["feeder_kind"]: bool(r["enabled"]) for r in rows}
+    return [
+        {**entry, "enabled": enabled_by_kind.get(entry["kind"], True)}
+        for entry in FEEDER_CATALOG
+    ]
+
+
+def set_feeder_enabled(
+    session: Session, workspace_id: str, feeder_kind: str, enabled: bool,
+    now: datetime,
+) -> None:
+    """Upsert a feeder's on/off for a workspace. Does not commit.
+
+    Idempotent: re-setting the same value just bumps updated_at.
+    """
+    session.execute(
+        text(
+            """
+            INSERT INTO feeder_settings
+                (workspace_id, feeder_kind, enabled, created_at, updated_at)
+            VALUES (:ws, :kind, :enabled, :now, :now)
+            ON CONFLICT (workspace_id, feeder_kind)
+            DO UPDATE SET enabled = :enabled, updated_at = :now
+            """
+        ),
+        {"ws": workspace_id, "kind": feeder_kind, "enabled": enabled,
+         "now": now},
+    )
+
+
 def _workspaces_running_bi(session: Session) -> list[str]:
     """Workspaces with the BI assistant deployed.
 
@@ -443,21 +535,25 @@ def tick(session: Session, now: datetime) -> int:
     enqueued = 0
     for workspace_id in _workspaces_running_bi(session):
         # Each feeder is independent + best-effort: one workspace (or one
-        # feeder within it) failing never blocks the rest.
-        try:
-            if enqueue_digest_for_workspace(session, workspace_id, now):
-                enqueued += 1
-        except Exception:  # noqa: BLE001 — best-effort, keep going
-            logger.exception(
-                "feeder: failed to enqueue digest for ws=%s", workspace_id
-            )
-        try:
-            if enqueue_cost_alert_for_workspace(session, workspace_id, now):
-                enqueued += 1
-        except Exception:  # noqa: BLE001 — best-effort, keep going
-            logger.exception(
-                "feeder: failed to enqueue cost alert for ws=%s", workspace_id
-            )
+        # feeder within it) failing never blocks the rest. Each is also
+        # gated on the owner's opt-out (default on).
+        if is_feeder_enabled(session, workspace_id, FEEDER_WEEKLY_DIGEST):
+            try:
+                if enqueue_digest_for_workspace(session, workspace_id, now):
+                    enqueued += 1
+            except Exception:  # noqa: BLE001 — best-effort, keep going
+                logger.exception(
+                    "feeder: failed to enqueue digest for ws=%s", workspace_id
+                )
+        if is_feeder_enabled(session, workspace_id, FEEDER_COST_SPIKE):
+            try:
+                if enqueue_cost_alert_for_workspace(session, workspace_id, now):
+                    enqueued += 1
+            except Exception:  # noqa: BLE001 — best-effort, keep going
+                logger.exception(
+                    "feeder: failed to enqueue cost alert for ws=%s",
+                    workspace_id,
+                )
     return enqueued
 
 

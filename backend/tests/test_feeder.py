@@ -335,3 +335,63 @@ def test_tick_runs_both_feeders():
     with session_scope() as s:
         assert _count_feeder_cmds(s, ws, source=feeder.DIGEST_SOURCE) == 1
         assert _count_feeder_cmds(s, ws, source=feeder.COST_ALERT_SOURCE) == 1
+
+
+# ---------- feeder settings (opt-out) ---------- #
+
+
+def test_feeder_enabled_by_default():
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        assert feeder.is_feeder_enabled(s, ws, feeder.FEEDER_WEEKLY_DIGEST)
+        assert feeder.is_feeder_enabled(s, ws, feeder.FEEDER_COST_SPIKE)
+
+
+def test_set_feeder_disabled_then_enabled():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        feeder.set_feeder_enabled(s, ws, feeder.FEEDER_WEEKLY_DIGEST, False, now)
+    with session_scope() as s:
+        assert not feeder.is_feeder_enabled(s, ws, feeder.FEEDER_WEEKLY_DIGEST)
+        # The other feeder is untouched (independent rows).
+        assert feeder.is_feeder_enabled(s, ws, feeder.FEEDER_COST_SPIKE)
+    with session_scope() as s:
+        feeder.set_feeder_enabled(s, ws, feeder.FEEDER_WEEKLY_DIGEST, True, now)
+    with session_scope() as s:
+        assert feeder.is_feeder_enabled(s, ws, feeder.FEEDER_WEEKLY_DIGEST)
+
+
+def test_get_feeder_settings_annotates_catalog():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        feeder.set_feeder_enabled(s, ws, feeder.FEEDER_COST_SPIKE, False, now)
+    with session_scope() as s:
+        settings = feeder.get_feeder_settings(s, ws)
+    by_kind = {f["kind"]: f for f in settings}
+    assert by_kind[feeder.FEEDER_WEEKLY_DIGEST]["enabled"] is True
+    assert by_kind[feeder.FEEDER_COST_SPIKE]["enabled"] is False
+    # Catalog metadata is carried through for the UI.
+    assert by_kind[feeder.FEEDER_WEEKLY_DIGEST]["name"]
+
+
+def test_tick_skips_disabled_digest():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_bi(s, ws)
+        feeder.set_feeder_enabled(s, ws, feeder.FEEDER_WEEKLY_DIGEST, False, now)
+        # A spike so the cost feeder WOULD fire — proving only the digest
+        # is gated off, not the whole tick.
+        _make_run(s, ws, agent_name="bi", cost_usd="10.00",
+                  started_at=now - timedelta(days=10))
+        _make_run(s, ws, agent_name="bi", cost_usd="40.00",
+                  started_at=now - timedelta(days=2))
+
+    with session_scope() as s:
+        feeder.tick(s, now)
+
+    with session_scope() as s:
+        assert _count_feeder_cmds(s, ws, source=feeder.DIGEST_SOURCE) == 0
+        assert _count_feeder_cmds(s, ws, source=feeder.COST_ALERT_SOURCE) == 1
