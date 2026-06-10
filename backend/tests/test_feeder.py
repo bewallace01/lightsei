@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 from sqlalchemy import text
 
 import feeder
 from db import session_scope
-from models import Agent, Event, Workspace
+from models import Agent, Event, Run, Workspace
 
 
 def _now() -> datetime:
@@ -54,16 +55,29 @@ def _add_event(s, workspace_id: str, *, kind: str, agent_name: str,
     ))
 
 
-def _count_feeder_cmds(s, workspace_id: str) -> int:
+def _count_feeder_cmds(s, workspace_id: str,
+                       source: str = feeder.DIGEST_SOURCE) -> int:
     return s.execute(
         text(
             "SELECT count(*) FROM commands "
             "WHERE workspace_id = :ws AND kind = :kind "
             "AND payload ->> 'source' = :source"
         ),
-        {"ws": workspace_id, "kind": feeder.DIGEST_KIND,
-         "source": feeder.DIGEST_SOURCE},
+        {"ws": workspace_id, "kind": feeder.DIGEST_KIND, "source": source},
     ).scalar_one()
+
+
+def _make_run(s, workspace_id: str, *, agent_name: str, cost_usd: str,
+              started_at: datetime) -> None:
+    s.add(Run(
+        id=str(uuid.uuid4()),
+        workspace_id=workspace_id,
+        agent_name=agent_name,
+        started_at=started_at,
+        ended_at=started_at,
+        cost_usd=Decimal(cost_usd),
+    ))
+    s.flush()
 
 
 # ---------- build_digest_payload(): pure ---------- #
@@ -208,3 +222,116 @@ def test_digest_excludes_events_older_than_period():
             {"ws": ws},
         ).mappings().first()
         assert row["payload"]["data"]["total_events"] == 1
+
+
+# ---------- cost-spike detector: pure ---------- #
+
+
+def test_detect_cost_spike_flags_a_real_jump():
+    alert = feeder.detect_cost_spike(30.0, 10.0)
+    assert alert is not None
+    assert alert["pct_increase"] == 200
+    assert "up 200%" in alert["headline"]
+
+
+def test_detect_cost_spike_ignores_normal_variation():
+    # 20% up is noise, not a spike (threshold is 50%).
+    assert feeder.detect_cost_spike(12.0, 10.0) is None
+
+
+def test_detect_cost_spike_guards_tiny_baseline():
+    # 2c -> 50c is a 25x ratio but the baseline is below the floor.
+    assert feeder.detect_cost_spike(0.50, 0.02) is None
+
+
+def test_detect_cost_spike_handles_zero_prior():
+    assert feeder.detect_cost_spike(50.0, 0.0) is None
+
+
+# ---------- cost-spike feeder: integration ---------- #
+
+
+def test_cost_alert_enqueued_on_spike():
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_bi(s, ws)
+        # Prior week: $10 baseline. This week: $40 (4x) -> spike.
+        _make_run(s, ws, agent_name="marketing", cost_usd="10.00",
+                  started_at=_now() - timedelta(days=10))
+        _make_run(s, ws, agent_name="marketing", cost_usd="35.00",
+                  started_at=_now() - timedelta(days=2))
+        _make_run(s, ws, agent_name="bi", cost_usd="5.00",
+                  started_at=_now() - timedelta(days=1))
+
+    with session_scope() as s:
+        cmd_id = feeder.enqueue_cost_alert_for_workspace(s, ws, _now())
+        assert cmd_id is not None
+
+    with session_scope() as s:
+        assert _count_feeder_cmds(s, ws, source=feeder.COST_ALERT_SOURCE) == 1
+        row = s.execute(
+            text("SELECT payload FROM commands WHERE workspace_id = :ws "
+                 "AND payload ->> 'source' = :src"),
+            {"ws": ws, "src": feeder.COST_ALERT_SOURCE},
+        ).mappings().first()
+        data = row["payload"]["data"]
+        assert data["this_week_usd"] == 40.0
+        assert data["prior_week_usd"] == 10.0
+        assert data["this_week_by_assistant"]["marketing"] == 35.0
+        assert "question" in row["payload"]
+
+
+def test_no_cost_alert_when_spend_is_steady():
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_bi(s, ws)
+        _make_run(s, ws, agent_name="bi", cost_usd="10.00",
+                  started_at=_now() - timedelta(days=10))
+        _make_run(s, ws, agent_name="bi", cost_usd="11.00",
+                  started_at=_now() - timedelta(days=2))
+
+    with session_scope() as s:
+        assert feeder.enqueue_cost_alert_for_workspace(s, ws, _now()) is None
+
+    with session_scope() as s:
+        assert _count_feeder_cmds(s, ws, source=feeder.COST_ALERT_SOURCE) == 0
+
+
+def test_cost_alert_dedups_within_window():
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_bi(s, ws)
+        _make_run(s, ws, agent_name="bi", cost_usd="10.00",
+                  started_at=_now() - timedelta(days=10))
+        _make_run(s, ws, agent_name="bi", cost_usd="40.00",
+                  started_at=_now() - timedelta(days=2))
+
+    now = _now()
+    with session_scope() as s:
+        assert feeder.enqueue_cost_alert_for_workspace(s, ws, now) is not None
+    with session_scope() as s:
+        # Still spiking, but within the dedup window -> no second nag.
+        assert feeder.enqueue_cost_alert_for_workspace(
+            s, ws, now + timedelta(hours=3)) is None
+
+    with session_scope() as s:
+        assert _count_feeder_cmds(s, ws, source=feeder.COST_ALERT_SOURCE) == 1
+
+
+def test_tick_runs_both_feeders():
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_bi(s, ws)
+        _add_event(s, ws, kind="lead.scored", agent_name="lead",
+                   timestamp=_now() - timedelta(days=1))
+        _make_run(s, ws, agent_name="marketing", cost_usd="10.00",
+                  started_at=_now() - timedelta(days=10))
+        _make_run(s, ws, agent_name="marketing", cost_usd="40.00",
+                  started_at=_now() - timedelta(days=2))
+
+    with session_scope() as s:
+        feeder.tick(s, _now())
+
+    with session_scope() as s:
+        assert _count_feeder_cmds(s, ws, source=feeder.DIGEST_SOURCE) == 1
+        assert _count_feeder_cmds(s, ws, source=feeder.COST_ALERT_SOURCE) == 1

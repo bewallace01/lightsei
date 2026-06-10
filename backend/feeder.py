@@ -64,6 +64,25 @@ DEDUP_WINDOW = timedelta(days=6, hours=12)
 # pending digest expires. Matches COMMAND_TTL / the scheduled_run choice.
 _COMMAND_TTL = timedelta(hours=24)
 
+# --- Cost-spike alert (the second feeder) --- #
+# Same command kind + target assistant as the digest, distinguished by a
+# different source marker so the two dedup independently. The BI assistant
+# is the natural home for "why did spend change?" — the alert asks it.
+COST_ALERT_SOURCE = "feeder-cost-alert"
+
+# Fire only on a meaningful jump: this week's spend must exceed last week's
+# by this ratio. 1.5 = a 50% week-over-week increase. Tuned to surface
+# something the owner would actually want to know without crying wolf.
+COST_SPIKE_RATIO = 1.5
+
+# Don't compute a ratio off a trivial baseline. A $0.02 -> $0.10 week is a
+# 5x "spike" that means nothing; require last week to have had real spend
+# before an increase counts as an anomaly.
+COST_MIN_PRIOR_USD = 1.0
+
+# How many days each comparison window spans (this week vs the prior week).
+COST_WINDOW_DAYS = 7
+
 # Real event kinds the personas emit (verified against agents/*/bot.py),
 # mapped to the friendly counter the BI assistant reads in `highlights`.
 # Counting is generic (events_by_kind covers everything); this curated
@@ -118,6 +137,155 @@ def build_digest_payload(
     }
 
 
+def detect_cost_spike(
+    this_week_usd: float,
+    prior_week_usd: float,
+    *,
+    ratio_threshold: float = COST_SPIKE_RATIO,
+    min_prior_usd: float = COST_MIN_PRIOR_USD,
+) -> Optional[dict[str, Any]]:
+    """Decide whether a week-over-week spend jump is worth flagging.
+
+    Pure: numbers in, verdict out. Returns an alert dict (the headline +
+    the figures the BI assistant explains) when this week's spend exceeds
+    last week's by ``ratio_threshold``, or None when it's normal.
+
+    Two guards keep it from crying wolf:
+      - ``prior_week_usd`` must be at least ``min_prior_usd`` — a ratio off
+        a near-zero baseline is meaningless (a few cents to a dollar is not
+        an anomaly, it's a rounding artifact of a quiet week ending).
+      - the increase must clear the ratio, not merely be positive.
+    """
+    if prior_week_usd < min_prior_usd:
+        return None
+    if this_week_usd <= prior_week_usd * ratio_threshold:
+        return None
+
+    pct = round((this_week_usd - prior_week_usd) / prior_week_usd * 100)
+    return {
+        "this_week_usd": round(this_week_usd, 4),
+        "prior_week_usd": round(prior_week_usd, 4),
+        "pct_increase": pct,
+        "headline": (
+            f"LLM spend rose to ${this_week_usd:,.2f} this week, "
+            f"up {pct}% from ${prior_week_usd:,.2f} last week."
+        ),
+    }
+
+
+def _cost_in_window(
+    session: Session, workspace_id: str, start: datetime, end: datetime
+) -> tuple[float, dict[str, float]]:
+    """Total + per-assistant spend from runs started in [start, end).
+
+    Reads runs.cost_usd directly (same source as the cost dashboard) so a
+    spike the owner sees on /cost is the same number the alert reasons
+    about.
+    """
+    rows = session.execute(
+        text(
+            """
+            SELECT agent_name, COALESCE(SUM(cost_usd), 0) AS usd
+              FROM runs
+             WHERE workspace_id = :ws
+               AND started_at >= :start
+               AND started_at < :end
+             GROUP BY agent_name
+            """
+        ),
+        {"ws": workspace_id, "start": start, "end": end},
+    ).mappings().all()
+    by_agent = {r["agent_name"]: float(r["usd"]) for r in rows}
+    total = round(sum(by_agent.values()), 6)
+    return total, by_agent
+
+
+def enqueue_cost_alert_for_workspace(
+    session: Session,
+    workspace_id: str,
+    now: datetime,
+    *,
+    force: bool = False,
+) -> Optional[str]:
+    """Enqueue a bi.summarize cost-spike alert iff spend actually spiked.
+
+    Computes this-week vs prior-week spend, runs detect_cost_spike, and
+    only when it returns an alert does it enqueue a BI command asking for a
+    short plain-English explanation. Returns the command id, or None when
+    there's no spike (or the dedup window is still open and not forced).
+
+    Unlike the weekly digest, this fires on a condition, not a clock — so a
+    quiet or steady workspace never gets a command at all. Does not commit.
+    """
+    if not force and _has_recent_feeder_command(
+        session, workspace_id, now, source=COST_ALERT_SOURCE
+    ):
+        return None
+
+    this_start = now - timedelta(days=COST_WINDOW_DAYS)
+    prior_start = now - timedelta(days=COST_WINDOW_DAYS * 2)
+    this_total, this_by_agent = _cost_in_window(
+        session, workspace_id, this_start, now
+    )
+    prior_total, prior_by_agent = _cost_in_window(
+        session, workspace_id, prior_start, this_start
+    )
+
+    alert = detect_cost_spike(this_total, prior_total)
+    if alert is None:
+        return None
+
+    cmd_id = str(uuid.uuid4())
+    payload = {
+        "source": COST_ALERT_SOURCE,
+        "title": "Spend alert",
+        "question": (
+            f"{alert['headline']} In 2-3 plain sentences for a non-technical "
+            "owner, say what most likely drove the increase (name the "
+            "assistant if one stands out in the per-assistant figures) and "
+            "whether it looks like something to worry about."
+        ),
+        "data": {
+            "source": COST_ALERT_SOURCE,
+            "this_week_usd": alert["this_week_usd"],
+            "prior_week_usd": alert["prior_week_usd"],
+            "pct_increase": alert["pct_increase"],
+            "this_week_by_assistant": this_by_agent,
+            "prior_week_by_assistant": prior_by_agent,
+        },
+    }
+    session.execute(
+        text(
+            """
+            INSERT INTO commands (
+                id, workspace_id, agent_name, kind, payload, status,
+                approval_state, approved_at, created_at, expires_at,
+                dispatch_chain_id, dispatch_depth
+            ) VALUES (
+                :id, :ws, :agent, :kind, CAST(:payload AS JSONB), 'pending',
+                'auto_approved', :now, :now, :expires,
+                :chain, 0
+            )
+            """
+        ),
+        {
+            "id": cmd_id,
+            "ws": workspace_id,
+            "agent": DIGEST_AGENT,
+            "kind": DIGEST_KIND,
+            "payload": _json_dumps(payload),
+            "now": now,
+            "expires": now + _COMMAND_TTL,
+            "chain": cmd_id,
+        },
+    )
+    logger.info(
+        "feeder: cost spike ws=%s this=%.2f prior=%.2f (+%d%%) cmd=%s",
+        workspace_id, this_total, prior_total, alert["pct_increase"], cmd_id,
+    )
+    return cmd_id
+
+
 def _workspaces_running_bi(session: Session) -> list[str]:
     """Workspaces with the BI assistant deployed.
 
@@ -134,17 +302,24 @@ def _workspaces_running_bi(session: Session) -> list[str]:
     return list(rows)
 
 
-def _has_recent_feeder_digest(
-    session: Session, workspace_id: str, now: datetime
+def _has_recent_feeder_command(
+    session: Session,
+    workspace_id: str,
+    now: datetime,
+    *,
+    source: str,
+    window: timedelta = DEDUP_WINDOW,
 ) -> bool:
-    """True if a feeder-sourced digest was enqueued inside DEDUP_WINDOW.
+    """True if a feeder command with this ``source`` was enqueued inside
+    ``window``.
 
-    Looks at the command payload's ``source`` marker so a human- or
-    dashboard-requested bi.summarize never blocks the proactive one.
-    Uses a JSONB ``->>`` text match so the check works without loading
-    rows into Python.
+    Keyed on the payload's ``source`` marker so each feeder dedups against
+    its own kind only: a human- or dashboard-requested bi.summarize never
+    blocks the weekly digest, and the digest never blocks a cost alert
+    (both are bi.summarize commands, distinguished only by source). Uses a
+    JSONB ``->>`` text match so the check runs without loading rows.
     """
-    floor = now - DEDUP_WINDOW
+    floor = now - window
     found = session.execute(
         text(
             """
@@ -163,7 +338,7 @@ def _has_recent_feeder_digest(
             "agent": DIGEST_AGENT,
             "kind": DIGEST_KIND,
             "floor": floor,
-            "source": DIGEST_SOURCE,
+            "source": source,
         },
     ).first()
     return found is not None
@@ -206,7 +381,9 @@ def enqueue_digest_for_workspace(
 
     Does not commit; the caller owns the transaction.
     """
-    if not force and _has_recent_feeder_digest(session, workspace_id, now):
+    if not force and _has_recent_feeder_command(
+        session, workspace_id, now, source=DIGEST_SOURCE
+    ):
         return None
 
     events = _recent_events(session, workspace_id, now, period_days)
@@ -265,12 +442,21 @@ def tick(session: Session, now: datetime) -> int:
 
     enqueued = 0
     for workspace_id in _workspaces_running_bi(session):
+        # Each feeder is independent + best-effort: one workspace (or one
+        # feeder within it) failing never blocks the rest.
         try:
             if enqueue_digest_for_workspace(session, workspace_id, now):
                 enqueued += 1
         except Exception:  # noqa: BLE001 — best-effort, keep going
             logger.exception(
                 "feeder: failed to enqueue digest for ws=%s", workspace_id
+            )
+        try:
+            if enqueue_cost_alert_for_workspace(session, workspace_id, now):
+                enqueued += 1
+        except Exception:  # noqa: BLE001 — best-effort, keep going
+            logger.exception(
+                "feeder: failed to enqueue cost alert for ws=%s", workspace_id
             )
     return enqueued
 
