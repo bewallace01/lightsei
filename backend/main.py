@@ -2470,6 +2470,52 @@ def get_feeder_digest_status(
     }
 
 
+@app.get("/workspaces/me/feeders")
+def list_feeders(
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """The feeder catalog annotated with this workspace's on/off state.
+
+    Every known feeder (weekly digest, spend alert) with its current
+    enabled flag, defaulting to on where the owner has never toggled it.
+    Powers the "Proactive feeders" settings surface.
+    """
+    import feeder
+
+    return {"feeders": feeder.get_feeder_settings(session, workspace_id)}
+
+
+class FeederToggle(BaseModel):
+    enabled: bool
+
+
+@app.patch("/workspaces/me/feeders/{feeder_kind}")
+def set_feeder(
+    feeder_kind: str,
+    body: FeederToggle,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Turn one feeder on or off for this workspace.
+
+    Rejects an unknown feeder_kind (404) so a typo can't silently create a
+    dead settings row. Idempotent: setting the same value just bumps the
+    timestamp.
+    """
+    import feeder
+
+    known = {entry["kind"] for entry in feeder.FEEDER_CATALOG}
+    if feeder_kind not in known:
+        raise HTTPException(status_code=404, detail="unknown feeder")
+
+    feeder.set_feeder_enabled(
+        session, workspace_id, feeder_kind, body.enabled, utcnow()
+    )
+    session.commit()
+    return {"feeders": feeder.get_feeder_settings(session, workspace_id)}
+
+
 @app.get("/workspaces/me/zone-presets")
 def get_zone_presets(
     workspace_id: str = Depends(get_workspace_id),

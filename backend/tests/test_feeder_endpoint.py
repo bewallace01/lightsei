@@ -70,3 +70,50 @@ def test_status_surfaces_latest_written_summary(client, alice):
 def test_digest_endpoint_requires_auth(client):
     r = client.post("/workspaces/me/feeder/digest")
     assert r.status_code in (401, 403)
+
+
+# ---------- feeder settings endpoints ---------- #
+
+
+def test_list_feeders_defaults_enabled(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.get("/workspaces/me/feeders", headers=h)
+    assert r.status_code == 200, r.text
+    feeders = r.json()["feeders"]
+    kinds = {f["kind"] for f in feeders}
+    assert "weekly_digest" in kinds
+    assert "cost_spike" in kinds
+    assert all(f["enabled"] for f in feeders)  # default on
+    assert all(f["name"] and f["description"] for f in feeders)
+
+
+def test_toggle_feeder_off_and_on(client, alice):
+    h = auth_headers(alice["session_token"])
+
+    r = client.patch(
+        "/workspaces/me/feeders/weekly_digest",
+        headers=h,
+        json={"enabled": False},
+    )
+    assert r.status_code == 200, r.text
+    by_kind = {f["kind"]: f for f in r.json()["feeders"]}
+    assert by_kind["weekly_digest"]["enabled"] is False
+    assert by_kind["cost_spike"]["enabled"] is True  # untouched
+
+    r = client.patch(
+        "/workspaces/me/feeders/weekly_digest",
+        headers=h,
+        json={"enabled": True},
+    )
+    by_kind = {f["kind"]: f for f in r.json()["feeders"]}
+    assert by_kind["weekly_digest"]["enabled"] is True
+
+
+def test_toggle_unknown_feeder_404(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.patch(
+        "/workspaces/me/feeders/not_a_feeder",
+        headers=h,
+        json={"enabled": False},
+    )
+    assert r.status_code == 404

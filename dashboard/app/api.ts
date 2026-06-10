@@ -621,6 +621,32 @@ export async function runFeederDigest(): Promise<RunFeederDigestResult> {
   })) as RunFeederDigestResult;
 }
 
+export interface FeederSetting {
+  kind: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+}
+
+export async function fetchFeeders(): Promise<FeederSetting[]> {
+  const body = (await authedJson("/workspaces/me/feeders")) as {
+    feeders: FeederSetting[];
+  };
+  return body.feeders;
+}
+
+export async function setFeederEnabled(
+  kind: string,
+  enabled: boolean,
+): Promise<FeederSetting[]> {
+  const body = (await authedJson(`/workspaces/me/feeders/${kind}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ enabled }),
+  })) as { feeders: FeederSetting[] };
+  return body.feeders;
+}
+
 export async function renameWorkspace(name: string): Promise<SessionWorkspace> {
   return (await authedJson("/workspaces/me", {
     method: "PATCH",
