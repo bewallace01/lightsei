@@ -2420,8 +2420,41 @@ def get_feeder_digest_status(
         },
     ).mappings().first()
 
+    # The most recent written summary the BI assistant produced (from any
+    # bi.summarize, feeder-sourced or not). This is the human-readable
+    # output the dashboard card shows; the command row above is just the
+    # request/status. Surfacing both in one response keeps the card to a
+    # single fetch.
+    summary_row = session.execute(
+        text(
+            """
+            SELECT payload, timestamp
+              FROM events
+             WHERE workspace_id = :ws
+               AND agent_name = :agent
+               AND kind = 'bi.summary'
+             ORDER BY timestamp DESC
+             LIMIT 1
+            """
+        ),
+        {"ws": workspace_id, "agent": feeder.DIGEST_AGENT},
+    ).mappings().first()
+
+    latest_summary = None
+    if summary_row is not None:
+        payload = summary_row["payload"] or {}
+        latest_summary = {
+            "text": payload.get("summary"),
+            "kind": payload.get("kind"),
+            "produced_at": summary_row["timestamp"].isoformat(),
+        }
+
     if row is None:
-        return {"last_digest": None, "period_days": feeder.PERIOD_DAYS}
+        return {
+            "last_digest": None,
+            "latest_summary": latest_summary,
+            "period_days": feeder.PERIOD_DAYS,
+        }
 
     return {
         "last_digest": {
@@ -2432,6 +2465,7 @@ def get_feeder_digest_status(
                 row["completed_at"].isoformat() if row["completed_at"] else None
             ),
         },
+        "latest_summary": latest_summary,
         "period_days": feeder.PERIOD_DAYS,
     }
 

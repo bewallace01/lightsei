@@ -9,6 +9,7 @@ import CostPanel from "./CostPanel";
 import EmptyState from "./EmptyState";
 import OnboardingChecklist from "./OnboardingChecklist";
 import PolarisCostAnalysisPanel from "./PolarisCostAnalysisPanel";
+import WeeklyDigestPanel from "./WeeklyDigestPanel";
 import Hero from "./Hero";
 
 function fmtTime(iso: string): string {
@@ -186,6 +187,11 @@ export default function Home() {
           there's no recent `polaris.cost_analysis` event or when the
           insight list is empty, so a quiet workspace stays scannable. */}
       <PolarisCostAnalysisPanel compact />
+
+      {/* The feeder's visible face: the proactive weekly summary the
+          BI assistant writes on its own. Renders nothing on a fresh
+          workspace that has never produced or queued a digest. */}
+      <WeeklyDigestPanel compact />
 
       <div className="flex items-baseline justify-between mb-8">
         <div>
