@@ -482,6 +482,84 @@ def test_inbox_feeder_dedups_on_message_id(monkeypatch):
         assert _count_inbox_cmds(s, ws) == 3
 
 
+def test_inbox_feeder_retries_after_failed_command_cooldown(monkeypatch):
+    import main
+    monkeypatch.setattr(
+        main, "invoke_connector_tool",
+        lambda *a, **k: _gmail_messages("m1"),
+    )
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_inbox(s, ws)
+
+    with session_scope() as s:
+        assert feeder.enqueue_inbox_items_for_workspace(s, ws, now) == 1
+        s.execute(
+            text(
+                """
+                UPDATE commands
+                   SET status = 'failed',
+                       error = 'ANTHROPIC_API_KEY not set',
+                       completed_at = :completed_at
+                 WHERE workspace_id = :ws
+                   AND kind = :kind
+                   AND payload ->> 'gmail_message_id' = 'm1'
+                """
+            ),
+            {
+                "ws": ws,
+                "kind": feeder.INBOX_KIND,
+                "completed_at": now - feeder.INBOX_RETRY_COOLDOWN - timedelta(minutes=1),
+            },
+        )
+
+    with session_scope() as s:
+        assert feeder.enqueue_inbox_items_for_workspace(s, ws, now) == 1
+
+    with session_scope() as s:
+        assert _count_inbox_cmds(s, ws) == 2
+
+
+def test_inbox_feeder_holds_recent_failed_command_during_cooldown(monkeypatch):
+    import main
+    monkeypatch.setattr(
+        main, "invoke_connector_tool",
+        lambda *a, **k: _gmail_messages("m1"),
+    )
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_inbox(s, ws)
+
+    with session_scope() as s:
+        assert feeder.enqueue_inbox_items_for_workspace(s, ws, now) == 1
+        s.execute(
+            text(
+                """
+                UPDATE commands
+                   SET status = 'failed',
+                       error = 'temporary model failure',
+                       completed_at = :completed_at
+                 WHERE workspace_id = :ws
+                   AND kind = :kind
+                   AND payload ->> 'gmail_message_id' = 'm1'
+                """
+            ),
+            {
+                "ws": ws,
+                "kind": feeder.INBOX_KIND,
+                "completed_at": now - timedelta(minutes=5),
+            },
+        )
+
+    with session_scope() as s:
+        assert feeder.enqueue_inbox_items_for_workspace(s, ws, now) == 0
+
+    with session_scope() as s:
+        assert _count_inbox_cmds(s, ws) == 1
+
+
 def test_inbox_feeder_skips_on_connector_error(monkeypatch):
     import main
 

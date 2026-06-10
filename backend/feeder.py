@@ -103,6 +103,9 @@ INBOX_SOURCE = "feeder-inbox"
 # a manageable batch per tick rather than the whole mailbox.
 INBOX_GMAIL_QUERY = "is:unread newer_than:7d"
 INBOX_MAX_PER_TICK = 10
+# Avoid a tight loop when the Inbox assistant is misconfigured, but do not
+# let a failed triage command suppress that email forever.
+INBOX_RETRY_COOLDOWN = timedelta(hours=1)
 
 # Stamped into every feeder-enqueued command's payload so we can tell a
 # proactive digest apart from a human/dashboard-requested summarize when
@@ -475,8 +478,10 @@ def enqueue_inbox_items_for_workspace(
     if not ids:
         return 0
 
-    # Which of these have we already enqueued? One query over the candidate
-    # ids, not the whole history.
+    # Which of these are already handled or actively being handled? A failed
+    # attempt should not suppress the email forever, but a short cooldown
+    # avoids re-enqueueing the same broken message every scheduler tick.
+    retry_floor = now - INBOX_RETRY_COOLDOWN
     seen_stmt = text(
         """
         SELECT payload ->> 'gmail_message_id' AS mid
@@ -485,13 +490,22 @@ def enqueue_inbox_items_for_workspace(
            AND kind = :kind
            AND payload ->> 'source' = :source
            AND payload ->> 'gmail_message_id' IN :ids
+           AND (
+                status = 'completed'
+                OR (status IN ('pending', 'claimed') AND expires_at > :now)
+                OR (
+                    status IN ('failed', 'cancelled')
+                    AND COALESCE(completed_at, created_at) >= :retry_floor
+                )
+           )
         """
     ).bindparams(bindparam("ids", expanding=True))
     seen = {
         r[0] for r in session.execute(
             seen_stmt,
             {"ws": workspace_id, "kind": INBOX_KIND,
-             "source": INBOX_SOURCE, "ids": ids},
+             "source": INBOX_SOURCE, "ids": ids, "now": now,
+             "retry_floor": retry_floor},
         )
     }
 
