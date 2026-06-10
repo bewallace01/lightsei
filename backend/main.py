@@ -8140,15 +8140,28 @@ class ConnectorInvokeIn(BaseModel):
     payload: dict[str, Any] = Field(default_factory=dict)
 
 
-@app.post("/connectors/{connector_type}/{tool_name}")
-def invoke_connector(
+def invoke_connector_tool(
+    session: Session,
+    *,
+    workspace_id: str,
     connector_type: str,
     tool_name: str,
-    body: ConnectorInvokeIn,
-    session: Session = Depends(get_session),
-    workspace_id: str = Depends(get_workspace_id),
-) -> dict[str, Any]:
-    """Phase 20.6: bot-callable surface for installed connectors.
+    payload: dict[str, Any],
+    source_agent: str,
+) -> Any:
+    """Phase 20.6 / 32.12: invoke an installed connector tool, server-side.
+
+    The single implementation of the connector gates + dispatch. Two
+    callers: the HTTP endpoint `invoke_connector` (bot-facing) and the
+    feeder (Phase 32.12, polling Gmail for the Inbox assistant). Keeping
+    one implementation means the capability + trust-zone + install checks
+    — the wedge invariant — can't drift between the two paths.
+
+    Returns the raw connector result on success. Raises HTTPException on
+    any gate or dispatch failure (the endpoint lets it propagate; the
+    feeder catches it and skips that workspace gracefully).
+
+    Original bot-callable surface contract:
 
     Pipeline (and the rejection shape at each step):
 
@@ -8181,6 +8194,13 @@ def invoke_connector(
        Anthropic-cost rollup needing to exist.
     """
     import json as _json
+    from types import SimpleNamespace
+
+    # Shim so the long dispatch body below keeps referencing body.payload
+    # / body.source_agent unchanged after this was extracted from the HTTP
+    # endpoint (now a thin wrapper). Minimizes the diff on a security-
+    # sensitive path: the gate logic is byte-identical to before.
+    body = SimpleNamespace(payload=payload, source_agent=source_agent)
 
     import secrets_crypto
     from connectors import (
@@ -8436,6 +8456,31 @@ def invoke_connector(
         upstream_status=None,
     )
 
+    return result
+
+
+@app.post("/connectors/{connector_type}/{tool_name}")
+def invoke_connector(
+    connector_type: str,
+    tool_name: str,
+    body: ConnectorInvokeIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 20.6 HTTP surface — thin wrapper over invoke_connector_tool.
+
+    The gates + dispatch live in the helper so the feeder can reach
+    connectors server-side through the SAME wedge checks. Any HTTPException
+    the helper raises propagates as this endpoint's response unchanged.
+    """
+    result = invoke_connector_tool(
+        session,
+        workspace_id=workspace_id,
+        connector_type=connector_type,
+        tool_name=tool_name,
+        payload=body.payload,
+        source_agent=body.source_agent,
+    )
     return {"ok": True, "result": result}
 
 

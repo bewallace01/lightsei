@@ -395,3 +395,141 @@ def test_tick_skips_disabled_digest():
     with session_scope() as s:
         assert _count_feeder_cmds(s, ws, source=feeder.DIGEST_SOURCE) == 0
         assert _count_feeder_cmds(s, ws, source=feeder.COST_ALERT_SOURCE) == 1
+
+
+# ---------- Inbox Gmail feeder ---------- #
+
+
+def _deploy_inbox(s, workspace_id: str) -> None:
+    now = _now()
+    s.add(Agent(
+        workspace_id=workspace_id, name=feeder.INBOX_AGENT,
+        role="executor", created_at=now, updated_at=now,
+    ))
+    s.flush()
+
+
+def _gmail_messages(*ids):
+    return {
+        "messages": [
+            {"id": mid, "thread_id": f"t-{mid}", "snippet": f"snippet {mid}",
+             "from": "a@b.com", "subject": f"subject {mid}",
+             "date": "Mon, 9 Jun 2026 00:00:00 +0000", "label_ids": ["UNREAD"]}
+            for mid in ids
+        ]
+    }
+
+
+def _count_inbox_cmds(s, workspace_id: str) -> int:
+    return s.execute(
+        text(
+            "SELECT count(*) FROM commands WHERE workspace_id = :ws "
+            "AND kind = :kind AND payload ->> 'source' = :source"
+        ),
+        {"ws": workspace_id, "kind": feeder.INBOX_KIND,
+         "source": feeder.INBOX_SOURCE},
+    ).scalar_one()
+
+
+def test_inbox_feeder_enqueues_per_message(monkeypatch):
+    import main
+    monkeypatch.setattr(
+        main, "invoke_connector_tool",
+        lambda *a, **k: _gmail_messages("m1", "m2"),
+    )
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_inbox(s, ws)
+
+    with session_scope() as s:
+        n = feeder.enqueue_inbox_items_for_workspace(s, ws, _now())
+        assert n == 2
+
+    with session_scope() as s:
+        assert _count_inbox_cmds(s, ws) == 2
+        row = s.execute(
+            text("SELECT payload FROM commands WHERE workspace_id = :ws "
+                 "AND payload ->> 'gmail_message_id' = 'm1'"),
+            {"ws": ws},
+        ).mappings().first()
+        # The inbox assistant reads payload.email; body falls back to snippet.
+        assert row["payload"]["email"]["subject"] == "subject m1"
+        assert row["payload"]["email"]["body"] == "snippet m1"
+
+
+def test_inbox_feeder_dedups_on_message_id(monkeypatch):
+    import main
+    monkeypatch.setattr(
+        main, "invoke_connector_tool",
+        lambda *a, **k: _gmail_messages("m1", "m2"),
+    )
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_inbox(s, ws)
+
+    with session_scope() as s:
+        feeder.enqueue_inbox_items_for_workspace(s, ws, _now())
+    # Same two messages still unread next poll, plus a new one.
+    monkeypatch.setattr(
+        main, "invoke_connector_tool",
+        lambda *a, **k: _gmail_messages("m1", "m2", "m3"),
+    )
+    with session_scope() as s:
+        n = feeder.enqueue_inbox_items_for_workspace(s, ws, _now())
+        assert n == 1  # only m3 is new
+
+    with session_scope() as s:
+        assert _count_inbox_cmds(s, ws) == 3
+
+
+def test_inbox_feeder_skips_on_connector_error(monkeypatch):
+    import main
+
+    def _boom(*a, **k):
+        raise RuntimeError("gmail not installed")
+
+    monkeypatch.setattr(main, "invoke_connector_tool", _boom)
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_inbox(s, ws)
+
+    with session_scope() as s:
+        assert feeder.enqueue_inbox_items_for_workspace(s, ws, _now()) == 0
+    with session_scope() as s:
+        assert _count_inbox_cmds(s, ws) == 0
+
+
+def test_inbox_feeder_off_by_default_in_tick(monkeypatch):
+    import main
+    monkeypatch.setattr(
+        main, "invoke_connector_tool",
+        lambda *a, **k: _gmail_messages("m1"),
+    )
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_inbox(s, ws)
+
+    # Default off: tick must not poll Gmail or enqueue anything.
+    with session_scope() as s:
+        assert not feeder.is_feeder_enabled(s, ws, feeder.FEEDER_INBOX_GMAIL)
+        feeder.tick(s, _now())
+    with session_scope() as s:
+        assert _count_inbox_cmds(s, ws) == 0
+
+
+def test_inbox_feeder_runs_in_tick_when_enabled(monkeypatch):
+    import main
+    monkeypatch.setattr(
+        main, "invoke_connector_tool",
+        lambda *a, **k: _gmail_messages("m1", "m2"),
+    )
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_inbox(s, ws)
+        feeder.set_feeder_enabled(s, ws, feeder.FEEDER_INBOX_GMAIL, True, now)
+
+    with session_scope() as s:
+        feeder.tick(s, now)
+    with session_scope() as s:
+        assert _count_inbox_cmds(s, ws) == 2

@@ -55,7 +55,13 @@ DIGEST_KIND = "bi.summarize"
 # migration (feeder_kind is a plain string column).
 FEEDER_WEEKLY_DIGEST = "weekly_digest"
 FEEDER_COST_SPIKE = "cost_spike"
+FEEDER_INBOX_GMAIL = "inbox_gmail"
 
+# Each entry carries `default_enabled`: the on/off a workspace gets before
+# the owner has toggled anything. The two internal-data feeders default ON
+# (they read the workspace's own events/cost). The inbox feeder defaults
+# OFF because it polls a real external inbox — that's the owner's call to
+# turn on, not something that should start the moment Gmail is connected.
 FEEDER_CATALOG = [
     {
         "kind": FEEDER_WEEKLY_DIGEST,
@@ -64,6 +70,7 @@ FEEDER_CATALOG = [
             "Your Business Intelligence assistant summarizes the last 7 days "
             "of activity once a week, on its own."
         ),
+        "default_enabled": True,
     },
     {
         "kind": FEEDER_COST_SPIKE,
@@ -72,8 +79,30 @@ FEEDER_CATALOG = [
             "When weekly LLM spend jumps sharply over the prior week, the "
             "assistant explains what drove it. Stays quiet otherwise."
         ),
+        "default_enabled": True,
+    },
+    {
+        "kind": FEEDER_INBOX_GMAIL,
+        "name": "Inbox triage (Gmail)",
+        "description": (
+            "Polls your connected Gmail for new mail and hands each message "
+            "to the Inbox assistant to categorize, flag urgency, and draft a "
+            "reply. Requires the Gmail connector. Off by default."
+        ),
+        "default_enabled": False,
     },
 ]
+
+_DEFAULT_ENABLED = {e["kind"]: e["default_enabled"] for e in FEEDER_CATALOG}
+
+# The Inbox feeder's target + dedup constants.
+INBOX_AGENT = "inbox"
+INBOX_KIND = "inbox.process"
+INBOX_SOURCE = "feeder-inbox"
+# Gmail query for the poll. Unread, recent, capped — the assistant triages
+# a manageable batch per tick rather than the whole mailbox.
+INBOX_GMAIL_QUERY = "is:unread newer_than:7d"
+INBOX_MAX_PER_TICK = 10
 
 # Stamped into every feeder-enqueued command's payload so we can tell a
 # proactive digest apart from a human/dashboard-requested summarize when
@@ -319,9 +348,10 @@ def is_feeder_enabled(
 ) -> bool:
     """Whether a feeder is on for a workspace.
 
-    Default is ON: a workspace with no feeder_settings row keeps every
-    feeder enabled, so the table is a pure opt-out and existing behavior
-    needs no backfill. A row only exists once the owner toggles.
+    With no feeder_settings row, falls back to the feeder's catalog
+    default (the two internal feeders default on, the inbox feeder off), so
+    the table stays a pure override and existing behavior needs no
+    backfill. A row only exists once the owner toggles.
     """
     row = session.execute(
         text(
@@ -330,7 +360,9 @@ def is_feeder_enabled(
         ),
         {"ws": workspace_id, "kind": feeder_kind},
     ).first()
-    return True if row is None else bool(row[0])
+    if row is None:
+        return _DEFAULT_ENABLED.get(feeder_kind, True)
+    return bool(row[0])
 
 
 def get_feeder_settings(
@@ -350,7 +382,14 @@ def get_feeder_settings(
     ).mappings().all()
     enabled_by_kind = {r["feeder_kind"]: bool(r["enabled"]) for r in rows}
     return [
-        {**entry, "enabled": enabled_by_kind.get(entry["kind"], True)}
+        {
+            "kind": entry["kind"],
+            "name": entry["name"],
+            "description": entry["description"],
+            "enabled": enabled_by_kind.get(
+                entry["kind"], entry["default_enabled"]
+            ),
+        }
         for entry in FEEDER_CATALOG
     ]
 
@@ -378,20 +417,139 @@ def set_feeder_enabled(
     )
 
 
-def _workspaces_running_bi(session: Session) -> list[str]:
-    """Workspaces with the BI assistant deployed.
+def _workspaces_running_agent(session: Session, agent_name: str) -> list[str]:
+    """Workspaces with the named assistant deployed.
 
-    Presence of an Agent row named DIGEST_AGENT is enough: the worker
-    creates it on first deploy. A workspace that never deployed the BI
-    assistant gets no digest (nothing to run it).
+    Presence of an Agent row is enough: the worker creates it on first
+    deploy. A workspace that never deployed that assistant gets no feeder
+    that targets it (nothing to run the command).
     """
     rows = session.execute(
-        text(
-            "SELECT workspace_id FROM agents WHERE name = :name"
-        ),
-        {"name": DIGEST_AGENT},
+        text("SELECT workspace_id FROM agents WHERE name = :name"),
+        {"name": agent_name},
     ).scalars().all()
     return list(rows)
+
+
+def enqueue_inbox_items_for_workspace(
+    session: Session, workspace_id: str, now: datetime
+) -> int:
+    """Poll the workspace's Gmail and enqueue one inbox.process per new
+    message. Returns the number enqueued.
+
+    Reaches Gmail through invoke_connector_tool — the SAME capability +
+    trust-zone + install gates the bot-facing endpoint uses — dispatching
+    as the `inbox` assistant. So a workspace where the inbox assistant
+    isn't authorized for connector:gmail, or hasn't connected Gmail, simply
+    gets nothing: the gate raises, we catch it and return 0. Best-effort by
+    design; a connector hiccup never crashes the tick.
+
+    Dedup is on the Gmail message id (permanent — an email is processed
+    once, ever), not a time window, so re-polling the same unread thread
+    doesn't re-triage it.
+    """
+    # Lazy import: feeder is imported by the scheduler at startup, main is
+    # fully loaded by the time a tick runs. Avoids an import cycle.
+    from sqlalchemy import bindparam
+
+    try:
+        import main as _main
+        result = _main.invoke_connector_tool(
+            session,
+            workspace_id=workspace_id,
+            connector_type="gmail",
+            tool_name="search_inbox",
+            payload={"query": INBOX_GMAIL_QUERY,
+                     "max_results": INBOX_MAX_PER_TICK},
+            source_agent=INBOX_AGENT,
+        )
+    except Exception as exc:  # noqa: BLE001 — gate/connector failure = skip
+        logger.info(
+            "feeder: inbox poll skipped for ws=%s (%s)",
+            workspace_id, type(exc).__name__,
+        )
+        return 0
+
+    messages = (result or {}).get("messages") or []
+    ids = [m.get("id") for m in messages if m.get("id")]
+    if not ids:
+        return 0
+
+    # Which of these have we already enqueued? One query over the candidate
+    # ids, not the whole history.
+    seen_stmt = text(
+        """
+        SELECT payload ->> 'gmail_message_id' AS mid
+          FROM commands
+         WHERE workspace_id = :ws
+           AND kind = :kind
+           AND payload ->> 'source' = :source
+           AND payload ->> 'gmail_message_id' IN :ids
+        """
+    ).bindparams(bindparam("ids", expanding=True))
+    seen = {
+        r[0] for r in session.execute(
+            seen_stmt,
+            {"ws": workspace_id, "kind": INBOX_KIND,
+             "source": INBOX_SOURCE, "ids": ids},
+        )
+    }
+
+    enqueued = 0
+    for m in messages:
+        mid = m.get("id")
+        if not mid or mid in seen:
+            continue
+        email = {
+            "from": m.get("from"),
+            "subject": m.get("subject"),
+            # search_inbox returns metadata only; the snippet is the body
+            # the assistant triages from. A full fetch (get_thread) per
+            # message would be a heavier poll; the snippet categorizes well.
+            "body": m.get("snippet") or "",
+            "snippet": m.get("snippet") or "",
+            "date": m.get("date"),
+            "thread_id": m.get("thread_id"),
+            "gmail_message_id": mid,
+        }
+        cmd_id = str(uuid.uuid4())
+        payload = {
+            "source": INBOX_SOURCE,
+            "gmail_message_id": mid,
+            "email": email,
+        }
+        session.execute(
+            text(
+                """
+                INSERT INTO commands (
+                    id, workspace_id, agent_name, kind, payload, status,
+                    approval_state, approved_at, created_at, expires_at,
+                    dispatch_chain_id, dispatch_depth
+                ) VALUES (
+                    :id, :ws, :agent, :kind, CAST(:payload AS JSONB),
+                    'pending', 'auto_approved', :now, :now, :expires,
+                    :chain, 0
+                )
+                """
+            ),
+            {
+                "id": cmd_id,
+                "ws": workspace_id,
+                "agent": INBOX_AGENT,
+                "kind": INBOX_KIND,
+                "payload": _json_dumps(payload),
+                "now": now,
+                "expires": now + _COMMAND_TTL,
+                "chain": cmd_id,
+            },
+        )
+        enqueued += 1
+
+    if enqueued:
+        logger.info(
+            "feeder: enqueued %d inbox item(s) for ws=%s", enqueued, workspace_id
+        )
+    return enqueued
 
 
 def _has_recent_feeder_command(
@@ -533,10 +691,11 @@ def tick(session: Session, now: datetime) -> int:
         raise ValueError("feeder.tick requires a timezone-aware now")
 
     enqueued = 0
-    for workspace_id in _workspaces_running_bi(session):
-        # Each feeder is independent + best-effort: one workspace (or one
-        # feeder within it) failing never blocks the rest. Each is also
-        # gated on the owner's opt-out (default on).
+    # BI-fed feeders (digest + cost alert) over workspaces running the BI
+    # assistant. Each feeder is independent + best-effort + gated on the
+    # owner's setting: one feeder (or workspace) failing never blocks the
+    # rest.
+    for workspace_id in _workspaces_running_agent(session, DIGEST_AGENT):
         if is_feeder_enabled(session, workspace_id, FEEDER_WEEKLY_DIGEST):
             try:
                 if enqueue_digest_for_workspace(session, workspace_id, now):
@@ -552,6 +711,20 @@ def tick(session: Session, now: datetime) -> int:
             except Exception:  # noqa: BLE001 — best-effort, keep going
                 logger.exception(
                     "feeder: failed to enqueue cost alert for ws=%s",
+                    workspace_id,
+                )
+
+    # Inbox feeder (default OFF) over workspaces running the Inbox
+    # assistant. Only polls Gmail where the owner has opted in.
+    for workspace_id in _workspaces_running_agent(session, INBOX_AGENT):
+        if is_feeder_enabled(session, workspace_id, FEEDER_INBOX_GMAIL):
+            try:
+                enqueued += enqueue_inbox_items_for_workspace(
+                    session, workspace_id, now
+                )
+            except Exception:  # noqa: BLE001 — best-effort, keep going
+                logger.exception(
+                    "feeder: failed to enqueue inbox items for ws=%s",
                     workspace_id,
                 )
     return enqueued

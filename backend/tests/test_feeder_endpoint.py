@@ -80,10 +80,15 @@ def test_list_feeders_defaults_enabled(client, alice):
     r = client.get("/workspaces/me/feeders", headers=h)
     assert r.status_code == 200, r.text
     feeders = r.json()["feeders"]
-    kinds = {f["kind"] for f in feeders}
-    assert "weekly_digest" in kinds
-    assert "cost_spike" in kinds
-    assert all(f["enabled"] for f in feeders)  # default on
+    by_kind = {f["kind"]: f for f in feeders}
+    assert "weekly_digest" in by_kind
+    assert "cost_spike" in by_kind
+    assert "inbox_gmail" in by_kind
+    # Internal-data feeders default on; the inbox feeder (polls a real
+    # external inbox) defaults off.
+    assert by_kind["weekly_digest"]["enabled"] is True
+    assert by_kind["cost_spike"]["enabled"] is True
+    assert by_kind["inbox_gmail"]["enabled"] is False
     assert all(f["name"] and f["description"] for f in feeders)
 
 
