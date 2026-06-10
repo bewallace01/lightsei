@@ -583,6 +583,44 @@ export async function fetchWorkspace(): Promise<SessionWorkspace> {
   return (await authedJson("/workspaces/me")) as SessionWorkspace;
 }
 
+// ---------- Feeder: weekly business digest ---------- //
+// The feeder is what makes the AI Business Team proactive: it enqueues a
+// bi.summarize on a weekly cadence. These power the home-page digest card.
+
+export interface FeederDigestStatus {
+  last_digest: {
+    command_id: string;
+    status: string;
+    created_at: string;
+    completed_at: string | null;
+  } | null;
+  latest_summary: {
+    text: string | null;
+    kind: string | null;
+    produced_at: string;
+  } | null;
+  period_days: number;
+}
+
+export interface RunFeederDigestResult {
+  status: string;
+  command_id: string | null;
+  bi_assistant_deployed: boolean;
+  note: string | null;
+}
+
+export async function fetchFeederDigestStatus(): Promise<FeederDigestStatus> {
+  return (await authedJson(
+    "/workspaces/me/feeder/digest/status",
+  )) as FeederDigestStatus;
+}
+
+export async function runFeederDigest(): Promise<RunFeederDigestResult> {
+  return (await authedJson("/workspaces/me/feeder/digest", {
+    method: "POST",
+  })) as RunFeederDigestResult;
+}
+
 export async function renameWorkspace(name: string): Promise<SessionWorkspace> {
   return (await authedJson("/workspaces/me", {
     method: "PATCH",
