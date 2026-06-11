@@ -35,6 +35,18 @@ def _agent_names(s, ws: str) -> set[str]:
     return set(rows)
 
 
+def _agent_capabilities(s, ws: str, name: str) -> list[str]:
+    row = s.execute(
+        text(
+            "SELECT capabilities FROM agents "
+            "WHERE workspace_id = :ws AND name = :name"
+        ),
+        {"ws": ws, "name": name},
+    ).first()
+    assert row is not None
+    return list(row[0] or [])
+
+
 # ---------- pure plan builder ---------- #
 
 
@@ -92,6 +104,11 @@ def test_apply_provisions_assistants_feeders_and_profile():
 
     with session_scope() as s:
         assert {"reputation", "bi"} <= _agent_names(s, ws)
+        assert "connector:google_business" in _agent_capabilities(
+            s, ws, "reputation"
+        )
+        # BI has no external connector, so onboarding leaves its powers alone.
+        assert _agent_capabilities(s, ws, "bi") == []
         # weekly_digest defaults on anyway; reputation_reviews defaults OFF
         # and must be turned ON by onboarding.
         assert feeder.is_feeder_enabled(s, ws, feeder.FEEDER_REPUTATION_REVIEWS)
@@ -117,6 +134,35 @@ def test_apply_is_idempotent():
             {"ws": ws},
         ).scalar_one()
         assert n == 1
+
+
+def test_apply_merges_connector_capability_with_existing_capabilities():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        s.execute(
+            text(
+                """
+                INSERT INTO agents (
+                    workspace_id, name, daily_cost_cap_usd, capabilities,
+                    created_at, updated_at
+                )
+                VALUES (
+                    :ws, 'inbox', NULL, CAST(:capabilities AS JSONB),
+                    :now, :now
+                )
+                """
+            ),
+            {"ws": ws, "capabilities": '["send_command"]', "now": now},
+        )
+        plan = onboarding.build_provisioning_plan("restaurant", ["email"])
+        onboarding.apply_provisioning_plan(s, ws, plan, now)
+
+    with session_scope() as s:
+        assert _agent_capabilities(s, ws, "inbox") == [
+            "send_command",
+            "connector:gmail",
+        ]
 
 
 def test_get_profile_none_before_onboarding():
@@ -150,6 +196,11 @@ def test_onboarding_submit_provisions_and_persists(client, alice):
     assert body["status"] == "provisioned"
     assert set(body["plan"]["assistants"]) == {"inbox", "bi"}
     assert body["profile"]["industry"] == "professional"
+
+    with session_scope() as s:
+        assert "connector:gmail" in _agent_capabilities(
+            s, alice["workspace"]["id"], "inbox"
+        )
 
     # Now the profile is persisted: GET reflects it.
     r2 = client.get("/workspaces/me/onboarding", headers=h)

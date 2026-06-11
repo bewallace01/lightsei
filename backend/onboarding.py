@@ -184,6 +184,18 @@ def apply_provisioning_plan(
     for agent_name in plan.get("assistants", []):
         ensure_agent(session, workspace_id, agent_name, now)
 
+    for goal_key in plan.get("goals", []):
+        goal = _GOAL_BY_KEY.get(goal_key)
+        if not goal or not goal.get("connector"):
+            continue
+        _grant_agent_capabilities(
+            session,
+            workspace_id,
+            goal["agent"],
+            [f"connector:{goal['connector']}"],
+            now,
+        )
+
     for feeder_kind in plan.get("feeders", []):
         feeder.set_feeder_enabled(session, workspace_id, feeder_kind, True, now)
 
@@ -213,6 +225,58 @@ def get_profile(session: Session, workspace_id: str) -> Optional[dict[str, Any]]
     if row is None or not row[0]:
         return None
     return dict(row[0])
+
+
+def _grant_agent_capabilities(
+    session: Session,
+    workspace_id: str,
+    agent_name: str,
+    capabilities: list[str],
+    now: datetime,
+) -> None:
+    """Merge required connector powers into an onboarding-created assistant."""
+    if not capabilities:
+        return
+    row = session.execute(
+        text(
+            """
+            SELECT capabilities
+              FROM agents
+             WHERE workspace_id = :ws AND name = :name
+             FOR UPDATE
+            """
+        ),
+        {"ws": workspace_id, "name": agent_name},
+    ).first()
+    if row is None:
+        return
+
+    current = list(row[0] or [])
+    changed = False
+    for capability in capabilities:
+        if capability in current:
+            continue
+        current.append(capability)
+        changed = True
+
+    if not changed:
+        return
+    session.execute(
+        text(
+            """
+            UPDATE agents
+               SET capabilities = CAST(:capabilities AS JSONB),
+                   updated_at = :now
+             WHERE workspace_id = :ws AND name = :name
+            """
+        ),
+        {
+            "ws": workspace_id,
+            "name": agent_name,
+            "capabilities": _json_dumps(current),
+            "now": now,
+        },
+    )
 
 
 def _json_dumps(value: Any) -> str:
