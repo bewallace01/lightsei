@@ -158,6 +158,18 @@ def _drive_invoke(*, tool_name: str, payload: dict, access_token: str) -> dict:
     )
 
 
+def _business_manifest() -> list[ConnectorToolManifest]:
+    from . import google_business as _biz
+    return _biz.MANIFEST()
+
+
+def _business_invoke(*, tool_name: str, payload: dict, access_token: str) -> dict:
+    from . import google_business as _biz
+    return _biz.INVOKE(
+        tool_name=tool_name, payload=payload, access_token=access_token,
+    )
+
+
 CONNECTOR_REGISTRY: dict[str, ConnectorSpec] = {
     "gmail": ConnectorSpec(
         name="gmail",
@@ -224,6 +236,27 @@ CONNECTOR_REGISTRY: dict[str, ConnectorSpec] = {
         ),
         manifest=_drive_manifest,
         invoke=_drive_invoke,
+    ),
+    "google_business": ConnectorSpec(
+        name="google_business",
+        display_label="Google Business Profile",
+        oauth_provider="google",
+        default_scopes=(
+            "https://www.googleapis.com/auth/business.manage",
+            "openid",
+            "email",
+        ),
+        # A business's reviews + the ability to reply publicly. The reply
+        # is an outward, brand-visible action, so this is a business-account
+        # connector, not something a public-zoned research bot should hold.
+        # Internal at minimum; sensitive / pii reputation bots qualify too.
+        declared_zones=frozenset({"internal", "sensitive", "pii"}),
+        summary=(
+            "Read Google Business Profile reviews and post owner replies. "
+            "Use for reputation-monitoring + review-response bots."
+        ),
+        manifest=_business_manifest,
+        invoke=_business_invoke,
     ),
 }
 

@@ -230,9 +230,9 @@ def test_workspace_browse_index_landed():
 
 
 def test_registry_has_v1_connectors():
-    """Three v1 connectors: gmail, google_calendar, google_drive."""
+    """The v1 Google connectors + the Business Profile review source."""
     assert set(CONNECTOR_REGISTRY.keys()) == {
-        "gmail", "google_calendar", "google_drive",
+        "gmail", "google_calendar", "google_drive", "google_business",
     }
 
 
@@ -304,7 +304,7 @@ def test_list_connectors_is_stable_order():
     a = [s.name for s in list_connectors()]
     b = [s.name for s in list_connectors()]
     assert a == b
-    assert a == ["gmail", "google_calendar", "google_drive"]
+    assert a == ["gmail", "google_calendar", "google_drive", "google_business"]
 
 
 # ---------- ConnectorSpec validation ---------- #
