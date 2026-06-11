@@ -533,3 +533,168 @@ def test_inbox_feeder_runs_in_tick_when_enabled(monkeypatch):
         feeder.tick(s, now)
     with session_scope() as s:
         assert _count_inbox_cmds(s, ws) == 2
+
+
+# ---------- Reputation review feeder ---------- #
+
+
+def _deploy_reputation(s, workspace_id: str) -> None:
+    now = _now()
+    s.add(Agent(
+        workspace_id=workspace_id, name=feeder.REPUTATION_AGENT,
+        role="executor", created_at=now, updated_at=now,
+    ))
+    s.flush()
+
+
+def _fake_gb(reviews):
+    """A stand-in for invoke_connector_tool that walks the auto-discover
+    chain: one account, one location, then the supplied reviews."""
+    def _invoke(session, *, workspace_id, connector_type, tool_name,
+                payload, source_agent):
+        assert connector_type == "google_business"
+        assert source_agent == feeder.REPUTATION_AGENT
+        if tool_name == "list_accounts":
+            return {"accounts": [{"id": "acc1", "account_name": "Acme"}]}
+        if tool_name == "list_locations":
+            return {"locations": [{"id": "loc1", "title": "Acme Downtown"}]}
+        if tool_name == "list_reviews":
+            return {"reviews": reviews}
+        raise AssertionError(f"unexpected tool {tool_name}")
+    return _invoke
+
+
+def _review(rid, rating, comment="ok", reviewer="Dana"):
+    return {"id": rid, "rating": rating, "star_rating": "ONE",
+            "comment": comment, "reviewer": reviewer,
+            "create_time": "2026-06-09T00:00:00Z", "has_reply": False}
+
+
+def _count_reputation_cmds(s, workspace_id: str) -> int:
+    return s.execute(
+        text(
+            "SELECT count(*) FROM commands WHERE workspace_id = :ws "
+            "AND kind = :kind AND payload ->> 'source' = :source"
+        ),
+        {"ws": workspace_id, "kind": feeder.REPUTATION_KIND,
+         "source": feeder.REPUTATION_SOURCE},
+    ).scalar_one()
+
+
+def test_reputation_feeder_enqueues_per_review(monkeypatch):
+    import main
+    monkeypatch.setattr(
+        main, "invoke_connector_tool",
+        _fake_gb([_review("rv1", 1, "Slow"), _review("rv2", 5, "Great")]),
+    )
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_reputation(s, ws)
+
+    with session_scope() as s:
+        n = feeder.enqueue_reputation_reviews_for_workspace(s, ws, _now())
+        assert n == 2
+
+    with session_scope() as s:
+        assert _count_reputation_cmds(s, ws) == 2
+        row = s.execute(
+            text("SELECT payload FROM commands WHERE workspace_id = :ws "
+                 "AND payload ->> 'review_id' = 'rv1'"),
+            {"ws": ws},
+        ).mappings().first()
+        # The reputation assistant reads payload.review.{text,rating,author}.
+        assert row["payload"]["review"]["text"] == "Slow"
+        assert row["payload"]["review"]["rating"] == 1
+        assert row["payload"]["review"]["source"] == "Acme Downtown"
+
+
+def test_reputation_feeder_dedups_on_review_id(monkeypatch):
+    import main
+    monkeypatch.setattr(
+        main, "invoke_connector_tool", _fake_gb([_review("rv1", 1)]),
+    )
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_reputation(s, ws)
+
+    with session_scope() as s:
+        feeder.enqueue_reputation_reviews_for_workspace(s, ws, _now())
+    # Same review still present next poll, plus a new one.
+    monkeypatch.setattr(
+        main, "invoke_connector_tool",
+        _fake_gb([_review("rv1", 1), _review("rv2", 2)]),
+    )
+    with session_scope() as s:
+        n = feeder.enqueue_reputation_reviews_for_workspace(s, ws, _now())
+        assert n == 1  # only rv2 is new
+
+    with session_scope() as s:
+        assert _count_reputation_cmds(s, ws) == 2
+
+
+def test_reputation_feeder_skips_when_no_account(monkeypatch):
+    import main
+
+    def _no_accounts(session, *, tool_name, **k):
+        return {"accounts": []} if tool_name == "list_accounts" else {}
+
+    monkeypatch.setattr(main, "invoke_connector_tool", _no_accounts)
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_reputation(s, ws)
+
+    with session_scope() as s:
+        assert feeder.enqueue_reputation_reviews_for_workspace(s, ws, _now()) == 0
+    with session_scope() as s:
+        assert _count_reputation_cmds(s, ws) == 0
+
+
+def test_reputation_feeder_skips_on_connector_error(monkeypatch):
+    import main
+
+    def _boom(*a, **k):
+        raise RuntimeError("not installed")
+
+    monkeypatch.setattr(main, "invoke_connector_tool", _boom)
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_reputation(s, ws)
+
+    with session_scope() as s:
+        assert feeder.enqueue_reputation_reviews_for_workspace(s, ws, _now()) == 0
+
+
+def test_reputation_feeder_off_by_default_in_tick(monkeypatch):
+    import main
+    monkeypatch.setattr(
+        main, "invoke_connector_tool", _fake_gb([_review("rv1", 1)]),
+    )
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_reputation(s, ws)
+
+    with session_scope() as s:
+        assert not feeder.is_feeder_enabled(
+            s, ws, feeder.FEEDER_REPUTATION_REVIEWS)
+        feeder.tick(s, _now())
+    with session_scope() as s:
+        assert _count_reputation_cmds(s, ws) == 0
+
+
+def test_reputation_feeder_runs_in_tick_when_enabled(monkeypatch):
+    import main
+    monkeypatch.setattr(
+        main, "invoke_connector_tool",
+        _fake_gb([_review("rv1", 1), _review("rv2", 5)]),
+    )
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_reputation(s, ws)
+        feeder.set_feeder_enabled(
+            s, ws, feeder.FEEDER_REPUTATION_REVIEWS, True, now)
+
+    with session_scope() as s:
+        feeder.tick(s, now)
+    with session_scope() as s:
+        assert _count_reputation_cmds(s, ws) == 2

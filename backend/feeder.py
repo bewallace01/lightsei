@@ -56,6 +56,7 @@ DIGEST_KIND = "bi.summarize"
 FEEDER_WEEKLY_DIGEST = "weekly_digest"
 FEEDER_COST_SPIKE = "cost_spike"
 FEEDER_INBOX_GMAIL = "inbox_gmail"
+FEEDER_REPUTATION_REVIEWS = "reputation_reviews"
 
 # Each entry carries `default_enabled`: the on/off a workspace gets before
 # the owner has toggled anything. The two internal-data feeders default ON
@@ -91,6 +92,17 @@ FEEDER_CATALOG = [
         ),
         "default_enabled": False,
     },
+    {
+        "kind": FEEDER_REPUTATION_REVIEWS,
+        "name": "Review monitoring (Google)",
+        "description": (
+            "Polls your Google Business Profile for new reviews and hands "
+            "each to the Reputation assistant to gauge sentiment and draft a "
+            "response. Requires the Google Business Profile connector. Off by "
+            "default."
+        ),
+        "default_enabled": False,
+    },
 ]
 
 _DEFAULT_ENABLED = {e["kind"]: e["default_enabled"] for e in FEEDER_CATALOG}
@@ -103,6 +115,12 @@ INBOX_SOURCE = "feeder-inbox"
 # a manageable batch per tick rather than the whole mailbox.
 INBOX_GMAIL_QUERY = "is:unread newer_than:7d"
 INBOX_MAX_PER_TICK = 10
+
+# The Reputation feeder's target + dedup constants.
+REPUTATION_AGENT = "reputation"
+REPUTATION_KIND = "reputation.check"
+REPUTATION_SOURCE = "feeder-reputation"
+REPUTATION_MAX_PER_TICK = 20
 
 # Stamped into every feeder-enqueued command's payload so we can tell a
 # proactive digest apart from a human/dashboard-requested summarize when
@@ -552,6 +570,152 @@ def enqueue_inbox_items_for_workspace(
     return enqueued
 
 
+def _gb_call(session, workspace_id, tool_name, payload):
+    """One Google Business Profile call through the gated connector path,
+    dispatched as the reputation assistant. Returns the result dict, or
+    None on any gate/connector failure (so the caller skips cleanly)."""
+    import main as _main
+    try:
+        return _main.invoke_connector_tool(
+            session,
+            workspace_id=workspace_id,
+            connector_type="google_business",
+            tool_name=tool_name,
+            payload=payload,
+            source_agent=REPUTATION_AGENT,
+        )
+    except Exception as exc:  # noqa: BLE001 — gate/connector failure = skip
+        logger.info(
+            "feeder: reputation %s skipped for ws=%s (%s)",
+            tool_name, workspace_id, type(exc).__name__,
+        )
+        return None
+
+
+def enqueue_reputation_reviews_for_workspace(
+    session: Session, workspace_id: str, now: datetime
+) -> int:
+    """Poll Google Business Profile reviews and enqueue one
+    reputation.check per new review. Returns the number enqueued.
+
+    Auto-discovers the target: the first account's first location. That
+    covers the common single-location small business with zero config; a
+    multi-location owner gets their first location until per-workspace
+    targeting lands (a deliberate, documented limitation, not silent — the
+    chosen location id rides each command's payload).
+
+    Reaches the connector through invoke_connector_tool — the same
+    capability + trust-zone + install gates as the bot-facing endpoint —
+    dispatching as the reputation assistant. A workspace that hasn't
+    connected Google Business Profile (or isn't authorized) gets nothing.
+
+    Dedup is permanent on the review id: a review is analyzed once, ever.
+    """
+    accounts = (_gb_call(session, workspace_id, "list_accounts", {}) or {}).get(
+        "accounts"
+    ) or []
+    if not accounts:
+        return 0
+    account_id = accounts[0].get("id")
+    if not account_id:
+        return 0
+
+    locations = (
+        _gb_call(session, workspace_id, "list_locations",
+                 {"account_id": account_id}) or {}
+    ).get("locations") or []
+    if not locations:
+        return 0
+    location = locations[0]
+    location_id = location.get("id")
+    if not location_id:
+        return 0
+
+    result = _gb_call(
+        session, workspace_id, "list_reviews",
+        {"account_id": account_id, "location_id": location_id,
+         "max_results": REPUTATION_MAX_PER_TICK},
+    )
+    reviews = (result or {}).get("reviews") or []
+    ids = [r.get("id") for r in reviews if r.get("id")]
+    if not ids:
+        return 0
+
+    from sqlalchemy import bindparam
+    seen_stmt = text(
+        """
+        SELECT payload ->> 'review_id' AS rid
+          FROM commands
+         WHERE workspace_id = :ws
+           AND kind = :kind
+           AND payload ->> 'source' = :source
+           AND payload ->> 'review_id' IN :ids
+        """
+    ).bindparams(bindparam("ids", expanding=True))
+    seen = {
+        r[0] for r in session.execute(
+            seen_stmt,
+            {"ws": workspace_id, "kind": REPUTATION_KIND,
+             "source": REPUTATION_SOURCE, "ids": ids},
+        )
+    }
+
+    where = location.get("title") or "Google Business Profile"
+    enqueued = 0
+    for r in reviews:
+        rid = r.get("id")
+        if not rid or rid in seen:
+            continue
+        review = {
+            # Field names the reputation assistant reads: text + rating +
+            # author + source.
+            "text": r.get("comment") or "",
+            "rating": r.get("rating"),
+            "author": r.get("reviewer"),
+            "source": where,
+            "review_id": rid,
+            "created_at": r.get("create_time"),
+        }
+        cmd_id = str(uuid.uuid4())
+        payload = {
+            "source": REPUTATION_SOURCE,
+            "review_id": rid,
+            "review": review,
+        }
+        session.execute(
+            text(
+                """
+                INSERT INTO commands (
+                    id, workspace_id, agent_name, kind, payload, status,
+                    approval_state, approved_at, created_at, expires_at,
+                    dispatch_chain_id, dispatch_depth
+                ) VALUES (
+                    :id, :ws, :agent, :kind, CAST(:payload AS JSONB),
+                    'pending', 'auto_approved', :now, :now, :expires,
+                    :chain, 0
+                )
+                """
+            ),
+            {
+                "id": cmd_id,
+                "ws": workspace_id,
+                "agent": REPUTATION_AGENT,
+                "kind": REPUTATION_KIND,
+                "payload": _json_dumps(payload),
+                "now": now,
+                "expires": now + _COMMAND_TTL,
+                "chain": cmd_id,
+            },
+        )
+        enqueued += 1
+
+    if enqueued:
+        logger.info(
+            "feeder: enqueued %d review(s) for ws=%s", enqueued, workspace_id
+        )
+    return enqueued
+
+
 def _has_recent_feeder_command(
     session: Session,
     workspace_id: str,
@@ -725,6 +889,21 @@ def tick(session: Session, now: datetime) -> int:
             except Exception:  # noqa: BLE001 — best-effort, keep going
                 logger.exception(
                     "feeder: failed to enqueue inbox items for ws=%s",
+                    workspace_id,
+                )
+
+    # Reputation feeder (default OFF) over workspaces running the
+    # Reputation assistant. Only polls Google Business Profile where the
+    # owner has opted in.
+    for workspace_id in _workspaces_running_agent(session, REPUTATION_AGENT):
+        if is_feeder_enabled(session, workspace_id, FEEDER_REPUTATION_REVIEWS):
+            try:
+                enqueued += enqueue_reputation_reviews_for_workspace(
+                    session, workspace_id, now
+                )
+            except Exception:  # noqa: BLE001 — best-effort, keep going
+                logger.exception(
+                    "feeder: failed to enqueue reviews for ws=%s",
                     workspace_id,
                 )
     return enqueued
