@@ -216,16 +216,19 @@ export default function Home() {
           title="No assistant runs yet"
           body={
             <>
-              Drop a project README and Lightsei proposes a team of bots
-              tailored to it. Once you deploy, every LLM call your bots
-              make shows up here.
+              Answer two quick questions and Lightsei sets up the AI
+              assistants that fit your business, then keeps them working in
+              the background. Once they run, every call shows up here.
             </>
           }
           primary={{
-            href: "/agents/team-from-readme",
-            label: "✨ Drop a README to build your team",
+            href: "/welcome",
+            label: "✨ Build my AI team",
           }}
-          secondary={{ href: "/agents", label: "See my assistants" }}
+          secondary={{
+            href: "/agents/team-from-readme",
+            label: "Build from a README instead",
+          }}
         />
       ) : (
         <div className="rounded-lg border border-gray-200 overflow-x-auto">
