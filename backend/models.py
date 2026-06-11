@@ -2587,6 +2587,11 @@ class FeederSetting(Base):
     enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("true"),
     )
+    # Feeder-specific targeting (e.g. the Reputation feeder's
+    # {account_id, location_id}). Empty = auto-discover.
+    config: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"),
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=text("now()"),
     )

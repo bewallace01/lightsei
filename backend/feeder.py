@@ -102,6 +102,9 @@ FEEDER_CATALOG = [
             "default."
         ),
         "default_enabled": False,
+        # This feeder takes a target the owner can pick (which business
+        # location). The connector backing the picker.
+        "target_connector": "google_business",
     },
 ]
 
@@ -393,12 +396,13 @@ def get_feeder_settings(
     """
     rows = session.execute(
         text(
-            "SELECT feeder_kind, enabled FROM feeder_settings "
+            "SELECT feeder_kind, enabled, config FROM feeder_settings "
             "WHERE workspace_id = :ws"
         ),
         {"ws": workspace_id},
     ).mappings().all()
     enabled_by_kind = {r["feeder_kind"]: bool(r["enabled"]) for r in rows}
+    config_by_kind = {r["feeder_kind"]: (r["config"] or {}) for r in rows}
     return [
         {
             "kind": entry["kind"],
@@ -407,9 +411,28 @@ def get_feeder_settings(
             "enabled": enabled_by_kind.get(
                 entry["kind"], entry["default_enabled"]
             ),
+            "config": config_by_kind.get(entry["kind"], {}),
+            # Whether this feeder takes a target the owner can pick.
+            "targetable": entry.get("target_connector") is not None,
         }
         for entry in FEEDER_CATALOG
     ]
+
+
+def get_feeder_config(
+    session: Session, workspace_id: str, feeder_kind: str
+) -> dict[str, Any]:
+    """The feeder's per-workspace config blob ({} if none / no row)."""
+    row = session.execute(
+        text(
+            "SELECT config FROM feeder_settings "
+            "WHERE workspace_id = :ws AND feeder_kind = :kind"
+        ),
+        {"ws": workspace_id, "kind": feeder_kind},
+    ).first()
+    if row is None or row[0] is None:
+        return {}
+    return dict(row[0])
 
 
 def set_feeder_enabled(
@@ -418,7 +441,8 @@ def set_feeder_enabled(
 ) -> None:
     """Upsert a feeder's on/off for a workspace. Does not commit.
 
-    Idempotent: re-setting the same value just bumps updated_at.
+    Idempotent: re-setting the same value just bumps updated_at. Leaves
+    config untouched (a fresh row gets the table default '{}').
     """
     session.execute(
         text(
@@ -432,6 +456,34 @@ def set_feeder_enabled(
         ),
         {"ws": workspace_id, "kind": feeder_kind, "enabled": enabled,
          "now": now},
+    )
+
+
+def set_feeder_config(
+    session: Session, workspace_id: str, feeder_kind: str,
+    config: dict[str, Any], now: datetime,
+) -> None:
+    """Upsert a feeder's config blob for a workspace. Does not commit.
+
+    A fresh row gets `enabled` from the catalog default (NOT the table
+    default), so setting a target before turning the feeder on can't
+    silently enable an off-by-default feeder (the inbox/reputation case).
+    On conflict it touches only config, leaving the owner's on/off alone.
+    """
+    session.execute(
+        text(
+            """
+            INSERT INTO feeder_settings
+                (workspace_id, feeder_kind, enabled, config,
+                 created_at, updated_at)
+            VALUES (:ws, :kind, :enabled, CAST(:config AS JSONB), :now, :now)
+            ON CONFLICT (workspace_id, feeder_kind)
+            DO UPDATE SET config = CAST(:config AS JSONB), updated_at = :now
+            """
+        ),
+        {"ws": workspace_id, "kind": feeder_kind,
+         "enabled": _DEFAULT_ENABLED.get(feeder_kind, True),
+         "config": _json_dumps(config), "now": now},
     )
 
 
@@ -598,11 +650,12 @@ def enqueue_reputation_reviews_for_workspace(
     """Poll Google Business Profile reviews and enqueue one
     reputation.check per new review. Returns the number enqueued.
 
-    Auto-discovers the target: the first account's first location. That
-    covers the common single-location small business with zero config; a
-    multi-location owner gets their first location until per-workspace
-    targeting lands (a deliberate, documented limitation, not silent — the
-    chosen location id rides each command's payload).
+    Targeting: if the owner has configured an account + location (via the
+    settings UI), that target is used directly — no discovery calls. With
+    no config, falls back to auto-discovering the first account's first
+    location, which covers the common single-location small business with
+    zero setup. Either way the chosen location id rides each command's
+    payload, so the target is never silent.
 
     Reaches the connector through invoke_connector_tool — the same
     capability + trust-zone + install gates as the bot-facing endpoint —
@@ -611,25 +664,35 @@ def enqueue_reputation_reviews_for_workspace(
 
     Dedup is permanent on the review id: a review is analyzed once, ever.
     """
-    accounts = (_gb_call(session, workspace_id, "list_accounts", {}) or {}).get(
-        "accounts"
-    ) or []
-    if not accounts:
-        return 0
-    account_id = accounts[0].get("id")
-    if not account_id:
-        return 0
+    config = get_feeder_config(session, workspace_id, FEEDER_REPUTATION_REVIEWS)
+    account_id = config.get("account_id")
+    location_id = config.get("location_id")
+    location_title = config.get("location_title")
 
-    locations = (
-        _gb_call(session, workspace_id, "list_locations",
-                 {"account_id": account_id}) or {}
-    ).get("locations") or []
-    if not locations:
-        return 0
-    location = locations[0]
-    location_id = location.get("id")
-    if not location_id:
-        return 0
+    if account_id and location_id:
+        # Configured target — skip discovery entirely.
+        location = {"id": location_id, "title": location_title}
+    else:
+        # Auto-discover: first account -> first location.
+        accounts = (
+            _gb_call(session, workspace_id, "list_accounts", {}) or {}
+        ).get("accounts") or []
+        if not accounts:
+            return 0
+        account_id = accounts[0].get("id")
+        if not account_id:
+            return 0
+
+        locations = (
+            _gb_call(session, workspace_id, "list_locations",
+                     {"account_id": account_id}) or {}
+        ).get("locations") or []
+        if not locations:
+            return 0
+        location = locations[0]
+        location_id = location.get("id")
+        if not location_id:
+            return 0
 
     result = _gb_call(
         session, workspace_id, "list_reviews",

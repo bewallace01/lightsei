@@ -3,10 +3,106 @@
 import { useEffect, useState } from "react";
 import {
   FeederSetting,
+  FeederTarget,
   UnauthorizedError,
   fetchFeeders,
+  fetchFeederTargets,
+  setFeederConfig,
   setFeederEnabled,
 } from "./api";
+
+/**
+ * The location picker shown under a targetable feeder (today: the
+ * Reputation review feeder, which can watch one of the owner's Google
+ * Business Profile locations). Lazily fetches the connector's locations;
+ * if the connector isn't connected it says so instead of a dead dropdown.
+ */
+function TargetPicker({
+  feeder,
+  onSaved,
+}: {
+  feeder: FeederSetting;
+  onSaved: (feeders: FeederSetting[]) => void;
+}) {
+  const [targets, setTargets] = useState<FeederTarget[] | null>(null);
+  const [available, setAvailable] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const current = (feeder.config?.location_id as string | undefined) ?? "";
+  const currentTitle = feeder.config?.location_title as string | undefined;
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const res = await fetchFeederTargets(feeder.kind);
+        if (!alive) return;
+        setTargets(res.targets);
+        setAvailable(res.available);
+      } catch {
+        if (alive) setTargets([]);
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [feeder.kind]);
+
+  async function onPick(locationId: string) {
+    const t = (targets || []).find((x) => x.location_id === locationId);
+    if (!t) return;
+    setBusy(true);
+    try {
+      const updated = await setFeederConfig(feeder.kind, {
+        account_id: t.account_id,
+        location_id: t.location_id,
+        location_title: t.location_title,
+      });
+      onSaved(updated);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="mt-2 pl-0 sm:pl-1">
+      {targets === null ? (
+        <div className="text-xs text-gray-400">loading locations…</div>
+      ) : !available || targets.length === 0 ? (
+        <div className="text-xs text-gray-400">
+          Connect Google Business Profile (Integrations) to choose a location.
+          {current && currentTitle && (
+            <> Currently watching: {currentTitle}.</>
+          )}
+        </div>
+      ) : (
+        <label className="flex items-center gap-2 text-xs text-gray-600">
+          <span className="text-gray-500">Location</span>
+          <select
+            value={current}
+            disabled={busy}
+            onChange={(e) => onPick(e.target.value)}
+            className="text-xs rounded-md ring-1 ring-gray-300 px-2 py-1 focus:outline-none focus:ring-2 focus:ring-indigo-600 disabled:opacity-50"
+          >
+            <option value="" disabled>
+              Pick a location…
+            </option>
+            {targets.map((t) => (
+              <option key={t.location_id} value={t.location_id}>
+                {t.label}
+              </option>
+            ))}
+          </select>
+          {!current && (
+            <span className="text-amber-600">
+              auto (first location) until you pick one
+            </span>
+          )}
+        </label>
+      )}
+    </div>
+  );
+}
+
 
 /**
  * "Proactive feeders" settings: a per-workspace on/off for each feeder
@@ -77,34 +173,42 @@ export default function FeedersSettingsSection() {
             {feeders.map((f) => (
               <li
                 key={f.kind}
-                className="py-3 flex items-start justify-between gap-4 first:pt-0 last:pb-0"
+                className="py-3 first:pt-0 last:pb-0"
               >
-                <div className="min-w-0">
-                  <div className="text-sm font-medium text-gray-900">
-                    {f.name}
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium text-gray-900">
+                      {f.name}
+                    </div>
+                    <div className="text-xs text-gray-500 mt-0.5">
+                      {f.description}
+                    </div>
                   </div>
-                  <div className="text-xs text-gray-500 mt-0.5">
-                    {f.description}
-                  </div>
-                </div>
-                <button
-                  role="switch"
-                  aria-checked={f.enabled}
-                  aria-label={`Turn ${f.name} ${f.enabled ? "off" : "on"}`}
-                  disabled={busyKind === f.kind}
-                  onClick={() => onToggle(f.kind, !f.enabled)}
-                  className={
-                    "relative shrink-0 inline-flex h-6 w-11 items-center rounded-full transition-colors disabled:opacity-50 " +
-                    (f.enabled ? "bg-accent-600" : "bg-gray-300")
-                  }
-                >
-                  <span
+                  <button
+                    role="switch"
+                    aria-checked={f.enabled}
+                    aria-label={`Turn ${f.name} ${f.enabled ? "off" : "on"}`}
+                    disabled={busyKind === f.kind}
+                    onClick={() => onToggle(f.kind, !f.enabled)}
                     className={
-                      "inline-block h-4 w-4 transform rounded-full bg-white transition-transform " +
-                      (f.enabled ? "translate-x-6" : "translate-x-1")
+                      "relative shrink-0 inline-flex h-6 w-11 items-center rounded-full transition-colors disabled:opacity-50 " +
+                      (f.enabled ? "bg-accent-600" : "bg-gray-300")
                     }
+                  >
+                    <span
+                      className={
+                        "inline-block h-4 w-4 transform rounded-full bg-white transition-transform " +
+                        (f.enabled ? "translate-x-6" : "translate-x-1")
+                      }
+                    />
+                  </button>
+                </div>
+                {f.targetable && (
+                  <TargetPicker
+                    feeder={f}
+                    onSaved={(updated) => setFeeders(updated)}
                   />
-                </button>
+                )}
               </li>
             ))}
           </ul>
