@@ -621,6 +621,61 @@ export async function runFeederDigest(): Promise<RunFeederDigestResult> {
   })) as RunFeederDigestResult;
 }
 
+// ---------- Business onboarding ---------- //
+
+export interface OnboardingIndustry {
+  key: string;
+  label: string;
+}
+
+export interface OnboardingGoal {
+  key: string;
+  label: string;
+  assistant: string;
+  connector: string | null;
+}
+
+export interface OnboardingCatalog {
+  industries: OnboardingIndustry[];
+  goals: OnboardingGoal[];
+  recommendations: Record<string, string[]>;
+}
+
+export interface OnboardingProfile {
+  industry: string | null;
+  goals: string[];
+  completed_at: string;
+}
+
+export interface OnboardingPlan {
+  industry: string | null;
+  goals: string[];
+  assistants: string[];
+  feeders: string[];
+  connectors_needed: { type: string; label: string }[];
+}
+
+export async function fetchOnboarding(): Promise<{
+  catalog: OnboardingCatalog;
+  profile: OnboardingProfile | null;
+}> {
+  return (await authedJson("/workspaces/me/onboarding")) as {
+    catalog: OnboardingCatalog;
+    profile: OnboardingProfile | null;
+  };
+}
+
+export async function submitOnboarding(
+  industry: string | null,
+  goals: string[],
+): Promise<{ status: string; plan: OnboardingPlan; profile: OnboardingProfile }> {
+  return (await authedJson("/workspaces/me/onboarding", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ industry, goals }),
+  })) as { status: string; plan: OnboardingPlan; profile: OnboardingProfile };
+}
+
 export interface FeederSetting {
   kind: string;
   name: string;

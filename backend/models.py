@@ -273,6 +273,11 @@ class Workspace(Base):
     polaris_auto_apply_widget_fixes: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false"),
     )
+    # Phase 33.1: business-onboarding answers ({industry, goals,
+    # completed_at}). NULL = onboarding not done.
+    onboarding_profile: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=True,
+    )
 
 
 class ApiKey(Base):

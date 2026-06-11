@@ -2470,6 +2470,56 @@ def get_feeder_digest_status(
     }
 
 
+@app.get("/workspaces/me/onboarding")
+def get_onboarding(
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """The onboarding wizard's data: the industry + goal catalog, plus this
+    workspace's saved profile (null if onboarding isn't done yet).
+
+    The dashboard uses `profile is null` to decide whether to show the
+    welcome wizard.
+    """
+    import onboarding
+
+    return {
+        "catalog": onboarding.catalog(),
+        "profile": onboarding.get_profile(session, workspace_id),
+    }
+
+
+class OnboardingSubmit(BaseModel):
+    industry: Optional[str] = None
+    goals: list[str] = []
+
+
+@app.post("/workspaces/me/onboarding")
+def submit_onboarding(
+    body: OnboardingSubmit,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Provision a business's AI team from their answers.
+
+    Maps {industry, goals} to a plan (which assistants to create, which
+    feeders to turn on, which connectors they still need to connect),
+    applies it, and returns the plan so the dashboard can show "here's
+    your team, connect these next". Idempotent: re-submitting just
+    re-applies (ensure_agent + feeder upsert + profile overwrite).
+    """
+    import onboarding
+
+    plan = onboarding.build_provisioning_plan(body.industry, body.goals)
+    onboarding.apply_provisioning_plan(session, workspace_id, plan, utcnow())
+    session.commit()
+    return {
+        "status": "provisioned",
+        "plan": plan,
+        "profile": onboarding.get_profile(session, workspace_id),
+    }
+
+
 @app.get("/workspaces/me/feeders")
 def list_feeders(
     session: Session = Depends(get_session),
