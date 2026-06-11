@@ -698,3 +698,89 @@ def test_reputation_feeder_runs_in_tick_when_enabled(monkeypatch):
         feeder.tick(s, now)
     with session_scope() as s:
         assert _count_reputation_cmds(s, ws) == 2
+
+
+# ---------- per-workspace feeder targeting (config) ---------- #
+
+
+def test_feeder_config_round_trips():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        feeder.set_feeder_config(
+            s, ws, feeder.FEEDER_REPUTATION_REVIEWS,
+            {"account_id": "acc1", "location_id": "loc1",
+             "location_title": "Acme Downtown"}, now,
+        )
+    with session_scope() as s:
+        cfg = feeder.get_feeder_config(s, ws, feeder.FEEDER_REPUTATION_REVIEWS)
+        assert cfg["account_id"] == "acc1"
+        assert cfg["location_id"] == "loc1"
+
+
+def test_setting_config_does_not_enable_an_off_feeder():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        feeder.set_feeder_config(
+            s, ws, feeder.FEEDER_REPUTATION_REVIEWS,
+            {"account_id": "a", "location_id": "l"}, now,
+        )
+    with session_scope() as s:
+        # Reputation defaults OFF; picking a target must not flip it on.
+        assert not feeder.is_feeder_enabled(
+            s, ws, feeder.FEEDER_REPUTATION_REVIEWS)
+
+
+def test_get_feeder_settings_carries_config_and_targetable():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        feeder.set_feeder_config(
+            s, ws, feeder.FEEDER_REPUTATION_REVIEWS,
+            {"location_id": "loc1"}, now,
+        )
+    with session_scope() as s:
+        by_kind = {f["kind"]: f for f in feeder.get_feeder_settings(s, ws)}
+    rep = by_kind[feeder.FEEDER_REPUTATION_REVIEWS]
+    assert rep["targetable"] is True
+    assert rep["config"]["location_id"] == "loc1"
+    # Internal feeders take no target.
+    assert by_kind[feeder.FEEDER_WEEKLY_DIGEST]["targetable"] is False
+
+
+def test_reputation_feeder_uses_configured_target_without_discovery(monkeypatch):
+    import main
+
+    def _invoke(session, *, workspace_id, connector_type, tool_name,
+                payload, source_agent):
+        if tool_name == "list_reviews":
+            # Confirm the configured target is what's queried.
+            assert payload["account_id"] == "acc9"
+            assert payload["location_id"] == "loc9"
+            return {"reviews": [_review("rv1", 1, "Bad")]}
+        raise AssertionError(
+            f"discovery call {tool_name} should be skipped when configured")
+
+    monkeypatch.setattr(main, "invoke_connector_tool", _invoke)
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_reputation(s, ws)
+        feeder.set_feeder_config(
+            s, ws, feeder.FEEDER_REPUTATION_REVIEWS,
+            {"account_id": "acc9", "location_id": "loc9",
+             "location_title": "Acme Uptown"}, now,
+        )
+
+    with session_scope() as s:
+        n = feeder.enqueue_reputation_reviews_for_workspace(s, ws, now)
+        assert n == 1
+
+    with session_scope() as s:
+        row = s.execute(
+            text("SELECT payload FROM commands WHERE workspace_id = :ws"),
+            {"ws": ws},
+        ).mappings().first()
+        # The configured location title rides the command payload.
+        assert row["payload"]["review"]["source"] == "Acme Uptown"

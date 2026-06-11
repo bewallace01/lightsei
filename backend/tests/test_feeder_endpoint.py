@@ -122,3 +122,86 @@ def test_toggle_unknown_feeder_404(client, alice):
         json={"enabled": False},
     )
     assert r.status_code == 404
+
+
+# ---------- feeder targeting (config) endpoints ---------- #
+
+
+def test_set_config_on_targetable_feeder(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.patch(
+        "/workspaces/me/feeders/reputation_reviews/config",
+        headers=h,
+        json={"config": {"account_id": "a1", "location_id": "l1",
+                         "location_title": "Acme Downtown"}},
+    )
+    assert r.status_code == 200, r.text
+    by_kind = {f["kind"]: f for f in r.json()["feeders"]}
+    rep = by_kind["reputation_reviews"]
+    assert rep["config"]["location_id"] == "l1"
+    assert rep["targetable"] is True
+    # Setting a target must not turn the (default-off) feeder on.
+    assert rep["enabled"] is False
+
+
+def test_set_config_on_non_targetable_feeder_400(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.patch(
+        "/workspaces/me/feeders/weekly_digest/config",
+        headers=h,
+        json={"config": {"anything": "x"}},
+    )
+    assert r.status_code == 400
+
+
+def test_list_targets_returns_connector_locations(client, alice, monkeypatch):
+    import main
+
+    def _invoke(session, *, workspace_id, connector_type, tool_name,
+                payload, source_agent):
+        assert connector_type == "google_business"
+        if tool_name == "list_accounts":
+            return {"accounts": [{"id": "a1", "account_name": "Acme"}]}
+        if tool_name == "list_locations":
+            return {"locations": [
+                {"id": "l1", "title": "Downtown"},
+                {"id": "l2", "title": "Uptown"},
+            ]}
+        raise AssertionError(tool_name)
+
+    monkeypatch.setattr(main, "invoke_connector_tool", _invoke)
+    h = auth_headers(alice["session_token"])
+    r = client.get(
+        "/workspaces/me/feeders/reputation_reviews/targets", headers=h
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["available"] is True
+    labels = {t["label"] for t in body["targets"]}
+    assert labels == {"Downtown", "Uptown"}
+
+
+def test_list_targets_empty_when_connector_unavailable(client, alice, monkeypatch):
+    import main
+    from fastapi import HTTPException
+
+    def _invoke(*a, **k):
+        raise HTTPException(status_code=400,
+                            detail={"error": "connector_not_installed"})
+
+    monkeypatch.setattr(main, "invoke_connector_tool", _invoke)
+    h = auth_headers(alice["session_token"])
+    r = client.get(
+        "/workspaces/me/feeders/reputation_reviews/targets", headers=h
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["available"] is False
+    assert body["targets"] == []
+    assert body["reason"] == "connector_not_installed"
+
+
+def test_list_targets_400_for_non_targetable(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.get("/workspaces/me/feeders/weekly_digest/targets", headers=h)
+    assert r.status_code == 400

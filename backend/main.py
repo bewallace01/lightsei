@@ -2516,6 +2516,119 @@ def set_feeder(
     return {"feeders": feeder.get_feeder_settings(session, workspace_id)}
 
 
+class FeederConfigBody(BaseModel):
+    config: dict[str, Any]
+
+
+def _feeder_catalog_entry(feeder_kind: str) -> dict[str, Any]:
+    import feeder
+
+    for entry in feeder.FEEDER_CATALOG:
+        if entry["kind"] == feeder_kind:
+            return entry
+    raise HTTPException(status_code=404, detail="unknown feeder")
+
+
+@app.patch("/workspaces/me/feeders/{feeder_kind}/config")
+def set_feeder_config_endpoint(
+    feeder_kind: str,
+    body: FeederConfigBody,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Set a feeder's per-workspace target config.
+
+    Only targetable feeders (those with a `target_connector`) accept config
+    — a 400 otherwise so a caller can't stash arbitrary blobs on a feeder
+    that ignores them. Setting config never flips the feeder on (a fresh
+    row inherits the catalog default), so picking a target is safe before
+    enabling.
+    """
+    import feeder
+
+    entry = _feeder_catalog_entry(feeder_kind)
+    if entry.get("target_connector") is None:
+        raise HTTPException(
+            status_code=400, detail="this feeder takes no target config"
+        )
+
+    feeder.set_feeder_config(
+        session, workspace_id, feeder_kind, body.config, utcnow()
+    )
+    session.commit()
+    return {"feeders": feeder.get_feeder_settings(session, workspace_id)}
+
+
+@app.get("/workspaces/me/feeders/{feeder_kind}/targets")
+def list_feeder_targets(
+    feeder_kind: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Enumerate the targets an owner can pick for a targetable feeder.
+
+    For the Reputation feeder this walks the Google Business Profile
+    connector (accounts -> locations) and returns each location as a
+    pickable option. Goes through invoke_connector_tool as the feeder's
+    target assistant, so the same gates apply. On any connector failure
+    (not connected, not authorized) it returns an empty list + a reason
+    rather than a 500, so the UI can prompt "connect the connector first".
+    """
+    import feeder
+
+    entry = _feeder_catalog_entry(feeder_kind)
+    connector_type = entry.get("target_connector")
+    if connector_type is None:
+        raise HTTPException(
+            status_code=400, detail="this feeder takes no target"
+        )
+
+    # Currently only the google_business review feeder is targetable.
+    source_agent = feeder.REPUTATION_AGENT
+    try:
+        accounts = (invoke_connector_tool(
+            session, workspace_id=workspace_id, connector_type=connector_type,
+            tool_name="list_accounts", payload={}, source_agent=source_agent,
+        ) or {}).get("accounts") or []
+    except HTTPException as exc:
+        return {"targets": [], "available": False,
+                "reason": _connector_unavailable_reason(exc)}
+
+    targets: list[dict[str, Any]] = []
+    for acc in accounts:
+        acc_id = acc.get("id")
+        if not acc_id:
+            continue
+        try:
+            locations = (invoke_connector_tool(
+                session, workspace_id=workspace_id,
+                connector_type=connector_type, tool_name="list_locations",
+                payload={"account_id": acc_id}, source_agent=source_agent,
+            ) or {}).get("locations") or []
+        except HTTPException:
+            continue
+        for loc in locations:
+            loc_id = loc.get("id")
+            if not loc_id:
+                continue
+            targets.append({
+                "account_id": acc_id,
+                "location_id": loc_id,
+                "location_title": loc.get("title"),
+                "account_name": acc.get("account_name"),
+                "label": loc.get("title") or loc_id,
+            })
+
+    return {"targets": targets, "available": True, "reason": None}
+
+
+def _connector_unavailable_reason(exc: HTTPException) -> str:
+    detail = exc.detail
+    if isinstance(detail, dict):
+        return str(detail.get("error") or detail.get("message") or "unavailable")
+    return str(detail or "unavailable")
+
+
 @app.get("/workspaces/me/zone-presets")
 def get_zone_presets(
     workspace_id: str = Depends(get_workspace_id),

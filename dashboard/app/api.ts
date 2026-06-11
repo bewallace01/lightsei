@@ -626,6 +626,22 @@ export interface FeederSetting {
   name: string;
   description: string;
   enabled: boolean;
+  config: Record<string, unknown>;
+  targetable: boolean;
+}
+
+export interface FeederTarget {
+  account_id: string;
+  location_id: string;
+  location_title: string | null;
+  account_name: string | null;
+  label: string;
+}
+
+export interface FeederTargetsResult {
+  targets: FeederTarget[];
+  available: boolean;
+  reason: string | null;
 }
 
 export async function fetchFeeders(): Promise<FeederSetting[]> {
@@ -645,6 +661,26 @@ export async function setFeederEnabled(
     body: JSON.stringify({ enabled }),
   })) as { feeders: FeederSetting[] };
   return body.feeders;
+}
+
+export async function setFeederConfig(
+  kind: string,
+  config: Record<string, unknown>,
+): Promise<FeederSetting[]> {
+  const body = (await authedJson(`/workspaces/me/feeders/${kind}/config`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ config }),
+  })) as { feeders: FeederSetting[] };
+  return body.feeders;
+}
+
+export async function fetchFeederTargets(
+  kind: string,
+): Promise<FeederTargetsResult> {
+  return (await authedJson(
+    `/workspaces/me/feeders/${kind}/targets`,
+  )) as FeederTargetsResult;
 }
 
 export async function renameWorkspace(name: string): Promise<SessionWorkspace> {
