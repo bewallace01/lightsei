@@ -50,6 +50,18 @@ def test_build_prompt_includes_email(fake_lightsei):
     assert "a@b.com" in user and "Hi" in user and "hello there" in user
 
 
+def test_build_prompt_tailors_system_to_industry(fake_lightsei):
+    _, bot = fake_lightsei
+    system, _ = bot.build_prompt(
+        {"from": "a@b.com", "subject": "Hi", "body": "x"},
+        industry="home_services",
+    )
+    assert "home services" in system
+    base, _ = bot.build_prompt(
+        {"from": "a@b.com", "subject": "Hi", "body": "x"}, industry=None)
+    assert "home services" not in base
+
+
 def test_parse_triage_normalizes_and_validates(fake_lightsei):
     _, bot = fake_lightsei
     t = bot.parse_triage('{"category":"SALES","urgency":"weird","summary":"x","draft_reply":"y","needs_human":1}')

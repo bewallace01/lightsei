@@ -75,15 +75,44 @@ _SYSTEM = (
 )
 
 
+# Industry tailoring: the worker injects LIGHTSEI_BUSINESS_INDUSTRY from the
+# owner's onboarding answers; we append a short clause so the assistant's
+# voice + priorities fit the business. Empty / unknown industry = no change.
+_INDUSTRY_LABELS = {
+    "restaurant": "restaurant or cafe",
+    "home_services": "home services business",
+    "retail": "retail or e-commerce business",
+    "professional": "professional services firm",
+}
+
+
+def _industry_clause(industry: Optional[str]) -> str:
+    label = _INDUSTRY_LABELS.get((industry or "").strip())
+    if not label:
+        return ""
+    return (
+        f" You are working for a {label}; use language and priorities that "
+        "fit that kind of business."
+    )
+
+
+def _system_prompt(industry: Optional[str] = None) -> str:
+    if industry is None:
+        industry = os.environ.get("LIGHTSEI_BUSINESS_INDUSTRY")
+    return _SYSTEM + _industry_clause(industry)
+
+
 # ---------- Prompt + parsing (pure) ---------- #
 
 
-def build_prompt(email: dict[str, Any]) -> tuple[str, str]:
+def build_prompt(
+    email: dict[str, Any], *, industry: Optional[str] = None
+) -> tuple[str, str]:
     sender = str(email.get("from") or email.get("sender") or "unknown")
     subject = str(email.get("subject") or "(no subject)")
     body = str(email.get("body") or email.get("text") or "")
     user = f"From: {sender}\nSubject: {subject}\n\n{body}".strip()
-    return _SYSTEM, user
+    return _system_prompt(industry), user
 
 
 def parse_triage(text: str) -> dict[str, Any]:

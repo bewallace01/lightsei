@@ -5536,6 +5536,21 @@ def worker_list_workspace_secrets(
             # The user will see the bot fail to read this secret and can
             # re-set it from the dashboard.
             continue
+
+    # Phase 33.3: inject the workspace's business context as an env var
+    # (NOT a stored secret) so deployed personas can tailor their voice to
+    # the owner's industry. Piggy-backs on this dict because the worker
+    # injects the whole thing as the bot's env, avoiding a second
+    # round-trip. Never overrides a real secret of the same name.
+    prof_row = session.execute(
+        text("SELECT onboarding_profile FROM workspaces WHERE id = :ws"),
+        {"ws": workspace_id},
+    ).first()
+    if prof_row and prof_row[0]:
+        industry = (prof_row[0] or {}).get("industry")
+        if industry and "LIGHTSEI_BUSINESS_INDUSTRY" not in out:
+            out["LIGHTSEI_BUSINESS_INDUSTRY"] = str(industry)
+
     return {"secrets": out}
 
 

@@ -55,6 +55,20 @@ def test_build_prompt_question_mode(fake_lightsei):
     assert "Question to answer: How many leads?" in user
 
 
+def test_build_prompt_tailors_system_to_industry(fake_lightsei):
+    _, bot = fake_lightsei
+    system, _ = bot.build_prompt({"data": {}}, industry="restaurant")
+    assert "restaurant or cafe" in system
+
+
+def test_build_prompt_unknown_industry_adds_no_clause(fake_lightsei):
+    _, bot = fake_lightsei
+    base, _ = bot.build_prompt({"data": {}}, industry=None)
+    other, _ = bot.build_prompt({"data": {}}, industry="other")
+    # "other" maps to no label; None (env unset) likewise -> identical.
+    assert base == other
+
+
 def test_build_prompt_accepts_string_data(fake_lightsei):
     _, bot = fake_lightsei
     _, user = bot.build_prompt({"data": "raw csv text here"})

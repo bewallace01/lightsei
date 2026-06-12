@@ -66,6 +66,33 @@ _SYSTEM = (
 )
 
 
+# Industry tailoring: the worker injects LIGHTSEI_BUSINESS_INDUSTRY from the
+# owner's onboarding answers; we append a short clause so the assistant's
+# voice + priorities fit the business. Empty / unknown industry = no change.
+_INDUSTRY_LABELS = {
+    "restaurant": "restaurant or cafe",
+    "home_services": "home services business",
+    "retail": "retail or e-commerce business",
+    "professional": "professional services firm",
+}
+
+
+def _industry_clause(industry: Optional[str]) -> str:
+    label = _INDUSTRY_LABELS.get((industry or "").strip())
+    if not label:
+        return ""
+    return (
+        f" You are working for a {label}; use language, examples, and "
+        "priorities that fit that kind of business."
+    )
+
+
+def _system_prompt(industry: Optional[str] = None) -> str:
+    if industry is None:
+        industry = os.environ.get("LIGHTSEI_BUSINESS_INDUSTRY")
+    return _SYSTEM + _industry_clause(industry)
+
+
 # ---------- Prompt building (pure) ---------- #
 
 
@@ -78,8 +105,11 @@ def _render_data(data: Any) -> str:
         return repr(data)
 
 
-def build_prompt(payload: dict[str, Any]) -> tuple[str, str]:
-    """Return (system, user). Pure + testable."""
+def build_prompt(
+    payload: dict[str, Any], *, industry: Optional[str] = None
+) -> tuple[str, str]:
+    """Return (system, user). Pure + testable. `industry` defaults to the
+    LIGHTSEI_BUSINESS_INDUSTRY env var the worker injects."""
     data = payload.get("data", {})
     question = str(payload.get("question") or "").strip()
     period = str(payload.get("period") or "").strip()
@@ -92,7 +122,7 @@ def build_prompt(payload: dict[str, Any]) -> tuple[str, str]:
     else:
         parts.append("Produce the weekly summary.")
     parts.append("Data:\n" + _render_data(data))
-    return _SYSTEM, "\n\n".join(parts)
+    return _system_prompt(industry), "\n\n".join(parts)
 
 
 # ---------- Generation (DI seam) ---------- #
