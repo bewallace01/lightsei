@@ -5032,6 +5032,112 @@ async def upload_deployment(
     return _serialize_deployment(dep)
 
 
+def _has_active_deployment(
+    session: Session, workspace_id: str, agent_name: str
+) -> bool:
+    """True if the agent already has a queued/building/running deployment
+    that's meant to stay up (desired_state='running')."""
+    row = session.execute(
+        select(Deployment.id).where(
+            Deployment.workspace_id == workspace_id,
+            Deployment.agent_name == agent_name,
+            Deployment.desired_state == "running",
+            Deployment.status.in_(["queued", "building", "running"]),
+        ).limit(1)
+    ).first()
+    return row is not None
+
+
+def _deploy_builtin_persona(
+    session: Session, workspace_id: str, agent_name: str, now: datetime
+) -> "Deployment":
+    """Build the vendored persona's bundle, store it as a blob, and queue a
+    deployment the worker will pick up. Retires any prior active deployment
+    for the agent first (same as the upload path). Does not commit."""
+    import builtin_personas
+
+    data = builtin_personas.build_bundle_zip(agent_name)
+    blob = DeploymentBlob(
+        id=str(uuid.uuid4()),
+        workspace_id=workspace_id,
+        size_bytes=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        data=data,
+        created_at=now,
+    )
+    session.add(blob)
+    session.flush()
+
+    ensure_agent(session, workspace_id, agent_name, now)
+    _retire_active_deployments_for_agent(
+        session, workspace_id=workspace_id, agent_name=agent_name,
+    )
+    dep = Deployment(
+        id=str(uuid.uuid4()),
+        workspace_id=workspace_id,
+        agent_name=agent_name,
+        status="queued",
+        desired_state="running",
+        source_blob_id=blob.id,
+        source="builtin",
+        source_commit_sha=None,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(dep)
+    session.flush()
+    return dep
+
+
+@app.post("/workspaces/me/team/deploy")
+def deploy_team(
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Bring the provisioned built-in personas online.
+
+    The "working team" payoff of onboarding: for each built-in persona that
+    has an assistant row in this workspace but no active deployment, build +
+    queue its vendored bundle for the worker. Idempotent — personas already
+    running are reported, not redeployed — so the welcome page can call it
+    safely and a re-run is a no-op.
+
+    Flags `needs_anthropic_key` when an LLM-backed persona was provisioned
+    but the workspace has no ANTHROPIC_API_KEY secret, so the dashboard can
+    prompt for it (those personas crash gracefully without one).
+    """
+    import builtin_personas
+
+    now = utcnow()
+    agent_names = set(session.execute(
+        text("SELECT name FROM agents WHERE workspace_id = :ws"),
+        {"ws": workspace_id},
+    ).scalars().all())
+    provisioned = [p for p in builtin_personas.BUILTIN_PERSONAS
+                   if p in agent_names]
+
+    deployed: list[str] = []
+    already_running: list[str] = []
+    for name in provisioned:
+        if _has_active_deployment(session, workspace_id, name):
+            already_running.append(name)
+            continue
+        _deploy_builtin_persona(session, workspace_id, name, now)
+        deployed.append(name)
+    session.commit()
+
+    has_llm = any(p in builtin_personas.LLM_PERSONAS for p in provisioned)
+    has_key = session.get(
+        WorkspaceSecret, (workspace_id, "ANTHROPIC_API_KEY")
+    ) is not None
+
+    return {
+        "deployed": deployed,
+        "already_running": already_running,
+        "needs_anthropic_key": bool(has_llm and not has_key),
+    }
+
+
 @app.get("/workspaces/me/deployments")
 def list_deployments(
     agent_name: Optional[str] = None,

@@ -676,6 +676,18 @@ export async function submitOnboarding(
   })) as { status: string; plan: OnboardingPlan; profile: OnboardingProfile };
 }
 
+export interface DeployTeamResult {
+  deployed: string[];
+  already_running: string[];
+  needs_anthropic_key: boolean;
+}
+
+export async function deployTeam(): Promise<DeployTeamResult> {
+  return (await authedJson("/workspaces/me/team/deploy", {
+    method: "POST",
+  })) as DeployTeamResult;
+}
+
 export interface FeederSetting {
   kind: string;
   name: string;
