@@ -5,8 +5,10 @@ import { useRouter } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 
 import {
+  DeployTeamResult,
   OnboardingCatalog,
   OnboardingPlan,
+  deployTeam,
   fetchOnboarding,
   handleAuthError,
   submitOnboarding,
@@ -26,6 +28,7 @@ export default function WelcomePage() {
   const [step, setStep] = useState<1 | 2>(1);
   const [submitting, setSubmitting] = useState(false);
   const [plan, setPlan] = useState<OnboardingPlan | null>(null);
+  const [deploy, setDeploy] = useState<DeployTeamResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -67,6 +70,13 @@ export default function WelcomePage() {
     try {
       const res = await submitOnboarding(industry, Array.from(goals));
       setPlan(res.plan);
+      // Bring the provisioned assistants online (best-effort: if it
+      // fails, the team is still provisioned and can be deployed later).
+      try {
+        setDeploy(await deployTeam());
+      } catch {
+        setDeploy(null);
+      }
     } catch (e) {
       if (handleAuthError(e, router)) return;
       setError(String(e));
@@ -110,7 +120,22 @@ export default function WelcomePage() {
           We provisioned {plan.assistants.length} assistant
           {plan.assistants.length === 1 ? "" : "s"} and turned on the feeders
           that keep them proactive.
+          {deploy &&
+            (deploy.deployed.length > 0 || deploy.already_running.length > 0) && (
+              <> They&apos;re coming online now.</>
+            )}
         </p>
+
+        {deploy?.needs_anthropic_key && (
+          <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+            Some assistants use AI and need an Anthropic API key to start
+            working.{" "}
+            <Link href="/account" className="underline font-medium">
+              Add your key
+            </Link>
+            .
+          </div>
+        )}
 
         <div className="mt-6 rounded-lg border border-gray-200 p-5">
           <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2">
@@ -157,6 +182,7 @@ export default function WelcomePage() {
           <button
             onClick={() => {
               setPlan(null);
+              setDeploy(null);
               setStep(1);
             }}
             className="text-sm px-4 py-2 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50"
