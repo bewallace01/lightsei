@@ -64,11 +64,41 @@ _SYSTEM = (
 )
 
 
+# Industry tailoring: the worker injects LIGHTSEI_BUSINESS_INDUSTRY from the
+# owner's onboarding answers; we append a short clause so the assistant's
+# voice + priorities fit the business. Empty / unknown industry = no change.
+_INDUSTRY_LABELS = {
+    "restaurant": "restaurant or cafe",
+    "home_services": "home services business",
+    "retail": "retail or e-commerce business",
+    "professional": "professional services firm",
+}
+
+
+def _industry_clause(industry: Optional[str]) -> str:
+    label = _INDUSTRY_LABELS.get((industry or "").strip())
+    if not label:
+        return ""
+    return (
+        f" You are working for a {label}; use language, examples, and "
+        "priorities that fit that kind of business."
+    )
+
+
+def _system_prompt(industry: Optional[str] = None) -> str:
+    if industry is None:
+        industry = os.environ.get("LIGHTSEI_BUSINESS_INDUSTRY")
+    return _SYSTEM + _industry_clause(industry)
+
+
 # ---------- Prompt building (pure) ---------- #
 
 
-def build_prompt(task: str, payload: dict[str, Any]) -> tuple[str, str]:
-    """Return (system, user) for the requested task. Pure + testable."""
+def build_prompt(
+    task: str, payload: dict[str, Any], *, industry: Optional[str] = None
+) -> tuple[str, str]:
+    """Return (system, user) for the requested task. Pure + testable.
+    `industry` defaults to the LIGHTSEI_BUSINESS_INDUSTRY env var."""
     topic = str(payload.get("topic") or payload.get("prompt") or "").strip()
     business = str(payload.get("business_context") or payload.get("business") or "").strip()
     platform = str(payload.get("platform") or "").strip()
@@ -92,7 +122,7 @@ def build_prompt(task: str, payload: dict[str, Any]) -> tuple[str, str]:
         ask = f"Write punchy ad copy for: {topic}. Give a headline and 1-2 lines of body, plus a call to action."
 
     user = f"{ask}\n\n{context}".strip()
-    return _SYSTEM, user
+    return _system_prompt(industry), user
 
 
 # ---------- Generation (DI seam) ---------- #

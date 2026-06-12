@@ -55,6 +55,14 @@ def test_build_prompt_ad_copy_carries_context(fake_lightsei):
     assert "summer promo" in user and "Facebook" in user and "fun" in user and "cafe" in user
 
 
+def test_build_prompt_tailors_system_to_industry(fake_lightsei):
+    _, bot = fake_lightsei
+    system, _ = bot.build_prompt("ad_copy", {"topic": "x"}, industry="retail")
+    assert "retail or e-commerce" in system
+    base, _ = bot.build_prompt("ad_copy", {"topic": "x"}, industry=None)
+    assert "retail" not in base
+
+
 def test_build_prompt_varies_by_task(fake_lightsei):
     _, bot = fake_lightsei
     assert "hashtag" in bot.build_prompt("social_post", {"topic": "x"})[1].lower()

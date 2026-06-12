@@ -422,6 +422,29 @@ def test_workspace_secrets_returned_decrypted(client, alice):
     }
 
 
+def test_workspace_secrets_inject_business_industry(client, alice):
+    """Phase 33.3: a completed onboarding profile surfaces the industry as
+    LIGHTSEI_BUSINESS_INDUSTRY so deployed personas can tailor their voice."""
+    h = auth_headers(alice["session_token"])
+    client.post(
+        "/workspaces/me/onboarding", headers=h,
+        json={"industry": "restaurant", "goals": ["summary"]},
+    )
+    r = client.get(
+        f"/worker/workspaces/{alice['workspace']['id']}/secrets",
+        headers=WORKER_HEADERS,
+    )
+    assert r.json()["secrets"]["LIGHTSEI_BUSINESS_INDUSTRY"] == "restaurant"
+
+
+def test_workspace_secrets_no_industry_before_onboarding(client, alice):
+    r = client.get(
+        f"/worker/workspaces/{alice['workspace']['id']}/secrets",
+        headers=WORKER_HEADERS,
+    )
+    assert "LIGHTSEI_BUSINESS_INDUSTRY" not in r.json()["secrets"]
+
+
 def test_workspace_secrets_503_when_master_key_missing(client, alice, monkeypatch):
     monkeypatch.delenv("LIGHTSEI_SECRETS_KEY", raising=False)
     r = client.get(
