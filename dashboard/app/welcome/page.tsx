@@ -8,11 +8,74 @@ import {
   DeployTeamResult,
   OnboardingCatalog,
   OnboardingPlan,
+  OnboardingProfile,
+  TeamStatusResult,
   deployTeam,
   fetchOnboarding,
+  fetchTeamStatus,
   handleAuthError,
   submitOnboarding,
 } from "../api";
+
+/**
+ * Live deploy status for the provisioned assistants. Polls /team/status so
+ * the owner watches their team come online (queued -> running). Shows a
+ * prompt for an Anthropic key when an AI assistant needs one.
+ */
+function TeamStatusPanel() {
+  const [status, setStatus] = useState<TeamStatusResult | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      try {
+        const s = await fetchTeamStatus();
+        if (alive) setStatus(s);
+      } catch {
+        /* enrichment; ignore */
+      }
+    };
+    tick();
+    const id = setInterval(tick, 4000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, []);
+
+  if (!status || status.assistants.length === 0) return null;
+
+  const dot = (a: { running: boolean; deployed: boolean }) =>
+    a.running ? "bg-emerald-500" : a.deployed ? "bg-amber-400" : "bg-gray-300";
+  const label = (a: { running: boolean; deployed: boolean; status: string | null }) =>
+    a.running ? "running" : a.deployed ? "starting…" : a.status ?? "not deployed";
+
+  return (
+    <div className="mt-4 rounded-lg border border-gray-200 p-5">
+      <div className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-3">
+        Your team
+      </div>
+      <ul className="space-y-2">
+        {status.assistants.map((a) => (
+          <li key={a.name} className="flex items-center gap-2 text-sm">
+            <span className={"h-2 w-2 rounded-full " + dot(a)} />
+            <span className="capitalize text-gray-900">{a.name}</span>
+            <span className="text-xs text-gray-400">{label(a)}</span>
+          </li>
+        ))}
+      </ul>
+      {status.needs_anthropic_key && (
+        <div className="mt-3 text-xs text-amber-700">
+          Some assistants use AI.{" "}
+          <Link href="/account" className="underline font-medium">
+            Add an Anthropic key
+          </Link>{" "}
+          to start them working.
+        </div>
+      )}
+    </div>
+  );
+}
 
 /**
  * Business-shaped onboarding: "answer a few questions -> your AI team".
@@ -29,14 +92,24 @@ export default function WelcomePage() {
   const [submitting, setSubmitting] = useState(false);
   const [plan, setPlan] = useState<OnboardingPlan | null>(null);
   const [deploy, setDeploy] = useState<DeployTeamResult | null>(null);
+  const [profile, setProfile] = useState<OnboardingProfile | null>(null);
+  const [editing, setEditing] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const { catalog } = await fetchOnboarding();
-        if (alive) setCatalog(catalog);
+        const { catalog, profile } = await fetchOnboarding();
+        if (!alive) return;
+        setCatalog(catalog);
+        setProfile(profile);
+        // Pre-fill from a prior run so "Adjust my team" starts from the
+        // current answers instead of a blank wizard.
+        if (profile) {
+          setIndustry(profile.industry);
+          setGoals(new Set(profile.goals));
+        }
       } catch (e) {
         if (!alive) return;
         if (handleAuthError(e, router)) return;
@@ -153,6 +226,8 @@ export default function WelcomePage() {
           </div>
         </div>
 
+        <TeamStatusPanel />
+
         {plan.connectors_needed.length > 0 && (
           <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-5">
             <div className="text-sm font-medium text-amber-900 mb-1">
@@ -183,11 +258,49 @@ export default function WelcomePage() {
             onClick={() => {
               setPlan(null);
               setDeploy(null);
+              setEditing(true);
               setStep(1);
             }}
             className="text-sm px-4 py-2 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50"
           >
             Adjust answers
+          </button>
+        </div>
+      </main>
+    );
+  }
+
+  // ---- Already onboarded: summary + live status (not a fresh wizard) ----
+  if (profile && !editing) {
+    const goalLabels = profile.goals
+      .map((k) => goalLabel[k])
+      .filter(Boolean);
+    return (
+      <main className="px-4 py-10 max-w-2xl mx-auto">
+        <h1 className="text-2xl font-semibold tracking-tight">Your AI team</h1>
+        <p className="text-sm text-gray-500 mt-1">
+          You&apos;re set up
+          {profile.industry ? ` for a ${profile.industry.replace(/_/g, " ")} business` : ""}
+          {goalLabels.length > 0 && <>, helping with {goalLabels.join(", ")}</>}.
+        </p>
+
+        <TeamStatusPanel />
+
+        <div className="mt-6 flex gap-3">
+          <Link
+            href="/"
+            className="text-sm px-4 py-2 rounded-md bg-accent-600 text-white hover:bg-accent-700 no-underline"
+          >
+            Go to my dashboard
+          </Link>
+          <button
+            onClick={() => {
+              setEditing(true);
+              setStep(1);
+            }}
+            className="text-sm px-4 py-2 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50"
+          >
+            Adjust my team
           </button>
         </div>
       </main>

@@ -688,6 +688,23 @@ export async function deployTeam(): Promise<DeployTeamResult> {
   })) as DeployTeamResult;
 }
 
+export interface TeamAssistantStatus {
+  name: string;
+  status: string | null;
+  running: boolean;
+  deployed: boolean;
+  is_llm: boolean;
+}
+
+export interface TeamStatusResult {
+  assistants: TeamAssistantStatus[];
+  needs_anthropic_key: boolean;
+}
+
+export async function fetchTeamStatus(): Promise<TeamStatusResult> {
+  return (await authedJson("/workspaces/me/team/status")) as TeamStatusResult;
+}
+
 export interface FeederSetting {
   kind: string;
   name: string;
