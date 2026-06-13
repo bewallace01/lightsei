@@ -210,6 +210,24 @@ def list_recent_asks(
     return out
 
 
+def answering_assistant(
+    session: Session, workspace_id: str
+) -> dict[str, Any]:
+    """The display identity of the assistant that answers questions (BI),
+    honoring the workspace's rename. So the ask box can attribute the
+    answer ('Altair') instead of a generic 'assistant'."""
+    import assistant_identity
+
+    row = session.execute(
+        text("SELECT display_name FROM agents "
+             "WHERE workspace_id = :ws AND name = :a"),
+        {"ws": workspace_id, "a": ASK_AGENT},
+    ).first()
+    override = row[0] if row else None
+    ident = assistant_identity.identity(ASK_AGENT, override)
+    return {"name": ident["name"], "role": ident["role"]}
+
+
 def bi_deployed(session: Session, workspace_id: str) -> bool:
     """Whether the BI assistant exists for this workspace. Without it, a
     question sits pending forever — the endpoint surfaces that up front."""

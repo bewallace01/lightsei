@@ -1233,8 +1233,17 @@ def get_run_behavior(
 
 
 def _serialize_agent(a: Agent) -> dict[str, Any]:
+    import assistant_identity
+    ident = assistant_identity.identity(a.name, a.display_name)
     return {
         "name": a.name,
+        # Phase 35: customer-facing constellation identity. `display_name`
+        # is the star name (or the owner's rename); `assistant_role` is the
+        # plain-English business role (null for non-persona agents). The
+        # internal `name` above is unchanged for routing.
+        "display_name": ident["name"],
+        "assistant_role": ident["role"],
+        "is_custom_name": not ident["is_default"],
         "daily_cost_cap_usd": a.daily_cost_cap_usd,
         "system_prompt": a.system_prompt,
         # Phase 12.1: per-agent provider + model pin. null = use whatever
@@ -2551,6 +2560,7 @@ def ask_business_team(
     return {
         "command_id": cmd_id,
         "bi_assistant_deployed": _ask.bi_deployed(session, workspace_id),
+        "assistant": _ask.answering_assistant(session, workspace_id),
     }
 
 
@@ -2564,7 +2574,10 @@ def list_asks(
     show a history that survives a refresh."""
     import ask as _ask
 
-    return {"asks": _ask.list_recent_asks(session, workspace_id, limit)}
+    return {
+        "asks": _ask.list_recent_asks(session, workspace_id, limit),
+        "assistant": _ask.answering_assistant(session, workspace_id),
+    }
 
 
 @app.get("/workspaces/me/ask/{command_id}")
@@ -2586,6 +2599,7 @@ def get_ask_answer(
 
     result = _ask.get_answer(session, workspace_id, command_id)
     result["question"] = question
+    result["assistant"] = _ask.answering_assistant(session, workspace_id)
     return result
 
 

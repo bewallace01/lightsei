@@ -721,9 +721,15 @@ export async function renameAssistant(
 
 // ---------- Ask your business team (chat-first insights) ---------- //
 
+export interface AskAssistant {
+  name: string;
+  role: string | null;
+}
+
 export interface AskResult {
   command_id: string;
   bi_assistant_deployed: boolean;
+  assistant: AskAssistant;
 }
 
 export interface AskAnswer {
@@ -731,6 +737,7 @@ export interface AskAnswer {
   answer?: string;
   error?: string;
   question: string;
+  assistant?: AskAssistant;
 }
 
 export async function askBusinessTeam(question: string): Promise<AskResult> {
@@ -754,11 +761,13 @@ export interface AskHistoryItem {
   error?: string;
 }
 
-export async function fetchAskHistory(limit = 10): Promise<AskHistoryItem[]> {
-  const body = (await authedJson(`/workspaces/me/ask?limit=${limit}`)) as {
+export async function fetchAskHistory(
+  limit = 10,
+): Promise<{ asks: AskHistoryItem[]; assistant: AskAssistant }> {
+  return (await authedJson(`/workspaces/me/ask?limit=${limit}`)) as {
     asks: AskHistoryItem[];
+    assistant: AskAssistant;
   };
-  return body.asks;
 }
 
 // ---------- Proactive feed ---------- //
@@ -1047,6 +1056,12 @@ export const SENSITIVITY_LEVELS: readonly SensitivityLevel[] = [
 
 export type Agent = {
   name: string;
+  // Phase 35: customer-facing constellation identity. display_name is the
+  // star name (or the owner's rename); assistant_role is the plain-English
+  // business role (null for non-persona agents). `name` stays the id.
+  display_name: string;
+  assistant_role: string | null;
+  is_custom_name: boolean;
   daily_cost_cap_usd: number | null;
   system_prompt: string | null;
   // Phase 12.1: per-agent provider + model pin. null = inherit from

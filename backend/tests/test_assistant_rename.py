@@ -71,6 +71,43 @@ def test_rename_unknown_assistant_404(client, alice):
     assert r.status_code == 404  # not provisioned in this workspace
 
 
+def test_agents_endpoint_carries_constellation_identity(client, alice):
+    ws_id = alice["workspace"]["id"]
+    _provision(ws_id, "reputation")
+    h = auth_headers(alice["session_token"])
+
+    rep = [a for a in client.get("/agents", headers=h).json()["agents"]
+           if a["name"] == "reputation"][0]
+    assert rep["display_name"] == "Lyra"
+    assert rep["assistant_role"] == "Reputation"
+    assert rep["is_custom_name"] is False
+
+    client.patch("/workspaces/me/assistants/reputation", headers=h,
+                 json={"display_name": "Reviews"})
+    rep = [a for a in client.get("/agents", headers=h).json()["agents"]
+           if a["name"] == "reputation"][0]
+    assert rep["display_name"] == "Reviews"
+    assert rep["is_custom_name"] is True
+
+
+def test_ask_attributes_answer_to_bi_assistant(client, alice):
+    ws_id = alice["workspace"]["id"]
+    _provision(ws_id, "bi")
+    h = auth_headers(alice["session_token"])
+
+    body = client.post("/workspaces/me/ask", headers=h,
+                       json={"question": "how are we?"}).json()
+    assert body["assistant"]["name"] == "Altair"
+    assert body["assistant"]["role"] == "Business Intelligence"
+
+    # Rename BI -> the attribution follows.
+    client.patch("/workspaces/me/assistants/bi", headers=h,
+                 json={"display_name": "Numbers"})
+    body = client.post("/workspaces/me/ask", headers=h,
+                       json={"question": "again?"}).json()
+    assert body["assistant"]["name"] == "Numbers"
+
+
 def test_feed_reflects_renamed_assistant(client, alice):
     ws_id = alice["workspace"]["id"]
     _provision(ws_id, "reputation")
