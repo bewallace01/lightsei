@@ -225,7 +225,31 @@
       var capped = Math.max(200, Math.min(800, Math.round(data.height)));
       iframe.style.height = capped + "px";
     }
+    // Phase 36.3: the iframe sends the owner's accent color once its
+    // config loads, so the launcher bubble matches the chat without a
+    // cross-origin fetch from the customer's page.
+    if (data.type === "lightsei:widget-theme" && isHexColor(data.accent)) {
+      setLauncherColor(data.accent);
+    }
   });
+
+  // Strict hex validation — the message origin is already verified above,
+  // but never assign an unvalidated string into a style property.
+  function isHexColor(s) {
+    return (
+      typeof s === "string" &&
+      /^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(s)
+    );
+  }
+
+  function setLauncherColor(color) {
+    if (!launcher) return;
+    launcher.style.background = color;
+    // Tint the drop shadow to match (append ~35% alpha for 6-digit hex;
+    // fall back to a neutral shadow for 3/8-digit forms).
+    var shadow = color.length === 7 ? color + "59" : "rgba(0,0,0,0.22)";
+    launcher.style.boxShadow = "0 6px 20px " + shadow;
+  }
 
 
   // ---------- Public API ---------- //

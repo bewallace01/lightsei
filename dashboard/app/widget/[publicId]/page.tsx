@@ -250,6 +250,20 @@ export default function WidgetIframePage(): JSX.Element {
     return () => ro.disconnect();
   }, []);
 
+  // Phase 36.3: hand the loader the accent color so it can theme the
+  // launcher bubble on the customer's page. Only posted when the owner set
+  // a custom color (otherwise the loader keeps its default indigo, which
+  // already matches the widget's default).
+  useEffect(() => {
+    if (typeof window === "undefined" || window.parent === window) return;
+    const color = config?.branding?.accent_color;
+    if (!color) return;
+    window.parent.postMessage(
+      { type: "lightsei:widget-theme", accent: color },
+      "*",
+    );
+  }, [config]);
+
   // ---------- Send ---------- //
 
   const send = useCallback(async () => {
