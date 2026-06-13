@@ -284,3 +284,54 @@ def test_patch_tenant_isolation(client, alice):
         json={"customer_facing_agent_name": "other-bot"},
     )
     assert r.status_code == 404
+
+
+# ---------- Phase 36.1: branding ---------- #
+
+
+def test_patch_branding_round_trips(client, alice):
+    h = auth_headers(alice["api_key"]["plaintext"])
+    r = client.patch(
+        "/workspaces/me/widget-settings",
+        headers=h,
+        json={
+            "widget_title": "Ava",
+            "widget_accent_color": "#16a34a",
+            "widget_greeting": "Hi there!",
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["widget_title"] == "Ava"
+    assert body["widget_accent_color"] == "#16a34a"
+    assert body["widget_greeting"] == "Hi there!"
+
+    # Persisted: GET reflects it.
+    got = client.get("/workspaces/me/widget-settings", headers=h).json()
+    assert got["widget_title"] == "Ava"
+
+
+def test_patch_branding_empty_clears_to_default(client, alice):
+    h = auth_headers(alice["api_key"]["plaintext"])
+    client.patch("/workspaces/me/widget-settings", headers=h,
+                 json={"widget_title": "Ava"})
+    r = client.patch("/workspaces/me/widget-settings", headers=h,
+                     json={"widget_title": "  "})
+    assert r.status_code == 200
+    assert r.json()["widget_title"] is None
+
+
+def test_patch_branding_rejects_bad_color(client, alice):
+    h = auth_headers(alice["api_key"]["plaintext"])
+    r = client.patch("/workspaces/me/widget-settings", headers=h,
+                     json={"widget_accent_color": "not-a-color"})
+    assert r.status_code == 422
+
+
+def test_patch_accepts_valid_hex_color_forms(client, alice):
+    h = auth_headers(alice["api_key"]["plaintext"])
+    for c in ["#fff", "#4f46e5", "#4f46e5ff"]:
+        r = client.patch("/workspaces/me/widget-settings", headers=h,
+                         json={"widget_accent_color": c})
+        assert r.status_code == 200, (c, r.text)
+        assert r.json()["widget_accent_color"] == c

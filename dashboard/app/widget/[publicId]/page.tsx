@@ -56,6 +56,12 @@ type WidgetConfig = {
       }
     | null;
   anonymous: boolean;
+  // Phase 36.1: owner branding. All optional; null = default.
+  branding?: {
+    title: string | null;
+    accent_color: string | null;
+    greeting: string | null;
+  } | null;
 };
 
 type ConversationResponse = {
@@ -319,7 +325,13 @@ export default function WidgetIframePage(): JSX.Element {
 
   // ---------- Render ---------- //
 
-  const botName = config?.bot?.name ?? "Assistant";
+  // Phase 36.1: owner branding. Custom title overrides the assistant
+  // name; accent color themes the header avatar + send button; greeting
+  // is the opening message.
+  const accent = config?.branding?.accent_color || "#4f46e5";
+  const greeting = config?.branding?.greeting?.trim() || null;
+  const botName =
+    config?.branding?.title?.trim() || config?.bot?.name || "Assistant";
   const botSensitivity = config?.bot?.sensitivity_level ?? null;
 
   const headerSubtitle = useMemo(() => {
@@ -334,10 +346,22 @@ export default function WidgetIframePage(): JSX.Element {
 
   return (
     <div className="min-h-screen bg-white text-gray-900 flex flex-col font-sans">
-      <header className="border-b border-gray-200 px-4 py-3 flex items-center justify-between">
-        <div>
-          <div className="font-semibold text-sm">{botName}</div>
-          <div className="text-xs text-gray-500">{headerSubtitle}</div>
+      <header
+        className="border-b border-gray-200 px-4 py-3 flex items-center justify-between"
+        style={{ borderTopColor: accent, borderTopWidth: 3 }}
+      >
+        <div className="flex items-center gap-2">
+          <span
+            className="h-7 w-7 rounded-full flex items-center justify-center text-xs font-semibold text-white shrink-0"
+            style={{ backgroundColor: accent }}
+            aria-hidden="true"
+          >
+            {botName.charAt(0).toUpperCase()}
+          </span>
+          <div>
+            <div className="font-semibold text-sm">{botName}</div>
+            <div className="text-xs text-gray-500">{headerSubtitle}</div>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           {conversationId && (
@@ -367,8 +391,17 @@ export default function WidgetIframePage(): JSX.Element {
         )}
         {!loadError && messages.length === 0 && (
           <div className="text-sm text-gray-500">
-            Hi! Ask me anything about{" "}
-            <span className="font-medium">{config?.bot?.description || "the product"}</span>.
+            {greeting ? (
+              greeting
+            ) : (
+              <>
+                Hi! Ask me anything about{" "}
+                <span className="font-medium">
+                  {config?.bot?.description || "the product"}
+                </span>
+                .
+              </>
+            )}
           </div>
         )}
         {messages.map((m) => (
@@ -395,7 +428,8 @@ export default function WidgetIframePage(): JSX.Element {
           type="button"
           onClick={() => void send()}
           disabled={!input.trim() || sending || !config || !!loadError || !config.bot}
-          className="rounded bg-indigo-600 hover:bg-indigo-500 px-3 py-1.5 text-xs text-white disabled:opacity-50"
+          style={{ backgroundColor: accent }}
+          className="rounded px-3 py-1.5 text-xs text-white disabled:opacity-50 hover:opacity-90"
         >
           {sending ? "…" : "Send"}
         </button>

@@ -245,6 +245,15 @@ class Workspace(Base):
     widget_public_id: Mapped[Optional[str]] = mapped_column(
         String(32), nullable=True, unique=True,
     )
+    # Phase 36.1: embedded-widget branding. NULL = default (assistant
+    # name / indigo / no greeting). Display-only customer-facing chrome.
+    widget_title: Mapped[Optional[str]] = mapped_column(String(60), nullable=True)
+    widget_accent_color: Mapped[Optional[str]] = mapped_column(
+        String(9), nullable=True,
+    )
+    widget_greeting: Mapped[Optional[str]] = mapped_column(
+        String(280), nullable=True,
+    )
     # Phase 26.1: human-readable URL handle for the consumer chat
     # surface at /c/{vendor_slug}. Operator-claimed via
     # POST /workspaces/me/vendor-slug. Validated against
