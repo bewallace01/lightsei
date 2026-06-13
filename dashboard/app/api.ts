@@ -731,6 +731,26 @@ export async function fetchAnswer(commandId: string): Promise<AskAnswer> {
   return (await authedJson(`/workspaces/me/ask/${commandId}`)) as AskAnswer;
 }
 
+// ---------- Proactive feed ---------- //
+
+export interface FeedItem {
+  id: number;
+  assistant: string;
+  assistant_label: string;
+  kind: string;
+  title: string;
+  detail: string | null;
+  severity: "alert" | "info";
+  timestamp: string;
+}
+
+export async function fetchFeed(limit = 50): Promise<FeedItem[]> {
+  const body = (await authedJson(
+    `/workspaces/me/feed?limit=${limit}`,
+  )) as { items: FeedItem[] };
+  return body.items;
+}
+
 export interface FeederSetting {
   kind: string;
   name: string;

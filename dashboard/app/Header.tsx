@@ -64,6 +64,11 @@ const NAV: NavItem[] = [
     label: "Activity",
     children: [
       {
+        href: "/feed",
+        label: "✨ team activity",
+        hint: "Everything your team did: digests, alerts, flagged reviews & emails",
+      },
+      {
         href: "/runs",
         label: "runs",
         hint: "Every LLM call your bots have made",

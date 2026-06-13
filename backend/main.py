@@ -13,7 +13,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPE
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, EmailStr, Field
-from sqlalchemy import desc, func, select, text
+from sqlalchemy import bindparam, desc, func, select, text
 from sqlalchemy.orm import Session
 
 import behavioral_rules
@@ -2468,6 +2468,48 @@ def get_feeder_digest_status(
         "latest_summary": latest_summary,
         "period_days": feeder.PERIOD_DAYS,
     }
+
+
+@app.get("/workspaces/me/feed")
+def get_feed(
+    limit: int = 50,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """The proactive feed: a timeline of what the team did, newest first.
+
+    Pulls the recent feed-worthy events (digests, review flags, lead
+    scores, triaged emails, marketing drafts, website checks, errors) and
+    maps each to a human-readable item via feed.build_feed_item. Items the
+    mapper drops (None) are filtered out.
+    """
+    import feed as _feed
+
+    limit = max(1, min(limit, 200))
+    rows = session.execute(
+        text(
+            """
+            SELECT id, kind, agent_name, payload, timestamp
+              FROM events
+             WHERE workspace_id = :ws
+               AND kind IN :kinds
+             ORDER BY timestamp DESC
+             LIMIT :limit
+            """
+        ).bindparams(bindparam("kinds", expanding=True)),
+        {"ws": workspace_id, "kinds": _feed.FEED_EVENT_KINDS, "limit": limit},
+    ).mappings().all()
+
+    items = []
+    for r in rows:
+        item = _feed.build_feed_item(dict(r))
+        if item is None:
+            continue
+        ts = item.get("timestamp")
+        item["timestamp"] = ts.isoformat() if hasattr(ts, "isoformat") else ts
+        items.append(item)
+
+    return {"items": items}
 
 
 class AskQuestion(BaseModel):
