@@ -603,6 +603,9 @@ class Agent(Base):
         primary_key=True,
     )
     name: Mapped[str] = mapped_column(String, primary_key=True)
+    # Phase 35.2: owner's chosen display name. NULL = constellation default
+    # (assistant_identity). Display-only; `name` (the id) is untouched.
+    display_name: Mapped[Optional[str]] = mapped_column(String(80), nullable=True)
     daily_cost_cap_usd: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     system_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     command_handlers: Mapped[Optional[list]] = mapped_column(JSONB, nullable=True)

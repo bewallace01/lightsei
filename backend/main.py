@@ -2485,6 +2485,16 @@ def get_feed(
     """
     import feed as _feed
 
+    # Per-workspace renames so the feed shows the owner's chosen names.
+    overrides = {
+        r["name"]: r["display_name"]
+        for r in session.execute(
+            text("SELECT name, display_name FROM agents "
+                 "WHERE workspace_id = :ws AND display_name IS NOT NULL"),
+            {"ws": workspace_id},
+        ).mappings().all()
+    }
+
     limit = max(1, min(limit, 200))
     rows = session.execute(
         text(
@@ -2502,7 +2512,7 @@ def get_feed(
 
     items = []
     for r in rows:
-        item = _feed.build_feed_item(dict(r))
+        item = _feed.build_feed_item(dict(r), overrides)
         if item is None:
             continue
         ts = item.get("timestamp")
@@ -5262,12 +5272,15 @@ def team_status(
     """
     import builtin_personas
 
-    agent_names = set(session.execute(
-        text("SELECT name FROM agents WHERE workspace_id = :ws"),
+    import assistant_identity
+
+    agent_rows = session.execute(
+        text("SELECT name, display_name FROM agents WHERE workspace_id = :ws"),
         {"ws": workspace_id},
-    ).scalars().all())
+    ).mappings().all()
+    overrides = {r["name"]: r["display_name"] for r in agent_rows}
     provisioned = [p for p in builtin_personas.BUILTIN_PERSONAS
-                   if p in agent_names]
+                   if p in overrides]
 
     rows = session.execute(
         text(
@@ -5282,13 +5295,13 @@ def team_status(
     ).mappings().all()
     status_by = {r["agent_name"]: r["status"] for r in rows}
 
-    import assistant_identity
-
     assistants = [
         {
             "name": p,
-            "display_name": assistant_identity.identity(p)["name"],
+            "display_name": assistant_identity.identity(p, overrides.get(p))["name"],
             "role": assistant_identity.identity(p)["role"],
+            "is_custom_name": not assistant_identity.identity(
+                p, overrides.get(p))["is_default"],
             "status": status_by.get(p),
             "running": status_by.get(p) == "running",
             "deployed": status_by.get(p) in ("queued", "building", "running"),
@@ -5304,6 +5317,45 @@ def team_status(
     return {
         "assistants": assistants,
         "needs_anthropic_key": bool(has_llm and not has_key),
+    }
+
+
+class AssistantRename(BaseModel):
+    display_name: Optional[str] = None
+
+
+@app.patch("/workspaces/me/assistants/{agent_name}")
+def rename_assistant(
+    agent_name: str,
+    body: AssistantRename,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Rename one assistant for this workspace (display-only).
+
+    A blank/empty name resets to the constellation default. Returns the
+    resolved identity so the UI can reflect the change without a second
+    fetch. 404 if the assistant isn't provisioned in this workspace.
+    """
+    import assistant_identity
+
+    agent = session.get(Agent, (workspace_id, agent_name))
+    if agent is None:
+        raise HTTPException(status_code=404, detail="assistant not found")
+
+    chosen = (body.display_name or "").strip()[:80]
+    agent.display_name = chosen or None  # empty resets to default
+    agent.updated_at = utcnow()
+    session.commit()
+
+    ident = assistant_identity.identity(agent_name, agent.display_name)
+    return {
+        "assistant": {
+            "name": agent_name,
+            "display_name": ident["name"],
+            "role": ident["role"],
+            "is_custom_name": not ident["is_default"],
+        }
     }
 
 

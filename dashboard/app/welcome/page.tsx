@@ -14,6 +14,7 @@ import {
   fetchOnboarding,
   fetchTeamStatus,
   handleAuthError,
+  renameAssistant,
   submitOnboarding,
 } from "../api";
 
@@ -24,13 +25,25 @@ import {
  */
 function TeamStatusPanel() {
   const [status, setStatus] = useState<TeamStatusResult | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  async function refresh() {
+    try {
+      setStatus(await fetchTeamStatus());
+    } catch {
+      /* enrichment; ignore */
+    }
+  }
 
   useEffect(() => {
     let alive = true;
     const tick = async () => {
       try {
         const s = await fetchTeamStatus();
-        if (alive) setStatus(s);
+        // Don't clobber the field the owner is actively editing.
+        if (alive && !editing) setStatus(s);
       } catch {
         /* enrichment; ignore */
       }
@@ -41,7 +54,19 @@ function TeamStatusPanel() {
       alive = false;
       clearInterval(id);
     };
-  }, []);
+  }, [editing]);
+
+  async function saveName(agent: string) {
+    setSaving(true);
+    try {
+      await renameAssistant(agent, draft);
+      setEditing(null);
+      setDraft("");
+      await refresh();
+    } finally {
+      setSaving(false);
+    }
+  }
 
   if (!status || status.assistants.length === 0) return null;
 
@@ -57,11 +82,55 @@ function TeamStatusPanel() {
       </div>
       <ul className="space-y-2">
         {status.assistants.map((a) => (
-          <li key={a.name} className="flex items-center gap-2 text-sm">
+          <li key={a.name} className="flex items-center gap-2 text-sm group">
             <span className={"h-2 w-2 rounded-full " + dot(a)} />
-            <span className="text-gray-900">{a.display_name}</span>
-            {a.role && <span className="text-xs text-gray-400">· {a.role}</span>}
-            <span className="text-xs text-gray-400">{label(a)}</span>
+            {editing === a.name ? (
+              <>
+                <input
+                  value={draft}
+                  autoFocus
+                  maxLength={80}
+                  onChange={(e) => setDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") saveName(a.name);
+                    if (e.key === "Escape") setEditing(null);
+                  }}
+                  placeholder={a.display_name}
+                  className="text-sm rounded-md ring-1 ring-gray-300 px-2 py-0.5 w-32 focus:outline-none focus:ring-2 focus:ring-indigo-600"
+                />
+                <button
+                  onClick={() => saveName(a.name)}
+                  disabled={saving}
+                  className="text-xs text-accent-600 hover:text-accent-700 disabled:opacity-50"
+                >
+                  save
+                </button>
+                <button
+                  onClick={() => setEditing(null)}
+                  className="text-xs text-gray-400 hover:text-gray-600"
+                >
+                  cancel
+                </button>
+              </>
+            ) : (
+              <>
+                <span className="text-gray-900">{a.display_name}</span>
+                {a.role && (
+                  <span className="text-xs text-gray-400">· {a.role}</span>
+                )}
+                <span className="text-xs text-gray-400">{label(a)}</span>
+                <button
+                  onClick={() => {
+                    setEditing(a.name);
+                    setDraft(a.is_custom_name ? a.display_name : "");
+                  }}
+                  className="text-xs text-gray-300 hover:text-accent-600 opacity-0 group-hover:opacity-100 transition-opacity"
+                  title={`Rename ${a.display_name}`}
+                >
+                  rename
+                </button>
+              </>
+            )}
           </li>
         ))}
       </ul>
