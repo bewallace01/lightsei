@@ -4,6 +4,10 @@ Drop-in observability and guardrails for AI agents and bots.
 
 Hosted at **https://app.lightsei.com**.
 
+> **Running it in production?** See [`docs/OPERATIONS.md`](docs/OPERATIONS.md)
+> for the prod topology (Railway: backend + dashboard + worker + Postgres),
+> the worker's required env vars, and the runbook for when deployments hang.
+
 ## Quickstart (use the hosted version)
 
 ```bash
