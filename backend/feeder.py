@@ -841,6 +841,23 @@ def _recent_events(
     return [dict(r) for r in rows]
 
 
+def gather_recent_activity(
+    session: Session,
+    workspace_id: str,
+    now: datetime,
+    *,
+    period_days: int = PERIOD_DAYS,
+) -> dict[str, Any]:
+    """Roll the workspace's last `period_days` of events into the data dict
+    the BI assistant analyzes. Shared by the weekly digest feeder and the
+    'ask your team' endpoint, so a question is answered against the same
+    activity rollup the digest summarizes."""
+    events = _recent_events(session, workspace_id, now, period_days)
+    return build_digest_payload(
+        events, period_days=period_days, now_iso=now.isoformat()
+    )
+
+
 def enqueue_digest_for_workspace(
     session: Session,
     workspace_id: str,
@@ -863,9 +880,8 @@ def enqueue_digest_for_workspace(
     ):
         return None
 
-    events = _recent_events(session, workspace_id, now, period_days)
-    data = build_digest_payload(
-        events, period_days=period_days, now_iso=now.isoformat()
+    data = gather_recent_activity(
+        session, workspace_id, now, period_days=period_days
     )
 
     cmd_id = str(uuid.uuid4())
