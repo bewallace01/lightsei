@@ -61,6 +61,8 @@ type WidgetConfig = {
     title: string | null;
     accent_color: string | null;
     greeting: string | null;
+    // Phase 36.2: false hides the "Powered by" badge (paid plans only).
+    show_powered_by?: boolean;
   } | null;
 };
 
@@ -437,14 +439,16 @@ export default function WidgetIframePage(): JSX.Element {
 
       <footer className="border-t border-gray-100 px-3 py-1.5 text-[10px] text-gray-400 flex items-center justify-between">
         <span>Anonymous conversation.</span>
-        <a
-          href="https://lightsei.com"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="hover:text-gray-600"
-        >
-          Powered by Lightsei
-        </a>
+        {config?.branding?.show_powered_by !== false && (
+          <a
+            href="https://lightsei.com"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="hover:text-gray-600"
+          >
+            Powered by Lightspace Labs
+          </a>
+        )}
       </footer>
 
       {showAbout && (

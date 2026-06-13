@@ -2460,6 +2460,9 @@ export type WidgetSettings = {
   widget_title: string | null;
   widget_accent_color: string | null;
   widget_greeting: string | null;
+  // Phase 36.2: remove-branding toggle + whether the plan allows it.
+  widget_hide_branding: boolean;
+  can_remove_branding: boolean;
 };
 
 export async function fetchWidgetSettings(): Promise<WidgetSettings> {
@@ -2474,6 +2477,7 @@ export async function patchWidgetSettings(patch: {
   widget_title?: string | null;
   widget_accent_color?: string | null;
   widget_greeting?: string | null;
+  widget_hide_branding?: boolean;
 }): Promise<WidgetSettings> {
   return (await authedJson("/workspaces/me/widget-settings", {
     method: "PATCH",

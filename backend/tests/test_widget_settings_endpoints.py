@@ -335,3 +335,17 @@ def test_patch_accepts_valid_hex_color_forms(client, alice):
                          json={"widget_accent_color": c})
         assert r.status_code == 200, (c, r.text)
         assert r.json()["widget_accent_color"] == c
+
+
+def test_hide_branding_toggle_round_trips_and_plan_gate(client, alice):
+    h = auth_headers(alice["api_key"]["plaintext"])
+    # Alice is on the free plan -> can_remove_branding is False, but the
+    # preference still stores (honored on upgrade).
+    got = client.get("/workspaces/me/widget-settings", headers=h).json()
+    assert got["can_remove_branding"] is False
+    assert got["widget_hide_branding"] is False
+
+    r = client.patch("/workspaces/me/widget-settings", headers=h,
+                     json={"widget_hide_branding": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["widget_hide_branding"] is True

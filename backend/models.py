@@ -254,6 +254,11 @@ class Workspace(Base):
     widget_greeting: Mapped[Optional[str]] = mapped_column(
         String(280), nullable=True,
     )
+    # Phase 36.2: hide the "Powered by Lightspace Labs" badge. Stored
+    # freely; only honored on paid plans (gated in the config endpoint).
+    widget_hide_branding: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false"),
+    )
     # Phase 26.1: human-readable URL handle for the consumer chat
     # surface at /c/{vendor_slug}. Operator-claimed via
     # POST /workspaces/me/vendor-slug. Validated against
