@@ -10,6 +10,7 @@ import EmptyState from "./EmptyState";
 import OnboardingChecklist from "./OnboardingChecklist";
 import PolarisCostAnalysisPanel from "./PolarisCostAnalysisPanel";
 import WeeklyDigestPanel from "./WeeklyDigestPanel";
+import AskBox from "./AskBox";
 import Hero from "./Hero";
 
 function fmtTime(iso: string): string {
@@ -175,6 +176,10 @@ export default function Home() {
           </div>
         </div>
       </section>
+
+      {/* Chat-first insights: the primary "ask your team" surface, placed
+          high so plain-English questions lead the page. */}
+      <AskBox />
 
       {/* Cost preview. Headline numbers + budget bar; per-agent + per-model
           breakdowns live on the dedicated /cost page so the home stays scannable. */}

@@ -2470,6 +2470,60 @@ def get_feeder_digest_status(
     }
 
 
+class AskQuestion(BaseModel):
+    question: str
+
+
+@app.post("/workspaces/me/ask")
+def ask_business_team(
+    body: AskQuestion,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Ask the AI business team a plain-English question.
+
+    Routes to the BI assistant's question-mode: enqueues a bi.summarize
+    command carrying the question + the workspace's recent activity, and
+    returns the command id the caller polls with GET /ask/{id}. Reports
+    whether the BI assistant is deployed, since without it the question
+    sits pending (nothing to answer it).
+    """
+    import ask as _ask
+
+    question = (body.question or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="question is required")
+
+    cmd_id = _ask.enqueue_question(session, workspace_id, question, utcnow())
+    session.commit()
+    return {
+        "command_id": cmd_id,
+        "bi_assistant_deployed": _ask.bi_deployed(session, workspace_id),
+    }
+
+
+@app.get("/workspaces/me/ask/{command_id}")
+def get_ask_answer(
+    command_id: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Poll for the answer to a previously-asked question.
+
+    Returns {status: pending|answered|failed, answer?, error?, question?}.
+    404 if the command id isn't a question in this workspace (so a bad /
+    cross-tenant id can't be probed)."""
+    import ask as _ask
+
+    question = _ask.get_command_question(session, workspace_id, command_id)
+    if question is None:
+        raise HTTPException(status_code=404, detail="unknown question")
+
+    result = _ask.get_answer(session, workspace_id, command_id)
+    result["question"] = question
+    return result
+
+
 @app.get("/workspaces/me/onboarding")
 def get_onboarding(
     session: Session = Depends(get_session),

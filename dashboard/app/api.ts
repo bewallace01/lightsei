@@ -705,6 +705,32 @@ export async function fetchTeamStatus(): Promise<TeamStatusResult> {
   return (await authedJson("/workspaces/me/team/status")) as TeamStatusResult;
 }
 
+// ---------- Ask your business team (chat-first insights) ---------- //
+
+export interface AskResult {
+  command_id: string;
+  bi_assistant_deployed: boolean;
+}
+
+export interface AskAnswer {
+  status: "pending" | "answered" | "failed";
+  answer?: string;
+  error?: string;
+  question: string;
+}
+
+export async function askBusinessTeam(question: string): Promise<AskResult> {
+  return (await authedJson("/workspaces/me/ask", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ question }),
+  })) as AskResult;
+}
+
+export async function fetchAnswer(commandId: string): Promise<AskAnswer> {
+  return (await authedJson(`/workspaces/me/ask/${commandId}`)) as AskAnswer;
+}
+
 export interface FeederSetting {
   kind: string;
   name: string;
