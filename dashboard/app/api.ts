@@ -690,6 +690,8 @@ export async function deployTeam(): Promise<DeployTeamResult> {
 
 export interface TeamAssistantStatus {
   name: string;
+  display_name: string;
+  role: string | null;
   status: string | null;
   running: boolean;
   deployed: boolean;
@@ -752,6 +754,8 @@ export async function fetchAskHistory(limit = 10): Promise<AskHistoryItem[]> {
 export interface FeedItem {
   id: number;
   assistant: string;
+  assistant_name: string;
+  assistant_role: string | null;
   assistant_label: string;
   kind: string;
   title: string;

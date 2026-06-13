@@ -33,7 +33,10 @@ def test_negative_review_is_an_alert():
     ))
     assert item["severity"] == "alert"
     assert "negative review from Dana" in item["title"]
-    assert item["assistant_label"] == "Reputation"
+    # Constellation identity: star name + role.
+    assert item["assistant_name"] == "Lyra"
+    assert item["assistant_role"] == "Reputation"
+    assert item["assistant_label"] == "Lyra · Reputation"
 
 
 def test_positive_review_is_info():
@@ -92,7 +95,17 @@ def test_crash_is_alert():
     item = feed.build_feed_item(_ev("bi.crash", "bi",
                                     {"error": "no ANTHROPIC_API_KEY"}))
     assert item["severity"] == "alert"
-    assert "hit an error" in item["title"]
+    # Crash title uses the assistant's star name.
+    assert item["title"] == "Altair hit an error"
+
+
+def test_name_override_wins():
+    item = feed.build_feed_item(
+        _ev("bi.summary", "bi", {"kind": "summary", "summary": "x"}),
+        name_overrides={"bi": "Numbers"},
+    )
+    assert item["assistant_name"] == "Numbers"
+    assert item["assistant_label"] == "Numbers · Business Intelligence"
 
 
 def test_non_feed_event_dropped():
