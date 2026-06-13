@@ -692,6 +692,7 @@ export interface TeamAssistantStatus {
   name: string;
   display_name: string;
   role: string | null;
+  is_custom_name: boolean;
   status: string | null;
   running: boolean;
   deployed: boolean;
@@ -705,6 +706,17 @@ export interface TeamStatusResult {
 
 export async function fetchTeamStatus(): Promise<TeamStatusResult> {
   return (await authedJson("/workspaces/me/team/status")) as TeamStatusResult;
+}
+
+export async function renameAssistant(
+  agentName: string,
+  displayName: string,
+): Promise<void> {
+  await authedJson(`/workspaces/me/assistants/${agentName}`, {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ display_name: displayName }),
+  });
 }
 
 // ---------- Ask your business team (chat-first insights) ---------- //
