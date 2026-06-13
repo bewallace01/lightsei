@@ -9668,12 +9668,18 @@ def widget_get_config(
         # Anonymous-only in v1; 21B will add a `requires_signed_token`
         # field once signed-token identity ships.
         "anonymous": True,
-        # Phase 36.1: owner branding. title overrides the header name;
-        # null fields = sensible defaults on the client.
+        # Phase 36.1/36.2: owner branding. title overrides the header name;
+        # null fields = sensible defaults on the client. The "Powered by"
+        # badge shows unless the workspace is paid AND chose to hide it
+        # (free plans always show it — downgrade re-shows automatically).
         "branding": {
             "title": workspace.widget_title,
             "accent_color": workspace.widget_accent_color,
             "greeting": workspace.widget_greeting,
+            "show_powered_by": not (
+                workspace.widget_hide_branding
+                and workspace.plan_tier == "paid"
+            ),
         },
     }
 
@@ -10066,6 +10072,11 @@ def get_widget_settings(
         "widget_title": workspace.widget_title,
         "widget_accent_color": workspace.widget_accent_color,
         "widget_greeting": workspace.widget_greeting,
+        # Phase 36.2: remove-branding toggle. `can_remove_branding` tells
+        # the UI whether the plan allows it (paid-only); free workspaces
+        # see the toggle locked with an upgrade prompt.
+        "widget_hide_branding": workspace.widget_hide_branding,
+        "can_remove_branding": workspace.plan_tier == "paid",
     }
 
 
@@ -10084,6 +10095,7 @@ class WidgetSettingsPatchIn(BaseModel):
     widget_title: Optional[str] = Field(default=None, max_length=60)
     widget_accent_color: Optional[str] = Field(default=None, max_length=9)
     widget_greeting: Optional[str] = Field(default=None, max_length=280)
+    widget_hide_branding: Optional[bool] = Field(default=None)
 
 
 @app.patch("/workspaces/me/widget-settings")
@@ -10112,6 +10124,7 @@ def patch_widget_settings(
     _settable = {
         "customer_facing_agent_name", "allowed_widget_origins",
         "widget_title", "widget_accent_color", "widget_greeting",
+        "widget_hide_branding",
     }
     if not (_settable & body.model_fields_set):
         raise HTTPException(
@@ -10208,6 +10221,11 @@ def patch_widget_settings(
                 detail="widget_accent_color must be a hex color like #4f46e5",
             )
         workspace.widget_accent_color = c or None
+    if "widget_hide_branding" in body.model_fields_set:
+        # Stored regardless of plan; only honored on paid (gated at render
+        # in /widget/{id}/config). So setting it on free is harmless and
+        # takes effect automatically on upgrade.
+        workspace.widget_hide_branding = bool(body.widget_hide_branding)
 
     session.flush()
 

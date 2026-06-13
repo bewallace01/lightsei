@@ -432,9 +432,11 @@ def test_config_returns_safe_fields(client):
     # Customer-facing display name (never the raw id): "vega" -> "Vega".
     assert body["bot"]["name"] == "Vega"
     assert body["bot"]["sensitivity_level"] == "public"
-    # Branding defaults to null when the owner hasn't customized.
+    # Branding defaults to null when the owner hasn't customized; the
+    # "Powered by" badge shows by default.
     assert body["branding"] == {
         "title": None, "accent_color": None, "greeting": None,
+        "show_powered_by": True,
     }
 
     # Safety: explicitly verify nothing extra leaked.
@@ -592,3 +594,40 @@ def test_post_message_anonymous_missing_origin_still_403(client):
     )
     assert r.status_code == 403
     assert r.json()["detail"]["error"] == "widget_origin_missing"
+
+
+# ---------- Phase 36.2: "Powered by" badge gating ---------- #
+
+
+def test_config_branding_shown_on_free_even_if_hidden(client):
+    """Free plan always shows the badge, even with hide_branding set."""
+    ws_id = _make_widget_workspace()
+    with session_scope() as s:
+        ws = s.get(Workspace, ws_id)
+        ws.plan_tier = "free"
+        ws.widget_hide_branding = True
+
+    body = client.get("/widget/wid_test_42/config", headers=_origin()).json()
+    assert body["branding"]["show_powered_by"] is True
+
+
+def test_config_branding_hidden_on_paid_when_opted_out(client):
+    ws_id = _make_widget_workspace()
+    with session_scope() as s:
+        ws = s.get(Workspace, ws_id)
+        ws.plan_tier = "paid"
+        ws.widget_hide_branding = True
+
+    body = client.get("/widget/wid_test_42/config", headers=_origin()).json()
+    assert body["branding"]["show_powered_by"] is False
+
+
+def test_config_branding_shown_on_paid_by_default(client):
+    ws_id = _make_widget_workspace()
+    with session_scope() as s:
+        ws = s.get(Workspace, ws_id)
+        ws.plan_tier = "paid"
+        ws.widget_hide_branding = False
+
+    body = client.get("/widget/wid_test_42/config", headers=_origin()).json()
+    assert body["branding"]["show_powered_by"] is True

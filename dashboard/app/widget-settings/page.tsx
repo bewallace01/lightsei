@@ -102,6 +102,18 @@ export default function WidgetSettingsPage(): JSX.Element {
     }
   };
 
+  const onToggleHideBranding = async (hide: boolean) => {
+    setError(null);
+    try {
+      const next = await patchWidgetSettings({ widget_hide_branding: hide });
+      setSettings(next);
+      flashTimeout(hide ? "Badge hidden." : "Badge restored.");
+    } catch (e) {
+      if (handleAuthError(e, router)) return;
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
   const onPickBot = async (name: string) => {
     setSavingBot(true);
     setError(null);
@@ -345,6 +357,33 @@ export default function WidgetSettingsPage(): JSX.Element {
           >
             {savingBrand ? "Saving…" : "Save branding"}
           </button>
+
+          {/* Phase 36.2: remove "Powered by Lightspace Labs" (paid only) */}
+          <div className="border-t border-gray-100 pt-3 mt-1">
+            <label className="flex items-start gap-2">
+              <input
+                type="checkbox"
+                checked={!!settings?.widget_hide_branding}
+                disabled={!settings?.can_remove_branding}
+                onChange={(e) => onToggleHideBranding(e.target.checked)}
+                className="mt-0.5 h-4 w-4 accent-indigo-600 disabled:opacity-50"
+              />
+              <span className="text-xs text-gray-600">
+                Remove the &ldquo;Powered by Lightspace Labs&rdquo; badge
+                {!settings?.can_remove_branding && (
+                  <>
+                    {" "}
+                    <Link
+                      href="/account"
+                      className="text-accent-600 hover:underline font-medium"
+                    >
+                      (upgrade to remove)
+                    </Link>
+                  </>
+                )}
+              </span>
+            </label>
+          </div>
         </div>
       </section>
 
