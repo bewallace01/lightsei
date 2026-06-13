@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   AskAnswer,
+  AskAssistant,
   AskHistoryItem,
   askBusinessTeam,
   fetchAnswer,
@@ -25,13 +26,16 @@ export default function AskBox() {
   const [asking, setAsking] = useState(false);
   const [answer, setAnswer] = useState<AskAnswer | null>(null);
   const [history, setHistory] = useState<AskHistoryItem[]>([]);
+  const [assistant, setAssistant] = useState<AskAssistant | null>(null);
   const [currentCmd, setCurrentCmd] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function loadHistory() {
     try {
-      setHistory(await fetchAskHistory(8));
+      const { asks, assistant } = await fetchAskHistory(8);
+      setHistory(asks);
+      setAssistant(assistant);
     } catch {
       /* enrichment; ignore */
     }
@@ -67,8 +71,10 @@ export default function AskBox() {
     stopPolling();
 
     try {
-      const { command_id, bi_assistant_deployed } = await askBusinessTeam(text);
+      const res = await askBusinessTeam(text);
+      const { command_id, bi_assistant_deployed } = res;
       setCurrentCmd(command_id);
+      if (res.assistant) setAssistant(res.assistant);
       if (!bi_assistant_deployed) {
         setNote(
           "Your Business Intelligence assistant isn't online yet, so this " +
@@ -158,13 +164,20 @@ export default function AskBox() {
             </div>
             {answer.status === "pending" ? (
               <div className="text-sm text-gray-400">
-                Your team is looking into it…
+                {assistant ? `${assistant.name} is looking into it…` : "Your team is looking into it…"}
               </div>
             ) : answer.status === "failed" ? (
               <div className="text-sm text-amber-700">{answer.error}</div>
             ) : (
-              <div className="text-sm text-gray-900 leading-relaxed whitespace-pre-wrap">
-                {answer.answer}
+              <div>
+                {(answer.assistant?.name || assistant?.name) && (
+                  <div className="text-[11px] font-semibold text-accent-700 mb-0.5">
+                    {answer.assistant?.name || assistant?.name}
+                  </div>
+                )}
+                <div className="text-sm text-gray-900 leading-relaxed whitespace-pre-wrap">
+                  {answer.answer}
+                </div>
               </div>
             )}
             {note && answer.status === "pending" && (
@@ -186,9 +199,16 @@ export default function AskBox() {
                 <div key={h.command_id}>
                   <div className="text-xs text-gray-400">{h.question}</div>
                   {h.status === "answered" ? (
-                    <div className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">
-                      {h.answer}
-                    </div>
+                    <>
+                      {assistant && (
+                        <div className="text-[11px] font-semibold text-accent-700">
+                          {assistant.name}
+                        </div>
+                      )}
+                      <div className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">
+                        {h.answer}
+                      </div>
+                    </>
                   ) : h.status === "failed" ? (
                     <div className="text-xs text-amber-700">{h.error}</div>
                   ) : (

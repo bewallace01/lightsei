@@ -117,6 +117,9 @@ function QualityChip({
 // inner-join style on name.
 type AgentRow = {
   name: string;
+  // Phase 35: customer-facing constellation name + business role.
+  display_name: string;
+  assistant_role: string | null;
   role: ConstellationAgent["role"] | null;
   status: ConstellationAgent["status"] | null;
   // The pinned model (DB) takes precedence over the recently-observed
@@ -185,6 +188,8 @@ export default function AgentsPage() {
       for (const a of agents) {
         byName.set(a.name, {
           name: a.name,
+          display_name: a.display_name,
+          assistant_role: a.assistant_role,
           role: null,
           status: null,
           pinned_provider: a.provider,
@@ -215,6 +220,8 @@ export default function AgentsPage() {
           // be defensive.
           byName.set(c.name, {
             name: c.name,
+            display_name: c.name,
+            assistant_role: null,
             role: c.role,
             status: c.status,
             pinned_provider: null,
@@ -346,10 +353,15 @@ export default function AgentsPage() {
                   <td className="px-4 py-3 max-w-xs">
                     <Link
                       href={`/agents/${encodeURIComponent(r.name)}`}
-                      className="font-mono text-accent-600 hover:text-accent-700 font-medium"
+                      className="text-accent-600 hover:text-accent-700 font-medium"
                     >
-                      {r.name}
+                      {r.display_name}
                     </Link>
+                    {r.assistant_role && (
+                      <span className="text-xs text-gray-400 ml-1.5">
+                        · {r.assistant_role}
+                      </span>
+                    )}
                     {r.description && (
                       <div
                         className="text-xs text-gray-500 mt-0.5 line-clamp-2"
