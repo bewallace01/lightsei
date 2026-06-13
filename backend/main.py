@@ -5282,9 +5282,13 @@ def team_status(
     ).mappings().all()
     status_by = {r["agent_name"]: r["status"] for r in rows}
 
+    import assistant_identity
+
     assistants = [
         {
             "name": p,
+            "display_name": assistant_identity.identity(p)["name"],
+            "role": assistant_identity.identity(p)["role"],
             "status": status_by.get(p),
             "running": status_by.get(p) == "running",
             "deployed": status_by.get(p) in ("queued", "building", "running"),

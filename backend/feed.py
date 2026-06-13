@@ -29,16 +29,6 @@ _CRASH_KINDS = {
     "website.crash", "marketing.crash", "bi.crash",
 }
 
-# Persona agent name -> the business-friendly label the owner sees.
-ASSISTANT_LABELS = {
-    "bi": "Business Intelligence",
-    "reputation": "Reputation",
-    "lead": "Lead Management",
-    "inbox": "Inbox",
-    "marketing": "Marketing",
-    "website": "Website",
-}
-
 # All kinds this module knows how to render (for the endpoint's WHERE).
 FEED_EVENT_KINDS = sorted(_FEED_KINDS | _CRASH_KINDS)
 
@@ -50,22 +40,32 @@ def _truncate(text: Optional[str], n: int = 140) -> Optional[str]:
     return text if len(text) <= n else text[: n - 1] + "…"
 
 
-def build_feed_item(event: dict[str, Any]) -> Optional[dict[str, Any]]:
+def build_feed_item(
+    event: dict[str, Any],
+    name_overrides: Optional[dict[str, str]] = None,
+) -> Optional[dict[str, Any]]:
     """Map one raw event to a feed item, or None if it isn't feed-worthy.
 
-    Item shape: {id, assistant, assistant_label, kind, title, detail,
-    severity, timestamp}. `severity` is "alert" (needs attention) or
-    "info". Reads each persona's own `severity` field ("error" -> alert).
+    Item shape: {id, assistant, assistant_name, assistant_role,
+    assistant_label, kind, title, detail, severity, timestamp}. `severity`
+    is "alert" (needs attention) or "info". `name_overrides` maps agent ->
+    a workspace's renamed display name (Phase 35.2); falls back to the
+    star default.
     """
+    import assistant_identity
+
     kind = event.get("kind") or ""
     agent = event.get("agent_name") or "unknown"
     payload = event.get("payload") or {}
-    label = ASSISTANT_LABELS.get(agent, agent.title())
+    override = (name_overrides or {}).get(agent)
+    ident = assistant_identity.identity(agent, override)
 
     base = {
         "id": event.get("id"),
         "assistant": agent,
-        "assistant_label": label,
+        "assistant_name": ident["name"],
+        "assistant_role": ident["role"],
+        "assistant_label": assistant_identity.display_label(agent, override),
         "kind": kind,
         "timestamp": event.get("timestamp"),
     }
@@ -73,7 +73,7 @@ def build_feed_item(event: dict[str, Any]) -> Optional[dict[str, Any]]:
     if kind in _CRASH_KINDS:
         return {
             **base,
-            "title": f"{label} hit an error",
+            "title": f"{ident['name']} hit an error",
             "detail": _truncate(payload.get("error")),
             "severity": "alert",
         }

@@ -59,7 +59,8 @@ function TeamStatusPanel() {
         {status.assistants.map((a) => (
           <li key={a.name} className="flex items-center gap-2 text-sm">
             <span className={"h-2 w-2 rounded-full " + dot(a)} />
-            <span className="capitalize text-gray-900">{a.name}</span>
+            <span className="text-gray-900">{a.display_name}</span>
+            {a.role && <span className="text-xs text-gray-400">· {a.role}</span>}
             <span className="text-xs text-gray-400">{label(a)}</span>
           </li>
         ))}
@@ -274,7 +275,10 @@ export default function WelcomePage() {
   if (profile && !editing) {
     const goalLabels = profile.goals
       .map((k) => goalLabel[k])
-      .filter(Boolean);
+      .filter(Boolean)
+      // Lowercase the first letter so the labels read naturally mid-
+      // sentence ("helping with answer customer emails, capture leads…").
+      .map((l) => l.charAt(0).toLowerCase() + l.slice(1));
     return (
       <main className="px-4 py-10 max-w-2xl mx-auto">
         <h1 className="text-2xl font-semibold tracking-tight">Your AI team</h1>
