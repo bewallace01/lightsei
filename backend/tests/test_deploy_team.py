@@ -94,3 +94,34 @@ def test_deploy_team_ignores_non_builtin_agents(client, alice):
     body = client.post("/workspaces/me/team/deploy", headers=h).json()
     assert body["deployed"] == []
     assert body["needs_anthropic_key"] is False
+
+
+def test_team_status_reports_per_assistant_state(client, alice):
+    ws_id = alice["workspace"]["id"]
+    _provision(ws_id, "bi", "lead")
+    h = auth_headers(alice["session_token"])
+
+    # Before deploy: provisioned but no deployment -> status null.
+    body = client.get("/workspaces/me/team/status", headers=h).json()
+    by_name = {a["name"]: a for a in body["assistants"]}
+    assert set(by_name) == {"bi", "lead"}
+    assert by_name["bi"]["status"] is None
+    assert by_name["bi"]["deployed"] is False
+    assert by_name["bi"]["is_llm"] is True
+    assert by_name["lead"]["is_llm"] is False
+    assert body["needs_anthropic_key"] is True  # bi is LLM, no key
+
+    # After deploy: queued.
+    client.post("/workspaces/me/team/deploy", headers=h)
+    body = client.get("/workspaces/me/team/status", headers=h).json()
+    by_name = {a["name"]: a for a in body["assistants"]}
+    assert by_name["bi"]["status"] == "queued"
+    assert by_name["bi"]["deployed"] is True
+    assert by_name["bi"]["running"] is False
+
+
+def test_team_status_empty_without_provisioned_personas(client, alice):
+    h = auth_headers(alice["session_token"])
+    body = client.get("/workspaces/me/team/status", headers=h).json()
+    assert body["assistants"] == []
+    assert body["needs_anthropic_key"] is False

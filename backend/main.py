@@ -5138,6 +5138,62 @@ def deploy_team(
     }
 
 
+@app.get("/workspaces/me/team/status")
+def team_status(
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Per-assistant deploy status for the provisioned built-in personas.
+
+    Powers the welcome page's live "your team is coming online" view. For
+    each built-in persona with an assistant row, reports the latest
+    deployment's status (running / queued / building / stopped) or null if
+    it was never deployed. Polled by the dashboard, so it stays a cheap
+    single scan.
+    """
+    import builtin_personas
+
+    agent_names = set(session.execute(
+        text("SELECT name FROM agents WHERE workspace_id = :ws"),
+        {"ws": workspace_id},
+    ).scalars().all())
+    provisioned = [p for p in builtin_personas.BUILTIN_PERSONAS
+                   if p in agent_names]
+
+    rows = session.execute(
+        text(
+            """
+            SELECT DISTINCT ON (agent_name) agent_name, status
+              FROM deployments
+             WHERE workspace_id = :ws
+             ORDER BY agent_name, created_at DESC
+            """
+        ),
+        {"ws": workspace_id},
+    ).mappings().all()
+    status_by = {r["agent_name"]: r["status"] for r in rows}
+
+    assistants = [
+        {
+            "name": p,
+            "status": status_by.get(p),
+            "running": status_by.get(p) == "running",
+            "deployed": status_by.get(p) in ("queued", "building", "running"),
+            "is_llm": p in builtin_personas.LLM_PERSONAS,
+        }
+        for p in provisioned
+    ]
+    has_llm = any(a["is_llm"] for a in assistants)
+    has_key = session.get(
+        WorkspaceSecret, (workspace_id, "ANTHROPIC_API_KEY")
+    ) is not None
+
+    return {
+        "assistants": assistants,
+        "needs_anthropic_key": bool(has_llm and not has_key),
+    }
+
+
 @app.get("/workspaces/me/deployments")
 def list_deployments(
     agent_name: Optional[str] = None,
