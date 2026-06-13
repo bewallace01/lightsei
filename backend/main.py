@@ -5222,6 +5222,43 @@ def _deploy_builtin_persona(
     return dep
 
 
+def _ensure_workspace_api_key_secret(
+    session: Session, workspace_id: str, now: datetime
+) -> bool:
+    """Ensure the workspace has a LIGHTSEI_API_KEY secret so deployed bots
+    can authenticate to the backend. Mints an API key + stores it as the
+    secret if absent; no-op if it already exists. Returns True if created.
+
+    Without this, onboarded (magic-link) users have no API key and every
+    deployed persona exits on startup ("LIGHTSEI_API_KEY missing").
+    """
+    if session.get(WorkspaceSecret, (workspace_id, "LIGHTSEI_API_KEY")):
+        return False
+    if not secrets_crypto.is_available():
+        # Can't store a secret without the master key; the bots will warn,
+        # but there's nothing we can do here. Don't crash the deploy.
+        return False
+
+    plaintext = generate_key()
+    session.add(ApiKey(
+        id=str(uuid.uuid4()),
+        workspace_id=workspace_id,
+        name="team (auto)",
+        prefix=prefix_for_display(plaintext),
+        hash=hash_token(plaintext),
+        created_at=now,
+    ))
+    session.add(WorkspaceSecret(
+        workspace_id=workspace_id,
+        name="LIGHTSEI_API_KEY",
+        encrypted_value=secrets_crypto.encrypt(plaintext),
+        created_at=now,
+        updated_at=now,
+    ))
+    session.flush()
+    return True
+
+
 @app.post("/workspaces/me/team/deploy")
 def deploy_team(
     session: Session = Depends(get_session),
@@ -5242,6 +5279,13 @@ def deploy_team(
     import builtin_personas
 
     now = utcnow()
+    # The bots authenticate to the backend with a LIGHTSEI_API_KEY workspace
+    # secret. Magic-link/onboarded users never get an API key (by design),
+    # so without this the deployed personas exit immediately ("LIGHTSEI_API_KEY
+    # missing — refusing to start"). Mint + store one transparently so "build
+    # my team" actually produces working bots.
+    _ensure_workspace_api_key_secret(session, workspace_id, now)
+
     agent_names = set(session.execute(
         text("SELECT name FROM agents WHERE workspace_id = :ws"),
         {"ws": workspace_id},

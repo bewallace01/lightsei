@@ -125,3 +125,45 @@ def test_team_status_empty_without_provisioned_personas(client, alice):
     body = client.get("/workspaces/me/team/status", headers=h).json()
     assert body["assistants"] == []
     assert body["needs_anthropic_key"] is False
+
+
+def test_deploy_team_provisions_lightsei_api_key_secret(client, alice):
+    """Without a LIGHTSEI_API_KEY secret, deployed bots refuse to start
+    ('LIGHTSEI_API_KEY missing'). Deploy must mint + store one so the team
+    actually runs for onboarded (key-less) users."""
+    ws_id = alice["workspace"]["id"]
+    _provision(ws_id, "website")
+    h = auth_headers(alice["session_token"])
+
+    with session_scope() as s:
+        assert s.get(WorkspaceSecret, (ws_id, "LIGHTSEI_API_KEY")) is None
+
+    client.post("/workspaces/me/team/deploy", headers=h)
+
+    with session_scope() as s:
+        assert s.get(WorkspaceSecret, (ws_id, "LIGHTSEI_API_KEY")) is not None
+
+    # The worker secrets endpoint now serves it (decrypted) so the bot's env
+    # has it. This is the env var the bots check on startup.
+    secrets = client.get(
+        f"/worker/workspaces/{ws_id}/secrets",
+        headers={"Authorization": "Bearer test-worker-token"},
+    ).json()["secrets"]
+    assert secrets.get("LIGHTSEI_API_KEY")  # present + non-empty
+
+
+def test_deploy_team_does_not_duplicate_api_key(client, alice):
+    ws_id = alice["workspace"]["id"]
+    _provision(ws_id, "website")
+    h = auth_headers(alice["session_token"])
+
+    client.post("/workspaces/me/team/deploy", headers=h)
+    client.post("/workspaces/me/team/deploy", headers=h)  # idempotent
+
+    with session_scope() as s:
+        n = s.execute(
+            text("SELECT count(*) FROM api_keys WHERE workspace_id = :ws "
+                 "AND name = 'team (auto)'"),
+            {"ws": ws_id},
+        ).scalar_one()
+        assert n == 1
