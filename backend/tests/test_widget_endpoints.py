@@ -429,14 +429,33 @@ def test_config_returns_safe_fields(client):
     body = r.json()
     assert body["public_id"] == "wid_test_42"
     assert body["anonymous"] is True
-    assert body["bot"]["name"] == "vega"
+    # Customer-facing display name (never the raw id): "vega" -> "Vega".
+    assert body["bot"]["name"] == "Vega"
     assert body["bot"]["sensitivity_level"] == "public"
+    # Branding defaults to null when the owner hasn't customized.
+    assert body["branding"] == {
+        "title": None, "accent_color": None, "greeting": None,
+    }
 
     # Safety: explicitly verify nothing extra leaked.
     flat = str(body)
     assert "workspace_id" not in flat
     assert "capabilities" not in flat
     assert "system_prompt" not in flat
+
+
+def test_config_returns_owner_branding(client):
+    ws_id = _make_widget_workspace()
+    with session_scope() as s:
+        ws = s.get(Workspace, ws_id)
+        ws.widget_title = "Ava"
+        ws.widget_accent_color = "#16a34a"
+        ws.widget_greeting = "Hi! How can I help?"
+
+    body = client.get("/widget/wid_test_42/config", headers=_origin()).json()
+    assert body["branding"]["title"] == "Ava"
+    assert body["branding"]["accent_color"] == "#16a34a"
+    assert body["branding"]["greeting"] == "Hi! How can I help?"
 
 
 def test_config_404_unknown_public_id(client):

@@ -9652,8 +9652,12 @@ def widget_get_config(
         # placeholder so the iframe still renders rather than erroring.
         agent = session.get(Agent, (workspace.id, bot_name))
         if agent is not None:
+            import assistant_identity
+            ident = assistant_identity.identity(agent.name, agent.display_name)
             bot_display = {
-                "name": agent.name,
+                # Customer-facing display name (constellation / rename),
+                # never the internal id.
+                "name": ident["name"],
                 "description": agent.description,
                 "sensitivity_level": agent.sensitivity_level,
             }
@@ -9664,6 +9668,13 @@ def widget_get_config(
         # Anonymous-only in v1; 21B will add a `requires_signed_token`
         # field once signed-token identity ships.
         "anonymous": True,
+        # Phase 36.1: owner branding. title overrides the header name;
+        # null fields = sensible defaults on the client.
+        "branding": {
+            "title": workspace.widget_title,
+            "accent_color": workspace.widget_accent_color,
+            "greeting": workspace.widget_greeting,
+        },
     }
 
 
@@ -10051,17 +10062,28 @@ def get_widget_settings(
         "customer_facing_agent_name": workspace.customer_facing_agent_name,
         "allowed_widget_origins": list(workspace.allowed_widget_origins or []),
         "available_agents": available,
+        # Phase 36.1: branding (null = default).
+        "widget_title": workspace.widget_title,
+        "widget_accent_color": workspace.widget_accent_color,
+        "widget_greeting": workspace.widget_greeting,
     }
 
 
-class WidgetSettingsPatchIn(BaseModel):
-    """Body for `PATCH /workspaces/me/widget-settings` (Phase 21.7).
+_HEX_COLOR_RE = _re.compile(r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
 
-    Both fields optional — operators usually edit one at a time
-    (pick a bot, then later edit the origins as they add the
-    snippet to new sites). At least one must be present."""
+
+class WidgetSettingsPatchIn(BaseModel):
+    """Body for `PATCH /workspaces/me/widget-settings` (Phase 21.7 + 36.1).
+
+    All fields optional — operators edit one at a time. At least one must
+    be present. The Phase 36.1 branding trio (title/accent_color/greeting)
+    are customer-facing chrome; an empty string clears back to the default.
+    """
     customer_facing_agent_name: Optional[str] = Field(default=None, max_length=128)
     allowed_widget_origins: Optional[list[str]] = Field(default=None)
+    widget_title: Optional[str] = Field(default=None, max_length=60)
+    widget_accent_color: Optional[str] = Field(default=None, max_length=9)
+    widget_greeting: Optional[str] = Field(default=None, max_length=280)
 
 
 @app.patch("/workspaces/me/widget-settings")
@@ -10087,15 +10109,14 @@ def patch_widget_settings(
       paths, queries, or fragments. 422 with a per-entry error
       list if any entry is invalid.
     """
-    if (
-        body.customer_facing_agent_name is None
-        and body.allowed_widget_origins is None
-        and "customer_facing_agent_name" not in body.model_fields_set
-        and "allowed_widget_origins" not in body.model_fields_set
-    ):
+    _settable = {
+        "customer_facing_agent_name", "allowed_widget_origins",
+        "widget_title", "widget_accent_color", "widget_greeting",
+    }
+    if not (_settable & body.model_fields_set):
         raise HTTPException(
             status_code=422,
-            detail="must supply customer_facing_agent_name or allowed_widget_origins",
+            detail="must supply at least one widget setting to update",
         )
 
     workspace = session.get(Workspace, auth.workspace_id)
@@ -10170,6 +10191,23 @@ def patch_widget_settings(
                 },
             )
         workspace.allowed_widget_origins = cleaned
+
+    # ---- Phase 36.1: branding (title / accent color / greeting) ---- #
+    # Empty string clears back to the default; a value (trimmed) sets it.
+    if "widget_title" in body.model_fields_set:
+        t = (body.widget_title or "").strip()
+        workspace.widget_title = t[:60] or None
+    if "widget_greeting" in body.model_fields_set:
+        g = (body.widget_greeting or "").strip()
+        workspace.widget_greeting = g[:280] or None
+    if "widget_accent_color" in body.model_fields_set:
+        c = (body.widget_accent_color or "").strip()
+        if c and not _HEX_COLOR_RE.match(c):
+            raise HTTPException(
+                status_code=422,
+                detail="widget_accent_color must be a hex color like #4f46e5",
+            )
+        workspace.widget_accent_color = c or None
 
     session.flush()
 

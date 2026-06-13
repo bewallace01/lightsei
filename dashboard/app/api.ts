@@ -2456,6 +2456,10 @@ export type WidgetSettings = {
   customer_facing_agent_name: string | null;
   allowed_widget_origins: string[];
   available_agents: WidgetAvailableAgent[];
+  // Phase 36.1: branding (null = default).
+  widget_title: string | null;
+  widget_accent_color: string | null;
+  widget_greeting: string | null;
 };
 
 export async function fetchWidgetSettings(): Promise<WidgetSettings> {
@@ -2467,6 +2471,9 @@ export async function fetchWidgetSettings(): Promise<WidgetSettings> {
 export async function patchWidgetSettings(patch: {
   customer_facing_agent_name?: string | null;
   allowed_widget_origins?: string[];
+  widget_title?: string | null;
+  widget_accent_color?: string | null;
+  widget_greeting?: string | null;
 }): Promise<WidgetSettings> {
   return (await authedJson("/workspaces/me/widget-settings", {
     method: "PATCH",

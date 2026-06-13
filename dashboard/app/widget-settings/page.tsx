@@ -50,12 +50,21 @@ export default function WidgetSettingsPage(): JSX.Element {
 
   const [copied, setCopied] = useState(false);
 
+  // Phase 36.1: branding editor local state.
+  const [brandTitle, setBrandTitle] = useState("");
+  const [brandColor, setBrandColor] = useState("#4f46e5");
+  const [brandGreeting, setBrandGreeting] = useState("");
+  const [savingBrand, setSavingBrand] = useState(false);
+
   const load = async () => {
     try {
       setLoading(true);
       const s = await fetchWidgetSettings();
       setSettings(s);
       setOriginsText((s.allowed_widget_origins || []).join("\n"));
+      setBrandTitle(s.widget_title || "");
+      setBrandColor(s.widget_accent_color || "#4f46e5");
+      setBrandGreeting(s.widget_greeting || "");
       setError(null);
     } catch (e) {
       if (handleAuthError(e, router)) return;
@@ -72,6 +81,25 @@ export default function WidgetSettingsPage(): JSX.Element {
   const flashTimeout = (msg: string) => {
     setFlash(msg);
     setTimeout(() => setFlash(null), 3000);
+  };
+
+  const onSaveBranding = async () => {
+    setSavingBrand(true);
+    setError(null);
+    try {
+      const next = await patchWidgetSettings({
+        widget_title: brandTitle.trim() || null,
+        widget_accent_color: brandColor || null,
+        widget_greeting: brandGreeting.trim() || null,
+      });
+      setSettings(next);
+      flashTimeout("Branding saved.");
+    } catch (e) {
+      if (handleAuthError(e, router)) return;
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSavingBrand(false);
+    }
   };
 
   const onPickBot = async (name: string) => {
@@ -249,6 +277,75 @@ export default function WidgetSettingsPage(): JSX.Element {
             />
           </div>
         )}
+      </section>
+
+      {/* Phase 36.1: branding */}
+      <section className="rounded-lg border border-gray-200 bg-white p-4 mb-4">
+        <h2 className="text-sm font-semibold text-gray-900 mb-2">
+          Branding
+        </h2>
+        <p className="text-xs text-gray-500 mb-3">
+          Name the chatbot and match it to your brand. Visitors see this,
+          not the internal assistant name.
+        </p>
+
+        <div className="space-y-3">
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              Chatbot name
+            </label>
+            <input
+              value={brandTitle}
+              maxLength={60}
+              onChange={(e) => setBrandTitle(e.target.value)}
+              placeholder="e.g. Ava, Support Bot, Z Bot"
+              className="w-full text-sm rounded-md ring-1 ring-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-600"
+            />
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              Accent color
+            </label>
+            <div className="flex items-center gap-2">
+              <input
+                type="color"
+                value={brandColor}
+                onChange={(e) => setBrandColor(e.target.value)}
+                className="h-9 w-12 rounded border border-gray-300 p-0.5"
+              />
+              <input
+                value={brandColor}
+                maxLength={9}
+                onChange={(e) => setBrandColor(e.target.value)}
+                placeholder="#4f46e5"
+                className="w-28 text-sm font-mono rounded-md ring-1 ring-gray-300 px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-600"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-gray-600 mb-1">
+              Welcome greeting
+            </label>
+            <textarea
+              value={brandGreeting}
+              maxLength={280}
+              rows={2}
+              onChange={(e) => setBrandGreeting(e.target.value)}
+              placeholder="Hi! How can I help you today?"
+              className="w-full text-sm rounded-md ring-1 ring-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-600"
+            />
+          </div>
+
+          <button
+            onClick={onSaveBranding}
+            disabled={savingBrand}
+            className="text-sm px-3 py-1.5 rounded-md bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-50"
+          >
+            {savingBrand ? "Saving…" : "Save branding"}
+          </button>
+        </div>
       </section>
 
       {/* Origin allowlist */}
