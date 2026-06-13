@@ -134,6 +134,82 @@ def get_answer(
     return {"status": "pending"}
 
 
+def list_recent_asks(
+    session: Session, workspace_id: str, limit: int = 10
+) -> list[dict[str, Any]]:
+    """Recent questions + their resolved answers, newest first.
+
+    The questions are already persisted (ask commands) and answers
+    (bi.summary / bi.crash events); this stitches them so the ask box can
+    show a history that survives a refresh. Resolves all answers in two
+    batched queries (not one per question), keyed on command id.
+    """
+    from sqlalchemy import bindparam
+
+    rows = session.execute(
+        text(
+            """
+            SELECT id, payload ->> 'question' AS question, created_at
+              FROM commands
+             WHERE workspace_id = :ws
+               AND agent_name = :a
+               AND kind = :k
+               AND payload ->> 'source' = :src
+             ORDER BY created_at DESC
+             LIMIT :limit
+            """
+        ),
+        {"ws": workspace_id, "a": ASK_AGENT, "k": ASK_KIND,
+         "src": ASK_SOURCE, "limit": max(1, min(limit, 50))},
+    ).mappings().all()
+    if not rows:
+        return []
+
+    ids = [r["id"] for r in rows]
+
+    def _by_command(kind: str) -> dict[str, dict[str, Any]]:
+        stmt = text(
+            """
+            SELECT DISTINCT ON (payload ->> 'command_id')
+                   payload ->> 'command_id' AS cmd, payload
+              FROM events
+             WHERE workspace_id = :ws
+               AND kind = :kind
+               AND payload ->> 'command_id' IN :ids
+             ORDER BY payload ->> 'command_id', timestamp DESC
+            """
+        ).bindparams(bindparam("ids", expanding=True))
+        return {
+            r["cmd"]: (r["payload"] or {})
+            for r in session.execute(
+                stmt, {"ws": workspace_id, "kind": kind, "ids": ids}
+            ).mappings().all()
+        }
+
+    summaries = _by_command("bi.summary")
+    crashes = _by_command("bi.crash")
+
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        cid = r["id"]
+        entry: dict[str, Any] = {
+            "command_id": cid,
+            "question": r["question"],
+            "asked_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        if cid in summaries:
+            entry.update(status="answered", answer=summaries[cid].get("summary"))
+        elif cid in crashes:
+            entry.update(
+                status="failed",
+                error=crashes[cid].get("error") or "the assistant could not answer",
+            )
+        else:
+            entry["status"] = "pending"
+        out.append(entry)
+    return out
+
+
 def bi_deployed(session: Session, workspace_id: str) -> bool:
     """Whether the BI assistant exists for this workspace. Without it, a
     question sits pending forever — the endpoint surfaces that up front."""

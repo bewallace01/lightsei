@@ -731,6 +731,22 @@ export async function fetchAnswer(commandId: string): Promise<AskAnswer> {
   return (await authedJson(`/workspaces/me/ask/${commandId}`)) as AskAnswer;
 }
 
+export interface AskHistoryItem {
+  command_id: string;
+  question: string;
+  asked_at: string | null;
+  status: "pending" | "answered" | "failed";
+  answer?: string;
+  error?: string;
+}
+
+export async function fetchAskHistory(limit = 10): Promise<AskHistoryItem[]> {
+  const body = (await authedJson(`/workspaces/me/ask?limit=${limit}`)) as {
+    asks: AskHistoryItem[];
+  };
+  return body.asks;
+}
+
 // ---------- Proactive feed ---------- //
 
 export interface FeedItem {
