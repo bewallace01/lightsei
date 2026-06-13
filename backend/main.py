@@ -2544,6 +2544,19 @@ def ask_business_team(
     }
 
 
+@app.get("/workspaces/me/ask")
+def list_asks(
+    limit: int = 10,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Recent questions + their answers, newest first, so the ask box can
+    show a history that survives a refresh."""
+    import ask as _ask
+
+    return {"asks": _ask.list_recent_asks(session, workspace_id, limit)}
+
+
 @app.get("/workspaces/me/ask/{command_id}")
 def get_ask_answer(
     command_id: str,

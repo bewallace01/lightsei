@@ -1,10 +1,12 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AskAnswer,
+  AskHistoryItem,
   askBusinessTeam,
   fetchAnswer,
+  fetchAskHistory,
 } from "./api";
 
 // How long to keep polling for an answer before giving up (the BI
@@ -22,8 +24,26 @@ export default function AskBox() {
   const [question, setQuestion] = useState("");
   const [asking, setAsking] = useState(false);
   const [answer, setAnswer] = useState<AskAnswer | null>(null);
+  const [history, setHistory] = useState<AskHistoryItem[]>([]);
+  const [currentCmd, setCurrentCmd] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  async function loadHistory() {
+    try {
+      setHistory(await fetchAskHistory(8));
+    } catch {
+      /* enrichment; ignore */
+    }
+  }
+
+  // Load prior questions on mount so a refresh doesn't lose the thread.
+  useEffect(() => {
+    loadHistory();
+    return () => {
+      if (timer.current) clearTimeout(timer.current);
+    };
+  }, []);
 
   const SUGGESTIONS = [
     "How did we do this week?",
@@ -48,6 +68,7 @@ export default function AskBox() {
 
     try {
       const { command_id, bi_assistant_deployed } = await askBusinessTeam(text);
+      setCurrentCmd(command_id);
       if (!bi_assistant_deployed) {
         setNote(
           "Your Business Intelligence assistant isn't online yet, so this " +
@@ -74,6 +95,7 @@ export default function AskBox() {
           }
           setAnswer(res);
           setAsking(false);
+          loadHistory(); // resolved -> persist into the history list
         } catch {
           setAnswer({
             status: "failed",
@@ -150,6 +172,33 @@ export default function AskBox() {
             )}
           </div>
         )}
+
+        {(() => {
+          // Earlier questions, excluding the one shown live above.
+          const prior = history.filter((h) => h.command_id !== currentCmd);
+          if (prior.length === 0) return null;
+          return (
+            <div className="mt-4 border-t border-gray-100 pt-3 space-y-3">
+              <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+                Earlier
+              </div>
+              {prior.map((h) => (
+                <div key={h.command_id}>
+                  <div className="text-xs text-gray-400">{h.question}</div>
+                  {h.status === "answered" ? (
+                    <div className="text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">
+                      {h.answer}
+                    </div>
+                  ) : h.status === "failed" ? (
+                    <div className="text-xs text-amber-700">{h.error}</div>
+                  ) : (
+                    <div className="text-xs text-gray-400">still thinking…</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          );
+        })()}
       </div>
     </section>
   );

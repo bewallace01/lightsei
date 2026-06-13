@@ -149,3 +149,47 @@ def test_ask_unknown_command_404(client, alice):
     h = auth_headers(alice["session_token"])
     r = client.get(f"/workspaces/me/ask/{uuid.uuid4()}", headers=h)
     assert r.status_code == 404
+
+
+# ---------- ask history ---------- #
+
+
+def test_list_recent_asks_newest_first_with_status():
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        # Three questions; answer the first, crash the second, leave third.
+        c1 = ask.enqueue_question(s, ws, "first", _now())
+        c2 = ask.enqueue_question(s, ws, "second", _now())
+        c3 = ask.enqueue_question(s, ws, "third", _now())
+        _add_bi_event(s, ws, kind="bi.summary", command_id=c1, summary="A1")
+        _add_bi_event(s, ws, kind="bi.crash", command_id=c2, error="boom")
+
+    with session_scope() as s:
+        asks = ask.list_recent_asks(s, ws)
+    # Newest first: third, second, first.
+    assert [a["question"] for a in asks] == ["third", "second", "first"]
+    by_q = {a["question"]: a for a in asks}
+    assert by_q["first"]["status"] == "answered" and by_q["first"]["answer"] == "A1"
+    assert by_q["second"]["status"] == "failed"
+    assert by_q["third"]["status"] == "pending"
+
+
+def test_list_recent_asks_empty():
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        assert ask.list_recent_asks(s, ws) == []
+
+
+def test_ask_history_endpoint(client, alice):
+    h = auth_headers(alice["session_token"])
+    ws_id = alice["workspace"]["id"]
+    r = client.post("/workspaces/me/ask", headers=h, json={"question": "hello?"})
+    cmd_id = r.json()["command_id"]
+    with session_scope() as s:
+        _add_bi_event(s, ws_id, kind="bi.summary", command_id=cmd_id,
+                      summary="Hi there.")
+
+    asks = client.get("/workspaces/me/ask", headers=h).json()["asks"]
+    assert asks[0]["question"] == "hello?"
+    assert asks[0]["status"] == "answered"
+    assert asks[0]["answer"] == "Hi there."
