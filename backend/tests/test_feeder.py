@@ -224,6 +224,30 @@ def test_digest_excludes_events_older_than_period():
         assert row["payload"]["data"]["total_events"] == 1
 
 
+def test_gather_recent_activity_aggregates_without_loading_event_payloads(monkeypatch):
+    def _fail_full_event_scan(*_args, **_kwargs):
+        raise AssertionError("gather_recent_activity must not load full event rows")
+
+    monkeypatch.setattr(feeder, "_recent_events", _fail_full_event_scan)
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _add_event(s, ws, kind="lead.scored", agent_name="lead",
+                   timestamp=_now() - timedelta(hours=1))
+        _add_event(s, ws, kind="lead.scored", agent_name="lead",
+                   timestamp=_now() - timedelta(hours=2))
+        _add_event(s, ws, kind="bi.crash", agent_name="bi",
+                   timestamp=_now() - timedelta(hours=3))
+
+    with session_scope() as s:
+        out = feeder.gather_recent_activity(s, ws, _now())
+
+    assert out["total_events"] == 3
+    assert out["events_by_assistant"] == {"bi": 1, "lead": 2}
+    assert out["events_by_kind"]["lead.scored"] == 2
+    assert out["events_by_kind"]["bi.crash"] == 1
+    assert out["highlights"]["leads_scored"] == 2
+
+
 # ---------- cost-spike detector: pure ---------- #
 
 

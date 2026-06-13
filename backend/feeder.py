@@ -198,6 +198,23 @@ def build_digest_payload(
         by_agent[agent] = by_agent.get(agent, 0) + 1
         by_kind[kind] = by_kind.get(kind, 0) + 1
 
+    return _build_digest_payload_from_counts(
+        total_events=len(events),
+        by_agent=by_agent,
+        by_kind=by_kind,
+        period_days=period_days,
+        now_iso=now_iso,
+    )
+
+
+def _build_digest_payload_from_counts(
+    *,
+    total_events: int,
+    by_agent: dict[str, int],
+    by_kind: dict[str, int],
+    period_days: int,
+    now_iso: Optional[str],
+) -> dict[str, Any]:
     highlights = {
         label: by_kind[kind]
         for kind, label in _NOTABLE_KINDS.items()
@@ -208,7 +225,7 @@ def build_digest_payload(
         "source": DIGEST_SOURCE,
         "period_days": period_days,
         "as_of": now_iso,
-        "total_events": len(events),
+        "total_events": total_events,
         "events_by_assistant": by_agent,
         "events_by_kind": by_kind,
         "highlights": highlights,
@@ -841,6 +858,52 @@ def _recent_events(
     return [dict(r) for r in rows]
 
 
+def _recent_activity_payload(
+    session: Session, workspace_id: str, now: datetime, period_days: int
+) -> dict[str, Any]:
+    """Build the BI rollup with grouped counts, not full event payloads.
+
+    The digest payload currently needs only totals by assistant and event
+    kind. Aggregating in Postgres keeps owner-triggered asks from loading a
+    busy workspace's entire seven-day JSONB event history into Python.
+    """
+    floor = now - timedelta(days=period_days)
+    rows = session.execute(
+        text(
+            """
+            SELECT
+                COALESCE(agent_name, 'unknown') AS agent_name,
+                COALESCE(kind, 'unknown')       AS kind,
+                COUNT(*)                        AS event_count
+              FROM events
+             WHERE workspace_id = :ws
+               AND timestamp >= :floor
+             GROUP BY 1, 2
+            """
+        ),
+        {"ws": workspace_id, "floor": floor},
+    ).mappings().all()
+
+    by_agent: dict[str, int] = {}
+    by_kind: dict[str, int] = {}
+    total = 0
+    for row in rows:
+        count = int(row["event_count"] or 0)
+        agent = row["agent_name"] or "unknown"
+        kind = row["kind"] or "unknown"
+        total += count
+        by_agent[agent] = by_agent.get(agent, 0) + count
+        by_kind[kind] = by_kind.get(kind, 0) + count
+
+    return _build_digest_payload_from_counts(
+        total_events=total,
+        by_agent=by_agent,
+        by_kind=by_kind,
+        period_days=period_days,
+        now_iso=now.isoformat(),
+    )
+
+
 def gather_recent_activity(
     session: Session,
     workspace_id: str,
@@ -852,10 +915,7 @@ def gather_recent_activity(
     the BI assistant analyzes. Shared by the weekly digest feeder and the
     'ask your team' endpoint, so a question is answered against the same
     activity rollup the digest summarizes."""
-    events = _recent_events(session, workspace_id, now, period_days)
-    return build_digest_payload(
-        events, period_days=period_days, now_iso=now.isoformat()
-    )
+    return _recent_activity_payload(session, workspace_id, now, period_days)
 
 
 def enqueue_digest_for_workspace(
