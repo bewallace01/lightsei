@@ -37,6 +37,7 @@ import os
 import sys
 import time
 import traceback
+import uuid
 from typing import Any, Callable, Optional
 
 import lightsei
@@ -189,10 +190,15 @@ def tick(
         return cmd
 
     payload = cmd.get("payload") or {}
+    # Emit under an explicit run_id: these events fire outside any LLM-call
+    # run, and lightsei.emit() drops events with no run context. Without
+    # this the bi.summary answer never persists (the ask box + feed + digest
+    # all read it). The backend creates the Run row from this id on ingest.
+    run_id = str(uuid.uuid4())
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        lightsei.emit("bi.crash", {"command_id": cmd_id, "error": "ANTHROPIC_API_KEY not set on this workspace"})
+        lightsei.emit("bi.crash", {"command_id": cmd_id, "error": "ANTHROPIC_API_KEY not set on this workspace"}, run_id=run_id)
         lightsei.complete_command(cmd_id, error="ANTHROPIC_API_KEY not set on this workspace; add it in account settings")
         return cmd
 
@@ -200,7 +206,7 @@ def tick(
         result = generate_summary(payload, factory=factory, api_key=api_key, model=model, max_tokens=max_tokens)
     except Exception as e:
         lightsei.emit("bi.crash", {"command_id": cmd_id, "error": repr(e),
-                                   "traceback": traceback.format_exc()})
+                                   "traceback": traceback.format_exc()}, run_id=run_id)
         try:
             _send_with_source("hermes", "hermes.post",
                               {"channel": hermes_channel,
@@ -221,7 +227,7 @@ def tick(
         "model": model,
         "severity": "info",
     }
-    lightsei.emit("bi.summary", outcome)
+    lightsei.emit("bi.summary", outcome, run_id=run_id)
 
     note = "answered your question" if is_question else "your business summary is ready"
     try:

@@ -29,6 +29,7 @@ Public surface (for tests):
   main()
 """
 import os
+import uuid
 import re
 import sys
 import time
@@ -152,6 +153,8 @@ def tick(client: Any, *, hermes_channel: str = "default", followup_hours: float 
         return cmd
 
     payload = cmd.get("payload") or {}
+    run_id = str(uuid.uuid4())  # explicit run_id: these events fire outside
+    # an LLM-call run, and emit() drops events with no run context.
     lead = payload.get("lead") if isinstance(payload.get("lead"), dict) else payload
 
     try:
@@ -160,7 +163,7 @@ def tick(client: Any, *, hermes_channel: str = "default", followup_hours: float 
         action = suggest_next_action(scored["quality"], due)
     except Exception as e:
         lightsei.emit("lead.crash", {"command_id": cmd_id, "error": repr(e),
-                                     "traceback": traceback.format_exc()})
+                                     "traceback": traceback.format_exc()}, run_id=run_id)
         try:
             _send_with_source("hermes", "hermes.post",
                               {"channel": hermes_channel,
@@ -181,7 +184,7 @@ def tick(client: Any, *, hermes_channel: str = "default", followup_hours: float 
         "suggested_action": action,
         "severity": "error" if (scored["quality"] == "hot" and due) else "info",
     }
-    lightsei.emit("lead.scored", outcome)
+    lightsei.emit("lead.scored", outcome, run_id=run_id)
 
     # Surface the leads worth acting on now: hot or warm + due. Cold leads
     # and not-yet-due leads accrue in the event stream without paging.

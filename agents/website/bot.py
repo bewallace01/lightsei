@@ -34,6 +34,7 @@ Public surface (for tests):
   main()
 """
 import os
+import uuid
 import re
 import sys
 import time
@@ -203,6 +204,8 @@ def tick(client: Any, fetch: Fetcher = _httpx_fetch, *, hermes_channel: str = "d
         return cmd
 
     payload = cmd.get("payload") or {}
+    run_id = str(uuid.uuid4())  # explicit run_id: these events fire outside
+    # an LLM-call run, and emit() drops events with no run context.
     url = payload.get("url") or ""
     if not url:
         lightsei.complete_command(cmd_id, error="website.check requires a url")
@@ -212,7 +215,7 @@ def tick(client: Any, fetch: Fetcher = _httpx_fetch, *, hermes_channel: str = "d
         report = check_site(url, fetch, max_links=MAX_LINKS)
     except Exception as e:
         lightsei.emit("website.crash", {"command_id": cmd_id, "error": repr(e),
-                                        "traceback": traceback.format_exc()})
+                                        "traceback": traceback.format_exc()}, run_id=run_id)
         try:
             _send_with_source("hermes", "hermes.post",
                               {"channel": hermes_channel,
@@ -224,7 +227,7 @@ def tick(client: Any, fetch: Fetcher = _httpx_fetch, *, hermes_channel: str = "d
         return cmd
 
     report["command_id"] = cmd_id
-    lightsei.emit("website.check_complete", report)
+    lightsei.emit("website.check_complete", report, run_id=run_id)
 
     # Only wake the owner when something is actually wrong.
     if not report["up"] or report["broken_links"]:
