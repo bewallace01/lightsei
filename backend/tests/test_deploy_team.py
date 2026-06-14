@@ -11,7 +11,8 @@ from datetime import datetime, timezone
 from sqlalchemy import text
 
 from db import session_scope
-from models import Agent, WorkspaceSecret
+from keys import hash_token
+from models import Agent, ApiKey, WorkspaceSecret
 from tests.conftest import auth_headers
 
 
@@ -161,6 +162,23 @@ def _dep_count(ws_id, agent):
         ).scalar_one()
 
 
+def _worker_secret(client, ws_id, name="LIGHTSEI_API_KEY"):
+    secrets = client.get(
+        f"/worker/workspaces/{ws_id}/secrets",
+        headers={"Authorization": "Bearer test-worker-token"},
+    ).json()["secrets"]
+    return secrets.get(name)
+
+
+def _key_for_plaintext(ws_id, plaintext):
+    with session_scope() as s:
+        return s.execute(
+            text("SELECT id, revoked_at FROM api_keys "
+                 "WHERE workspace_id = :ws AND hash = :hash"),
+            {"ws": ws_id, "hash": hash_token(plaintext)},
+        ).mappings().first()
+
+
 def test_adding_anthropic_key_auto_redeploys_ai_assistants(client, alice):
     """A non-technical owner shouldn't redeploy bots by hand. Adding the
     ANTHROPIC_API_KEY secret auto-redeploys the running AI personas so they
@@ -213,3 +231,61 @@ def test_deploy_team_does_not_duplicate_api_key(client, alice):
             {"ws": ws_id},
         ).scalar_one()
         assert n == 1
+
+
+def test_revoking_team_auto_key_rotates_secret_and_redeploys(client, alice):
+    ws_id = alice["workspace"]["id"]
+    _provision(ws_id, "website")
+    h = auth_headers(alice["session_token"])
+    first = client.post("/workspaces/me/team/deploy", headers=h)
+    assert first.status_code == 200, first.text
+    before_deployments = _dep_count(ws_id, "website")
+
+    old_secret = _worker_secret(client, ws_id)
+    old_key = _key_for_plaintext(ws_id, old_secret)
+    assert old_key is not None
+
+    r = client.delete(f"/workspaces/me/api-keys/{old_key['id']}", headers=h)
+    assert r.status_code == 200, r.text
+
+    new_secret = _worker_secret(client, ws_id)
+    assert new_secret
+    assert new_secret != old_secret
+    new_key = _key_for_plaintext(ws_id, new_secret)
+    assert new_key is not None
+    assert new_key["revoked_at"] is None
+    assert client.get(
+        "/workspaces/me/team/status", headers=auth_headers(old_secret)
+    ).status_code == 401
+    assert client.get(
+        "/workspaces/me/team/status", headers=auth_headers(new_secret)
+    ).status_code == 200
+    assert _dep_count(ws_id, "website") == before_deployments + 1
+
+
+def test_deploy_team_rotates_revoked_lightsei_api_key_secret(client, alice):
+    ws_id = alice["workspace"]["id"]
+    _provision(ws_id, "website")
+    h = auth_headers(alice["session_token"])
+    first = client.post("/workspaces/me/team/deploy", headers=h)
+    assert first.status_code == 200, first.text
+    before_deployments = _dep_count(ws_id, "website")
+
+    old_secret = _worker_secret(client, ws_id)
+    with session_scope() as s:
+        key = s.execute(
+            text("SELECT * FROM api_keys WHERE workspace_id = :ws AND hash = :hash"),
+            {"ws": ws_id, "hash": hash_token(old_secret)},
+        ).mappings().first()
+        row = s.get(ApiKey, key["id"])
+        row.revoked_at = _now()
+
+    r = client.post("/workspaces/me/team/deploy", headers=h)
+    assert r.status_code == 200, r.text
+    assert "website" in r.json()["deployed"]
+
+    new_secret = _worker_secret(client, ws_id)
+    assert new_secret
+    assert new_secret != old_secret
+    assert _key_for_plaintext(ws_id, new_secret)["revoked_at"] is None
+    assert _dep_count(ws_id, "website") == before_deployments + 1

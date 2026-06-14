@@ -133,6 +133,8 @@ MAX_DEPLOYMENT_BLOB_BYTES = 10 * 1024 * 1024
 # A single deployment keeps the most recent N log lines on the server.
 # Older lines are pruned on insert.
 MAX_DEPLOYMENT_LOG_LINES = 1000
+TEAM_API_KEY_SECRET_NAME = "LIGHTSEI_API_KEY"
+TEAM_API_KEY_DISPLAY_NAME = "team (auto)"
 
 
 def utcnow() -> datetime:
@@ -3383,9 +3385,14 @@ def revoke_my_key(
         raise HTTPException(
             status_code=400, detail="cannot revoke the key used for this request"
         )
+    now = utcnow()
     if row.revoked_at is None:
-        row.revoked_at = utcnow()
+        row.revoked_at = now
     session.flush()
+    if _ensure_workspace_api_key_secret(
+        session, auth.workspace_id, now, create_if_missing=False
+    ):
+        _redeploy_active_builtin_personas(session, auth.workspace_id, now)
     return _serialize_api_key(row)
 
 
@@ -5231,38 +5238,63 @@ def _deploy_builtin_persona(
 
 
 def _ensure_workspace_api_key_secret(
-    session: Session, workspace_id: str, now: datetime
+    session: Session,
+    workspace_id: str,
+    now: datetime,
+    *,
+    create_if_missing: bool = True,
 ) -> bool:
     """Ensure the workspace has a LIGHTSEI_API_KEY secret so deployed bots
     can authenticate to the backend. Mints an API key + stores it as the
-    secret if absent; no-op if it already exists. Returns True if created.
+    secret if absent or stale. Returns True if the secret was written.
 
     Without this, onboarded (magic-link) users have no API key and every
     deployed persona exits on startup ("LIGHTSEI_API_KEY missing").
     """
-    if session.get(WorkspaceSecret, (workspace_id, "LIGHTSEI_API_KEY")):
+    secret = session.get(WorkspaceSecret, (workspace_id, TEAM_API_KEY_SECRET_NAME))
+    if secret is None and not create_if_missing:
         return False
     if not secrets_crypto.is_available():
         # Can't store a secret without the master key; the bots will warn,
         # but there's nothing we can do here. Don't crash the deploy.
         return False
+    if secret is not None:
+        try:
+            plaintext = secrets_crypto.decrypt(secret.encrypted_value)
+        except Exception:
+            plaintext = None
+        if plaintext:
+            active = session.execute(
+                select(ApiKey.id).where(
+                    ApiKey.workspace_id == workspace_id,
+                    ApiKey.hash == hash_token(plaintext),
+                    ApiKey.revoked_at.is_(None),
+                )
+            ).first()
+            if active is not None:
+                return False
 
     plaintext = generate_key()
     session.add(ApiKey(
         id=str(uuid.uuid4()),
         workspace_id=workspace_id,
-        name="team (auto)",
+        name=TEAM_API_KEY_DISPLAY_NAME,
         prefix=prefix_for_display(plaintext),
         hash=hash_token(plaintext),
         created_at=now,
     ))
-    session.add(WorkspaceSecret(
-        workspace_id=workspace_id,
-        name="LIGHTSEI_API_KEY",
-        encrypted_value=secrets_crypto.encrypt(plaintext),
-        created_at=now,
-        updated_at=now,
-    ))
+    encrypted = secrets_crypto.encrypt(plaintext)
+    if secret is None:
+        session.add(WorkspaceSecret(
+            workspace_id=workspace_id,
+            name=TEAM_API_KEY_SECRET_NAME,
+            encrypted_value=encrypted,
+            created_at=now,
+            updated_at=now,
+        ))
+    else:
+        secret.encrypted_value = encrypted
+        secret.updated_at = now
     session.flush()
     return True
 
@@ -5292,7 +5324,7 @@ def deploy_team(
     # so without this the deployed personas exit immediately ("LIGHTSEI_API_KEY
     # missing — refusing to start"). Mint + store one transparently so "build
     # my team" actually produces working bots.
-    _ensure_workspace_api_key_secret(session, workspace_id, now)
+    key_secret_written = _ensure_workspace_api_key_secret(session, workspace_id, now)
 
     agent_names = set(session.execute(
         text("SELECT name FROM agents WHERE workspace_id = :ws"),
@@ -5305,7 +5337,17 @@ def deploy_team(
     already_running: list[str] = []
     for name in provisioned:
         if _has_active_deployment(session, workspace_id, name):
-            already_running.append(name)
+            if key_secret_written:
+                latest = _latest_active_deployments_for_agents(
+                    session, workspace_id, {name}
+                )
+                if latest:
+                    _redeploy_from(session, latest[0], now)
+                    deployed.append(name)
+                else:
+                    already_running.append(name)
+            else:
+                already_running.append(name)
             continue
         _deploy_builtin_persona(session, workspace_id, name, now)
         deployed.append(name)
@@ -5515,6 +5557,9 @@ def _redeploy_from(session: Session, old: Deployment, now: datetime) -> Deployme
     The worker claims the new one and re-spawns the bot, which re-fetches
     workspace secrets — so this is how a bot picks up a newly-added secret
     (env is injected at spawn, not hot-reloaded). Does not commit."""
+    _retire_active_deployments_for_agent(
+        session, workspace_id=old.workspace_id, agent_name=old.agent_name
+    )
     old.desired_state = "stopped"
     old.updated_at = now
     new = Deployment(
@@ -5545,15 +5590,46 @@ def _redeploy_active_ai_assistants(
     Returns the agent names redeployed."""
     import builtin_personas
 
+    rows = _latest_active_deployments_for_agents(
+        session,
+        workspace_id,
+        set(builtin_personas.LLM_PERSONAS),
+    )
+    for old in rows:
+        _redeploy_from(session, old, now)
+    return [d.agent_name for d in rows]
+
+
+def _latest_active_deployments_for_agents(
+    session: Session, workspace_id: str, agent_names: set[str]
+) -> list[Deployment]:
+    """Latest active deployment per agent, ignoring stopped or blobless rows."""
+    if not agent_names:
+        return []
     rows = session.execute(
         select(Deployment).where(
             Deployment.workspace_id == workspace_id,
-            Deployment.agent_name.in_(list(builtin_personas.LLM_PERSONAS)),
+            Deployment.agent_name.in_(list(agent_names)),
             Deployment.desired_state == "running",
             Deployment.status.in_(["queued", "building", "running"]),
             Deployment.source_blob_id.isnot(None),
-        )
+        ).order_by(Deployment.agent_name, Deployment.created_at.desc())
     ).scalars().all()
+    latest: dict[str, Deployment] = {}
+    for row in rows:
+        latest.setdefault(row.agent_name, row)
+    return list(latest.values())
+
+
+def _redeploy_active_builtin_personas(
+    session: Session, workspace_id: str, now: datetime
+) -> list[str]:
+    """Redeploy active built-in personas after rotating their backend key."""
+    import builtin_personas
+
+    rows = _latest_active_deployments_for_agents(
+        session, workspace_id, set(builtin_personas.BUILTIN_PERSONAS)
+    )
     for old in rows:
         _redeploy_from(session, old, now)
     return [d.agent_name for d in rows]
