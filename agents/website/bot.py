@@ -28,7 +28,7 @@ Workspace secrets (injected by the worker):
 Public surface (for tests):
   extract_links(html, base_url) -> [absolute url]
   extract_forms(html) -> [{action, method}]
-  classify_status(status_code, error) -> {up, severity}
+  classify_status(status_code, error) -> {up, severity, reason}
   check_site(url, fetch, *, max_links) -> report dict
   tick(client, fetch, *, hermes_channel=...)
   main()
@@ -94,13 +94,37 @@ def extract_forms(html: str) -> list[dict[str, Any]]:
     return forms
 
 
+# Substrings that mark a transport error as a TLS/certificate failure (the
+# server answered at the network layer but its HTTPS cert is broken or
+# missing) rather than the server being unreachable. httpx surfaces these
+# as ConnectError wrapping an ssl error, so we match on the message text.
+_TLS_HINTS = ("ssl", "certificate", "cert_", "tls", "cert verify",
+              "certificate_verify", "wrong_version", "sslcertverification")
+
+
+def _classify_error(error: Optional[str]) -> str:
+    """Categorize a transport error string into a `reason`.
+
+    A TLS/cert failure is distinct from a true outage: the site is reachable
+    but its certificate is broken (visitors get a browser "not secure"
+    warning), which is a different message + fix than "the server is down".
+    """
+    e = (error or "").lower()
+    if any(h in e for h in _TLS_HINTS):
+        return "tls"
+    return "unreachable"
+
+
 def classify_status(status_code: Optional[int], error: Optional[str]) -> dict[str, Any]:
-    """A page is 'up' on a 2xx/3xx with no transport error."""
+    """A page is 'up' on a 2xx/3xx with no transport error. Otherwise it
+    carries a `reason` so the owner-facing alert is accurate: a broken TLS
+    certificate (`tls`) reads very differently from an unreachable server
+    (`unreachable`) or an error response (`http_error`)."""
     if error:
-        return {"up": False, "severity": "error"}
+        return {"up": False, "severity": "error", "reason": _classify_error(error)}
     if status_code is not None and 200 <= status_code < 400:
-        return {"up": True, "severity": "info"}
-    return {"up": False, "severity": "error"}
+        return {"up": True, "severity": "info", "reason": "ok"}
+    return {"up": False, "severity": "error", "reason": "http_error"}
 
 
 def is_broken_link(status_code: Optional[int], error: Optional[str]) -> bool:
@@ -132,6 +156,7 @@ def check_site(url: str, fetch: Fetcher, *, max_links: int = 25) -> dict[str, An
     report: dict[str, Any] = {
         "url": url,
         "up": status["up"],
+        "reason": status["reason"],
         "status_code": page.get("status_code"),
         "latency_ms": page.get("latency_ms"),
         "broken_links": [],
@@ -161,11 +186,25 @@ def check_site(url: str, fetch: Fetcher, *, max_links: int = 25) -> dict[str, An
 
 
 def hermes_text_for(report: dict[str, Any]) -> str:
-    """One-line owner-facing alert. Only called when something's wrong."""
+    """One-line owner-facing alert. Only called when something's wrong.
+
+    The message is tailored to the failure: a broken TLS certificate is not
+    the same problem as a server that won't respond, and telling the owner
+    "DOWN" when the site actually loads (just with a cert warning) sends them
+    chasing the wrong fix.
+    """
+    url = report["url"]
     if not report["up"]:
-        return f"\U0001f534 website: {report['url']} appears DOWN (status {report.get('status_code')})"
+        reason = report.get("reason")
+        if reason == "tls":
+            return (f"\U0001f512 website: {url} loads but its security certificate "
+                    "is broken or expired. Visitors get a \"not secure\" warning.")
+        if reason == "http_error":
+            return f"\U0001f534 website: {url} is returning an error (status {report.get('status_code')})."
+        # unreachable (connection refused / timeout / DNS) or unknown
+        return f"\U0001f534 website: {url} appears DOWN (couldn't connect)."
     n = len(report["broken_links"])
-    return f"⚠️ website: {n} broken link{'s' if n != 1 else ''} on {report['url']}"
+    return f"⚠️ website: {n} broken link{'s' if n != 1 else ''} on {url}"
 
 
 # ---------- Production fetcher ---------- #

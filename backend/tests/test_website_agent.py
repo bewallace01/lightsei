@@ -159,7 +159,11 @@ def _cmd(*, cmd_id="cmd-1", kind="website.check", payload=None):
 def test_tick_down_site_alerts_hermes(fake_lightsei):
     fake, bot = fake_lightsei
     fake.claim_command.return_value = _cmd(payload={"url": "https://down.com"})
-    fetch = _fetcher({"https://down.com": {"status_code": 500}})
+    # A genuine outage: the server won't accept a connection (not a 500,
+    # which means the server is up but erroring — that path is covered
+    # separately). An unreachable site is the one that reads "DOWN".
+    fetch = _fetcher({"https://down.com": {
+        "status_code": None, "error": "ConnectError: [Errno 61] Connection refused"}})
     bot.tick(fake, fetch, hermes_channel="alerts")
     fake.emit.assert_called_once()
     assert fake.emit.call_args.args[0] == "website.check_complete"
@@ -209,3 +213,75 @@ def test_tick_crash_emits_website_crash(fake_lightsei, monkeypatch):
     assert fake.emit.call_args.args[0] == "website.crash"
     fake.send_command.assert_called_once()
     assert "error" in fake.complete_command.call_args.kwargs
+
+
+# ---------- TLS / cert vs down distinction (hardening) ---------- #
+
+
+def test_classify_error_detects_tls(fake_lightsei):
+    _, bot = fake_lightsei
+    for msg in (
+        "SSLError: certificate verify failed",
+        "ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed",
+        "ssl.SSLCertVerificationError: hostname mismatch",
+    ):
+        assert bot._classify_error(msg) == "tls", msg
+    # Non-TLS transport failures are 'unreachable'.
+    for msg in ("ConnectTimeout: timed out", "ConnectError: [Errno 61] Connection refused",
+                "ReadTimeout"):
+        assert bot._classify_error(msg) == "unreachable", msg
+
+
+def test_classify_status_carries_reason(fake_lightsei):
+    _, bot = fake_lightsei
+    assert bot.classify_status(200, None)["reason"] == "ok"
+    assert bot.classify_status(404, None)["reason"] == "http_error"
+    assert bot.classify_status(500, None)["reason"] == "http_error"
+    assert bot.classify_status(None, "SSLError: certificate verify failed")["reason"] == "tls"
+    assert bot.classify_status(None, "ConnectTimeout")["reason"] == "unreachable"
+    # Backward-compatible: up/severity still present.
+    s = bot.classify_status(None, "SSLError: bad cert")
+    assert s["up"] is False and s["severity"] == "error"
+
+
+def test_check_site_tls_error_carries_reason(fake_lightsei):
+    _, bot = fake_lightsei
+    fetch = _fetcher({"https://www.x.com": {
+        "status_code": None,
+        "error": "ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed",
+    }})
+    r = bot.check_site("https://www.x.com", fetch)
+    assert r["up"] is False
+    assert r["reason"] == "tls"
+    assert r["links_checked"] == 0  # didn't probe links on a failed page
+
+
+def test_hermes_text_distinguishes_tls_from_down(fake_lightsei):
+    _, bot = fake_lightsei
+    tls = bot.hermes_text_for(
+        {"up": False, "reason": "tls", "url": "https://www.x.com", "status_code": None,
+         "broken_links": []})
+    assert "certificate" in tls and "DOWN" not in tls
+    down = bot.hermes_text_for(
+        {"up": False, "reason": "unreachable", "url": "https://x.com", "status_code": None,
+         "broken_links": []})
+    assert "DOWN" in down
+    http = bot.hermes_text_for(
+        {"up": False, "reason": "http_error", "url": "https://x.com", "status_code": 503,
+         "broken_links": []})
+    assert "error" in http and "503" in http
+
+
+def test_tick_tls_error_alerts_with_cert_message_not_down(fake_lightsei):
+    fake, bot = fake_lightsei
+    fake.claim_command.return_value = _cmd(payload={"url": "https://www.x.com"})
+    fetch = _fetcher({"https://www.x.com": {
+        "status_code": None,
+        "error": "ConnectError: [SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed",
+    }})
+    bot.tick(fake, fetch, hermes_channel="alerts")
+    # Emits the result event and alerts hermes with the accurate cert wording.
+    assert fake.emit.call_args.args[0] == "website.check_complete"
+    hp = fake.send_command.call_args.args[2]
+    assert hp["severity"] == "error"
+    assert "certificate" in hp["text"] and "DOWN" not in hp["text"]
