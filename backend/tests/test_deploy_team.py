@@ -152,6 +152,52 @@ def test_deploy_team_provisions_lightsei_api_key_secret(client, alice):
     assert secrets.get("LIGHTSEI_API_KEY")  # present + non-empty
 
 
+def _dep_count(ws_id, agent):
+    with session_scope() as s:
+        return s.execute(
+            text("SELECT count(*) FROM deployments WHERE workspace_id=:ws "
+                 "AND agent_name=:a"),
+            {"ws": ws_id, "a": agent},
+        ).scalar_one()
+
+
+def test_adding_anthropic_key_auto_redeploys_ai_assistants(client, alice):
+    """A non-technical owner shouldn't redeploy bots by hand. Adding the
+    ANTHROPIC_API_KEY secret auto-redeploys the running AI personas so they
+    pick it up (secrets inject at spawn). Heuristic personas are left
+    alone."""
+    ws_id = alice["workspace"]["id"]
+    _provision(ws_id, "bi", "website")  # bi = LLM, website = heuristic
+    h = auth_headers(alice["session_token"])
+    client.post("/workspaces/me/team/deploy", headers=h)
+
+    bi_before = _dep_count(ws_id, "bi")
+    web_before = _dep_count(ws_id, "website")
+
+    r = client.put("/workspaces/me/secrets/ANTHROPIC_API_KEY", headers=h,
+                   json={"value": "sk-ant-test"})
+    assert r.status_code == 200, r.text
+    assert "bi" in r.json()["redeployed_assistants"]
+    assert "website" not in r.json()["redeployed_assistants"]
+
+    # A fresh bi deployment was queued; website (heuristic) untouched.
+    assert _dep_count(ws_id, "bi") == bi_before + 1
+    assert _dep_count(ws_id, "website") == web_before
+
+
+def test_setting_unrelated_secret_does_not_redeploy(client, alice):
+    ws_id = alice["workspace"]["id"]
+    _provision(ws_id, "bi")
+    h = auth_headers(alice["session_token"])
+    client.post("/workspaces/me/team/deploy", headers=h)
+    bi_before = _dep_count(ws_id, "bi")
+
+    r = client.put("/workspaces/me/secrets/SOME_OTHER_KEY", headers=h,
+                   json={"value": "x"})
+    assert r.json().get("redeployed_assistants") == []
+    assert _dep_count(ws_id, "bi") == bi_before
+
+
 def test_deploy_team_does_not_duplicate_api_key(client, alice):
     ws_id = alice["workspace"]["id"]
     _provision(ws_id, "website")
