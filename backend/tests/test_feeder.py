@@ -784,3 +784,155 @@ def test_reputation_feeder_uses_configured_target_without_discovery(monkeypatch)
         ).mappings().first()
         # The configured location title rides the command payload.
         assert row["payload"]["review"]["source"] == "Acme Uptown"
+
+
+# ---------- Website health feeder ---------- #
+
+
+def _deploy_website(s, workspace_id: str) -> None:
+    now = _now()
+    s.add(Agent(
+        workspace_id=workspace_id,
+        name=feeder.WEBSITE_AGENT,
+        role="executor",
+        created_at=now,
+        updated_at=now,
+    ))
+    s.flush()
+
+
+def _count_website_cmds(s, workspace_id: str) -> int:
+    return s.execute(
+        text(
+            "SELECT count(*) FROM commands "
+            "WHERE workspace_id = :ws AND kind = :kind "
+            "AND payload ->> 'source' = :source"
+        ),
+        {"ws": workspace_id, "kind": feeder.WEBSITE_KIND,
+         "source": feeder.WEBSITE_SOURCE},
+    ).scalar_one()
+
+
+def test_normalize_website_url_adds_scheme_and_validates():
+    n = feeder.normalize_website_url
+    assert n("example.com") == "https://example.com"
+    assert n("  www.example.com/contact ") == "https://www.example.com/contact"
+    assert n("http://shop.example.com") == "http://shop.example.com"
+    # Not a URL: empty, bare word (no dot), or a non-web scheme.
+    assert n("") is None
+    assert n(None) is None
+    assert n("homepage") is None
+    assert n("ftp://example.com") is None
+
+
+def test_website_feeder_enqueues_check_for_configured_url():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_website(s, ws)
+        feeder.set_feeder_config(
+            s, ws, feeder.FEEDER_WEBSITE_HEALTH,
+            {"url": "https://acme.example"}, now,
+        )
+
+    with session_scope() as s:
+        assert feeder.enqueue_website_check_for_workspace(s, ws, now) == 1
+
+    with session_scope() as s:
+        assert _count_website_cmds(s, ws) == 1
+        row = s.execute(
+            text("SELECT payload FROM commands WHERE workspace_id = :ws"),
+            {"ws": ws},
+        ).mappings().first()
+        # The website assistant reads payload.url.
+        assert row["payload"]["url"] == "https://acme.example"
+        assert row["payload"]["source"] == feeder.WEBSITE_SOURCE
+
+
+def test_website_feeder_noop_without_configured_url():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_website(s, ws)
+
+    # Enabled by default but no URL set yet -> clean no-op, no command.
+    with session_scope() as s:
+        assert feeder.is_feeder_enabled(s, ws, feeder.FEEDER_WEBSITE_HEALTH)
+        assert feeder.enqueue_website_check_for_workspace(s, ws, now) == 0
+    with session_scope() as s:
+        assert _count_website_cmds(s, ws) == 0
+
+
+def test_website_feeder_dedups_within_window():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_website(s, ws)
+        feeder.set_feeder_config(
+            s, ws, feeder.FEEDER_WEBSITE_HEALTH,
+            {"url": "https://acme.example"}, now,
+        )
+
+    with session_scope() as s:
+        assert feeder.enqueue_website_check_for_workspace(s, ws, now) == 1
+    # A second tick a few hours later (inside the daily window) enqueues
+    # nothing: one sweep per cadence.
+    later = now + timedelta(hours=3)
+    with session_scope() as s:
+        assert feeder.enqueue_website_check_for_workspace(s, ws, later) == 0
+    with session_scope() as s:
+        assert _count_website_cmds(s, ws) == 1
+
+
+def test_website_feeder_fires_again_after_window():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_website(s, ws)
+        feeder.set_feeder_config(
+            s, ws, feeder.FEEDER_WEBSITE_HEALTH,
+            {"url": "https://acme.example"}, now,
+        )
+
+    with session_scope() as s:
+        feeder.enqueue_website_check_for_workspace(s, ws, now)
+    # Past the dedup window -> a fresh sweep is due.
+    tomorrow = now + feeder.WEBSITE_DEDUP_WINDOW + timedelta(minutes=1)
+    with session_scope() as s:
+        assert feeder.enqueue_website_check_for_workspace(s, ws, tomorrow) == 1
+    with session_scope() as s:
+        assert _count_website_cmds(s, ws) == 2
+
+
+def test_website_feeder_runs_in_tick_when_enabled():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_website(s, ws)
+        feeder.set_feeder_config(
+            s, ws, feeder.FEEDER_WEBSITE_HEALTH,
+            {"url": "https://acme.example"}, now,
+        )
+
+    with session_scope() as s:
+        feeder.tick(s, now)
+    with session_scope() as s:
+        assert _count_website_cmds(s, ws) == 1
+
+
+def test_website_feeder_skips_when_disabled():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_website(s, ws)
+        feeder.set_feeder_config(
+            s, ws, feeder.FEEDER_WEBSITE_HEALTH,
+            {"url": "https://acme.example"}, now,
+        )
+        feeder.set_feeder_enabled(
+            s, ws, feeder.FEEDER_WEBSITE_HEALTH, False, now)
+
+    with session_scope() as s:
+        feeder.tick(s, now)
+    with session_scope() as s:
+        assert _count_website_cmds(s, ws) == 0

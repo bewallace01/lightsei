@@ -633,6 +633,9 @@ export interface OnboardingGoal {
   label: string;
   assistant: string;
   connector: string | null;
+  // True for goals that need a free-text target (the website goal needs a
+  // site URL); the wizard shows a URL input when such a goal is checked.
+  needs_url: boolean;
 }
 
 export interface OnboardingCatalog {
@@ -668,11 +671,12 @@ export async function fetchOnboarding(): Promise<{
 export async function submitOnboarding(
   industry: string | null,
   goals: string[],
+  websiteUrl?: string | null,
 ): Promise<{ status: string; plan: OnboardingPlan; profile: OnboardingProfile }> {
   return (await authedJson("/workspaces/me/onboarding", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ industry, goals }),
+    body: JSON.stringify({ industry, goals, website_url: websiteUrl ?? null }),
   })) as { status: string; plan: OnboardingPlan; profile: OnboardingProfile };
 }
 
@@ -799,6 +803,9 @@ export interface FeederSetting {
   enabled: boolean;
   config: Record<string, unknown>;
   targetable: boolean;
+  // True when the feeder's target is a free-text URL the owner types (the
+  // website feeder), rather than a connector-backed picker.
+  url_target: boolean;
 }
 
 export interface FeederTarget {
