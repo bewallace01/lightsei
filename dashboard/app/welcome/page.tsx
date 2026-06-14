@@ -158,6 +158,7 @@ export default function WelcomePage() {
   const [catalog, setCatalog] = useState<OnboardingCatalog | null>(null);
   const [industry, setIndustry] = useState<string | null>(null);
   const [goals, setGoals] = useState<Set<string>>(new Set());
+  const [websiteUrl, setWebsiteUrl] = useState("");
   const [step, setStep] = useState<1 | 2>(1);
   const [submitting, setSubmitting] = useState(false);
   const [plan, setPlan] = useState<OnboardingPlan | null>(null);
@@ -211,7 +212,11 @@ export default function WelcomePage() {
     setSubmitting(true);
     setError(null);
     try {
-      const res = await submitOnboarding(industry, Array.from(goals));
+      // Send the site URL only when the website goal is selected; the
+      // backend ignores it otherwise (and won't clobber an existing target
+      // when left blank on a re-edit).
+      const sendUrl = goals.has("website") ? websiteUrl.trim() || null : null;
+      const res = await submitOnboarding(industry, Array.from(goals), sendUrl);
       setPlan(res.plan);
       // Bring the provisioned assistants online (best-effort: if it
       // fails, the team is still provisioned and can be deployed later).
@@ -434,28 +439,48 @@ export default function WelcomePage() {
             {catalog.goals.map((g) => {
               const checked = goals.has(g.key);
               return (
-                <label
-                  key={g.key}
-                  className={
-                    "flex items-center gap-3 text-sm px-4 py-3 rounded-lg border cursor-pointer transition-colors " +
-                    (checked
-                      ? "border-accent-600 bg-accent-50"
-                      : "border-gray-200 hover:border-gray-300")
-                  }
-                >
-                  <input
-                    type="checkbox"
-                    checked={checked}
-                    onChange={() => toggleGoal(g.key)}
-                    className="h-4 w-4 accent-accent-600"
-                  />
-                  <span className="flex-1">{g.label}</span>
-                  {g.connector && (
-                    <span className="text-[10px] uppercase tracking-wider text-gray-400">
-                      needs connect
-                    </span>
+                <div key={g.key}>
+                  <label
+                    className={
+                      "flex items-center gap-3 text-sm px-4 py-3 rounded-lg border cursor-pointer transition-colors " +
+                      (checked
+                        ? "border-accent-600 bg-accent-50"
+                        : "border-gray-200 hover:border-gray-300")
+                    }
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleGoal(g.key)}
+                      className="h-4 w-4 accent-accent-600"
+                    />
+                    <span className="flex-1">{g.label}</span>
+                    {g.connector && (
+                      <span className="text-[10px] uppercase tracking-wider text-gray-400">
+                        needs connect
+                      </span>
+                    )}
+                  </label>
+                  {g.needs_url && checked && (
+                    <div className="mt-2 ml-4 pl-3 border-l-2 border-accent-100">
+                      <label className="block text-xs text-gray-500 mb-1">
+                        What&apos;s your website address?
+                      </label>
+                      <input
+                        type="url"
+                        inputMode="url"
+                        value={websiteUrl}
+                        onChange={(e) => setWebsiteUrl(e.target.value)}
+                        placeholder="yourbusiness.com"
+                        className="w-full text-sm rounded-md ring-1 ring-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-600"
+                      />
+                      <p className="mt-1 text-[11px] text-gray-400">
+                        We&apos;ll check it daily for downtime, broken links,
+                        and a missing contact form.
+                      </p>
+                    </div>
                   )}
-                </label>
+                </div>
               );
             })}
           </div>

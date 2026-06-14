@@ -76,8 +76,11 @@ GOALS = [
         "key": "website",
         "label": "Monitor our website",
         "agent": "website",
-        "feeders": [],
+        "feeders": ["website_health"],
         "connector": None,
+        # Needs a free-text target (the site URL) rather than a connector;
+        # the wizard collects it when this goal is checked.
+        "needs_url": True,
     },
 ]
 _GOAL_BY_KEY = {g["key"]: g for g in GOALS}
@@ -114,6 +117,7 @@ def catalog() -> dict[str, Any]:
                 "label": g["label"],
                 "assistant": g["agent"],
                 "connector": g["connector"],
+                "needs_url": bool(g.get("needs_url")),
             }
             for g in GOALS
         ],
@@ -124,7 +128,9 @@ def catalog() -> dict[str, Any]:
 
 
 def build_provisioning_plan(
-    industry: Optional[str], goal_keys: list[str]
+    industry: Optional[str],
+    goal_keys: list[str],
+    website_url: Optional[str] = None,
 ) -> dict[str, Any]:
     """Map answers to a provisioning plan. Pure: no DB.
 
@@ -132,7 +138,13 @@ def build_provisioning_plan(
     fail the whole submit). Order + dedup are stable so the plan reads the
     same way every time. Returns the assistants to create, feeders to
     enable, and connectors the owner still needs to connect.
+
+    `website_url` is the site address the owner typed for the "Monitor our
+    website" goal. It's normalized here and carried on the plan only when
+    that goal is selected and the URL parses; apply_provisioning_plan
+    stores it as the website feeder's target.
     """
+    import feeder
     # Dedup keys (stable order) before mapping, so a stale client sending
     # duplicates doesn't store dup goals.
     seen_keys: set[str] = set()
@@ -156,11 +168,21 @@ def build_provisioning_plan(
         if c and c not in connectors:
             connectors.append(c)
 
+    # Carry the site URL only when the website goal is in play and it
+    # normalizes to a real URL — otherwise the plan stays clean (no target
+    # for an unselected goal, no garbage from a typo).
+    normalized_url = (
+        feeder.normalize_website_url(website_url)
+        if "website" in ordered_keys
+        else None
+    )
+
     return {
         "industry": industry,
         "goals": [g["key"] for g in selected],
         "assistants": agents,
         "feeders": feeders,
+        "website_url": normalized_url,
         "connectors_needed": [
             {"type": c, "label": _CONNECTOR_LABELS.get(c, c)}
             for c in connectors
@@ -186,6 +208,16 @@ def apply_provisioning_plan(
 
     for feeder_kind in plan.get("feeders", []):
         feeder.set_feeder_enabled(session, workspace_id, feeder_kind, True, now)
+
+    # Store the website feeder's target URL if the owner gave one. Done
+    # after enabling so the config upsert just touches the url; with no URL
+    # the feeder stays a no-op until one is set in settings.
+    website_url = plan.get("website_url")
+    if website_url:
+        feeder.set_feeder_config(
+            session, workspace_id, feeder.FEEDER_WEBSITE_HEALTH,
+            {"url": website_url}, now,
+        )
 
     profile = {
         "industry": plan.get("industry"),

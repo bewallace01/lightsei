@@ -57,6 +57,7 @@ FEEDER_WEEKLY_DIGEST = "weekly_digest"
 FEEDER_COST_SPIKE = "cost_spike"
 FEEDER_INBOX_GMAIL = "inbox_gmail"
 FEEDER_REPUTATION_REVIEWS = "reputation_reviews"
+FEEDER_WEBSITE_HEALTH = "website_health"
 
 # Each entry carries `default_enabled`: the on/off a workspace gets before
 # the owner has toggled anything. The two internal-data feeders default ON
@@ -106,6 +107,22 @@ FEEDER_CATALOG = [
         # location). The connector backing the picker.
         "target_connector": "google_business",
     },
+    {
+        "kind": FEEDER_WEBSITE_HEALTH,
+        "name": "Website health checks",
+        "description": (
+            "Checks your website on a schedule (is it up, any broken links, "
+            "is the contact form still there) and alerts you only when "
+            "something is wrong. Add your site address to start."
+        ),
+        # Defaults ON: it watches the owner's own public site (nothing
+        # private, low rate) and is a no-op until a URL is set, so it can't
+        # do anything surprising before the owner provides one.
+        "default_enabled": True,
+        # This feeder's target is a plain website URL the owner types, not a
+        # connector account. The settings UI renders a URL input for it.
+        "url_target": True,
+    },
 ]
 
 _DEFAULT_ENABLED = {e["kind"]: e["default_enabled"] for e in FEEDER_CATALOG}
@@ -124,6 +141,47 @@ REPUTATION_AGENT = "reputation"
 REPUTATION_KIND = "reputation.check"
 REPUTATION_SOURCE = "feeder-reputation"
 REPUTATION_MAX_PER_TICK = 20
+
+# The Website feeder's target + dedup constants. Unlike the review/inbox
+# feeders (one command per new external item), this is a periodic sweep:
+# one website.check per cadence window for the configured URL. The window
+# is just under a day so a check that runs a few hours late doesn't push
+# the next one out to every-other-day; the cadence stays daily.
+WEBSITE_AGENT = "website"
+WEBSITE_KIND = "website.check"
+WEBSITE_SOURCE = "feeder-website"
+WEBSITE_DEDUP_WINDOW = timedelta(hours=20)
+
+
+def normalize_website_url(raw: Optional[str]) -> Optional[str]:
+    """Coerce an owner-typed site address into a fetchable URL, or None if
+    it isn't one. Pure + testable.
+
+    Owners type "example.com", "www.example.com", or a full URL. We add a
+    scheme when missing (defaulting to https) and require a host with a dot
+    so a bare word ("home") or empty string can't become a target. Returns
+    the normalized URL string, or None when it can't be made into one.
+    """
+    from urllib.parse import urlparse, urlunparse
+
+    if not raw:
+        return None
+    candidate = raw.strip()
+    if not candidate:
+        return None
+    if "://" not in candidate:
+        candidate = "https://" + candidate
+    parsed = urlparse(candidate)
+    if parsed.scheme not in ("http", "https"):
+        return None
+    host = parsed.netloc
+    if not host or "." not in host or host.startswith(".") or host.endswith("."):
+        return None
+    # Rebuild from parsed parts so we drop stray whitespace / fragments and
+    # store a canonical form. Keep path/query (a contact page may be deep).
+    return urlunparse(
+        (parsed.scheme, parsed.netloc, parsed.path, "", parsed.query, "")
+    )
 
 # Stamped into every feeder-enqueued command's payload so we can tell a
 # proactive digest apart from a human/dashboard-requested summarize when
@@ -412,8 +470,12 @@ def get_feeder_settings(
                 entry["kind"], entry["default_enabled"]
             ),
             "config": config_by_kind.get(entry["kind"], {}),
-            # Whether this feeder takes a target the owner can pick.
+            # Whether this feeder takes a connector-backed target the owner
+            # picks from a list (drives the location dropdown).
             "targetable": entry.get("target_connector") is not None,
+            # Whether this feeder takes a free-text URL target (drives a URL
+            # input). The website feeder is the first of these.
+            "url_target": bool(entry.get("url_target")),
         }
         for entry in FEEDER_CATALOG
     ]
@@ -779,6 +841,87 @@ def enqueue_reputation_reviews_for_workspace(
     return enqueued
 
 
+def _has_recent_website_check(
+    session: Session, workspace_id: str, now: datetime
+) -> bool:
+    """True if a feeder website.check was enqueued inside the cadence
+    window. Keyed on the WEBSITE_SOURCE marker so an owner's manual
+    "check now" (a different source) never blocks the scheduled sweep."""
+    floor = now - WEBSITE_DEDUP_WINDOW
+    found = session.execute(
+        text(
+            """
+            SELECT 1
+              FROM commands
+             WHERE workspace_id = :ws
+               AND agent_name = :agent
+               AND kind = :kind
+               AND created_at >= :floor
+               AND payload ->> 'source' = :source
+             LIMIT 1
+            """
+        ),
+        {"ws": workspace_id, "agent": WEBSITE_AGENT, "kind": WEBSITE_KIND,
+         "floor": floor, "source": WEBSITE_SOURCE},
+    ).first()
+    return found is not None
+
+
+def enqueue_website_check_for_workspace(
+    session: Session, workspace_id: str, now: datetime
+) -> int:
+    """Enqueue one website.check for the workspace's configured site, on a
+    daily cadence. Returns 1 if enqueued, 0 if skipped.
+
+    The target URL lives in the website_health feeder config (set in
+    onboarding or the feeder settings UI). With no URL configured the feeder
+    is a clean no-op — that's the pre-setup state, not an error. Dedup is a
+    time window (one check per ~day), not per-item: this is a recurring
+    sweep of one site, unlike the review/inbox feeders that fan out per new
+    external item. Does not commit; the caller owns the transaction.
+    """
+    url = normalize_website_url(
+        get_feeder_config(session, workspace_id, FEEDER_WEBSITE_HEALTH).get("url")
+    )
+    if not url:
+        return 0
+    if _has_recent_website_check(session, workspace_id, now):
+        return 0
+
+    cmd_id = str(uuid.uuid4())
+    payload = {"source": WEBSITE_SOURCE, "url": url}
+    session.execute(
+        text(
+            """
+            INSERT INTO commands (
+                id, workspace_id, agent_name, kind, payload, status,
+                approval_state, approved_at, created_at, expires_at,
+                dispatch_chain_id, dispatch_depth
+            ) VALUES (
+                :id, :ws, :agent, :kind, CAST(:payload AS JSONB),
+                'pending', 'auto_approved', :now, :now, :expires,
+                :chain, 0
+            )
+            """
+        ),
+        {
+            "id": cmd_id,
+            "ws": workspace_id,
+            "agent": WEBSITE_AGENT,
+            "kind": WEBSITE_KIND,
+            "payload": _json_dumps(payload),
+            "now": now,
+            "expires": now + _COMMAND_TTL,
+            "chain": cmd_id,
+        },
+    )
+    logger.info(
+        "feeder: enqueued website check ws=%s url=%s cmd=%s",
+        workspace_id, url, cmd_id,
+    )
+    return 1
+
+
 def _has_recent_feeder_command(
     session: Session,
     workspace_id: str,
@@ -983,6 +1126,21 @@ def tick(session: Session, now: datetime) -> int:
             except Exception:  # noqa: BLE001 — best-effort, keep going
                 logger.exception(
                     "feeder: failed to enqueue reviews for ws=%s",
+                    workspace_id,
+                )
+
+    # Website feeder (default ON, no-op until a URL is configured) over
+    # workspaces running the Website assistant. One health check per day
+    # for the owner's configured site.
+    for workspace_id in _workspaces_running_agent(session, WEBSITE_AGENT):
+        if is_feeder_enabled(session, workspace_id, FEEDER_WEBSITE_HEALTH):
+            try:
+                enqueued += enqueue_website_check_for_workspace(
+                    session, workspace_id, now
+                )
+            except Exception:  # noqa: BLE001 — best-effort, keep going
+                logger.exception(
+                    "feeder: failed to enqueue website check for ws=%s",
                     workspace_id,
                 )
     return enqueued

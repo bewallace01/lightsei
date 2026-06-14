@@ -2625,6 +2625,10 @@ def get_onboarding(
 class OnboardingSubmit(BaseModel):
     industry: Optional[str] = None
     goals: list[str] = []
+    # The site address typed for the "Monitor our website" goal. Optional:
+    # normalized + stored as the website feeder target only when that goal
+    # is selected and it parses (see onboarding.build_provisioning_plan).
+    website_url: Optional[str] = None
 
 
 @app.post("/workspaces/me/onboarding")
@@ -2643,7 +2647,9 @@ def submit_onboarding(
     """
     import onboarding
 
-    plan = onboarding.build_provisioning_plan(body.industry, body.goals)
+    plan = onboarding.build_provisioning_plan(
+        body.industry, body.goals, body.website_url
+    )
     onboarding.apply_provisioning_plan(session, workspace_id, plan, utcnow())
     session.commit()
     return {
@@ -2721,22 +2727,38 @@ def set_feeder_config_endpoint(
 ) -> dict[str, Any]:
     """Set a feeder's per-workspace target config.
 
-    Only targetable feeders (those with a `target_connector`) accept config
-    — a 400 otherwise so a caller can't stash arbitrary blobs on a feeder
-    that ignores them. Setting config never flips the feeder on (a fresh
-    row inherits the catalog default), so picking a target is safe before
-    enabling.
+    Only feeders that take a target accept config — either a connector-backed
+    target (`target_connector`, e.g. which review location) or a free-text
+    URL (`url_target`, the website feeder). A 400 otherwise so a caller can't
+    stash arbitrary blobs on a feeder that ignores them. A URL-target feeder
+    has its `url` normalized + validated (400 on a non-URL) so the feeder
+    never enqueues a check against garbage. Setting config never flips the
+    feeder on (a fresh row inherits the catalog default), so picking a target
+    is safe before enabling.
     """
     import feeder
 
     entry = _feeder_catalog_entry(feeder_kind)
-    if entry.get("target_connector") is None:
+    takes_target = (
+        entry.get("target_connector") is not None or entry.get("url_target")
+    )
+    if not takes_target:
         raise HTTPException(
             status_code=400, detail="this feeder takes no target config"
         )
 
+    config = dict(body.config)
+    if entry.get("url_target"):
+        normalized = feeder.normalize_website_url(config.get("url"))
+        if not normalized:
+            raise HTTPException(
+                status_code=400,
+                detail="config.url must be a valid website address",
+            )
+        config["url"] = normalized
+
     feeder.set_feeder_config(
-        session, workspace_id, feeder_kind, body.config, utcnow()
+        session, workspace_id, feeder_kind, config, utcnow()
     )
     session.commit()
     return {"feeders": feeder.get_feeder_settings(session, workspace_id)}

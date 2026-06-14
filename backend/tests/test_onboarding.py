@@ -101,6 +101,46 @@ def test_apply_provisions_assistants_feeders_and_profile():
         assert profile["completed_at"]
 
 
+def test_plan_carries_normalized_website_url_when_website_goal_selected():
+    plan = onboarding.build_provisioning_plan(
+        "professional", ["website", "summary"], website_url="acme.com"
+    )
+    assert "website" in plan["assistants"]
+    assert "website_health" in plan["feeders"]
+    assert plan["website_url"] == "https://acme.com"
+
+
+def test_plan_drops_website_url_without_website_goal():
+    # URL provided but the goal isn't selected -> no stray target on the plan.
+    plan = onboarding.build_provisioning_plan(
+        "retail", ["summary"], website_url="acme.com"
+    )
+    assert plan["website_url"] is None
+
+
+def test_plan_website_url_none_when_unparseable():
+    plan = onboarding.build_provisioning_plan(
+        "other", ["website"], website_url="not a url"
+    )
+    assert plan["website_url"] is None
+
+
+def test_apply_stores_website_url_as_feeder_config():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        plan = onboarding.build_provisioning_plan(
+            "professional", ["website"], website_url="www.acme.com/home"
+        )
+        onboarding.apply_provisioning_plan(s, ws, plan, now)
+
+    with session_scope() as s:
+        assert "website" in _agent_names(s, ws)
+        assert feeder.is_feeder_enabled(s, ws, feeder.FEEDER_WEBSITE_HEALTH)
+        cfg = feeder.get_feeder_config(s, ws, feeder.FEEDER_WEBSITE_HEALTH)
+        assert cfg["url"] == "https://www.acme.com/home"
+
+
 def test_apply_is_idempotent():
     now = _now()
     with session_scope() as s:

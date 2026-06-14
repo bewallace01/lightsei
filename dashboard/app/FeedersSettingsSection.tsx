@@ -105,6 +105,81 @@ function TargetPicker({
 
 
 /**
+ * The URL input shown under a url_target feeder (today: the Website health
+ * feeder). The owner types their site address; the backend normalizes +
+ * validates it. The feeder is a no-op until a URL is saved, so the input
+ * doubles as the "turn this on for real" step.
+ */
+function UrlTargetInput({
+  feeder,
+  onSaved,
+}: {
+  feeder: FeederSetting;
+  onSaved: (feeders: FeederSetting[]) => void;
+}) {
+  const saved = (feeder.config?.url as string | undefined) ?? "";
+  const [draft, setDraft] = useState(saved);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // Keep the field in sync if the saved value changes underneath us (e.g.
+  // a re-fetch after another save).
+  useEffect(() => {
+    setDraft(saved);
+  }, [saved]);
+
+  async function onSave() {
+    setBusy(true);
+    setErr(null);
+    try {
+      const updated = await setFeederConfig(feeder.kind, { url: draft.trim() });
+      onSaved(updated);
+    } catch {
+      setErr("That doesn't look like a valid website address.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const dirty = draft.trim() !== saved;
+
+  return (
+    <div className="mt-2">
+      <label className="block text-xs text-gray-500 mb-1">Website address</label>
+      <div className="flex items-center gap-2">
+        <input
+          type="url"
+          inputMode="url"
+          value={draft}
+          disabled={busy}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && dirty) onSave();
+          }}
+          placeholder="yourbusiness.com"
+          className="flex-1 text-xs rounded-md ring-1 ring-gray-300 px-2 py-1 focus:outline-none focus:ring-2 focus:ring-indigo-600 disabled:opacity-50"
+        />
+        <button
+          onClick={onSave}
+          disabled={busy || !dirty || draft.trim() === ""}
+          className="text-xs px-2.5 py-1 rounded-md bg-accent-600 text-white hover:bg-accent-700 disabled:opacity-50"
+        >
+          save
+        </button>
+      </div>
+      {err ? (
+        <p className="mt-1 text-[11px] text-red-600">{err}</p>
+      ) : !saved ? (
+        <p className="mt-1 text-[11px] text-amber-600">
+          Add your site address to start the daily checks.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+
+/**
  * "Proactive feeders" settings: a per-workspace on/off for each feeder
  * (the weekly digest, the spend alert). Self-contained — fetches its own
  * data and owns its own state so it can drop into the settings page as a
@@ -205,6 +280,12 @@ export default function FeedersSettingsSection() {
                 </div>
                 {f.targetable && (
                   <TargetPicker
+                    feeder={f}
+                    onSaved={(updated) => setFeeders(updated)}
+                  />
+                )}
+                {f.url_target && (
+                  <UrlTargetInput
                     feeder={f}
                     onSaved={(updated) => setFeeders(updated)}
                   />

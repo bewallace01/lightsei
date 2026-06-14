@@ -144,6 +144,33 @@ def test_set_config_on_targetable_feeder(client, alice):
     assert rep["enabled"] is False
 
 
+def test_set_url_config_on_website_feeder_normalizes(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.patch(
+        "/workspaces/me/feeders/website_health/config",
+        headers=h,
+        json={"config": {"url": "acme.com/contact"}},
+    )
+    assert r.status_code == 200, r.text
+    by_kind = {f["kind"]: f for f in r.json()["feeders"]}
+    site = by_kind["website_health"]
+    # Owner-typed bare host comes back normalized to a fetchable URL.
+    assert site["config"]["url"] == "https://acme.com/contact"
+    assert site["url_target"] is True
+    # Website feeder defaults on, so setting the URL leaves it on.
+    assert site["enabled"] is True
+
+
+def test_set_url_config_rejects_garbage_400(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.patch(
+        "/workspaces/me/feeders/website_health/config",
+        headers=h,
+        json={"config": {"url": "not a website"}},
+    )
+    assert r.status_code == 400
+
+
 def test_set_config_on_non_targetable_feeder_400(client, alice):
     h = auth_headers(alice["session_token"])
     r = client.patch(
