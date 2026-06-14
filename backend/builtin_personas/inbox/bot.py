@@ -36,6 +36,7 @@ Public surface (for tests):
 """
 import json
 import os
+import uuid
 import sys
 import time
 import traceback
@@ -204,11 +205,13 @@ def tick(
         return cmd
 
     payload = cmd.get("payload") or {}
+    run_id = str(uuid.uuid4())  # explicit run_id: these events fire outside
+    # an LLM-call run, and emit() drops events with no run context.
     email = payload.get("email") if isinstance(payload.get("email"), dict) else payload
 
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        lightsei.emit("inbox.crash", {"command_id": cmd_id, "error": "ANTHROPIC_API_KEY not set on this workspace"})
+        lightsei.emit("inbox.crash", {"command_id": cmd_id, "error": "ANTHROPIC_API_KEY not set on this workspace"}, run_id=run_id)
         lightsei.complete_command(cmd_id, error="ANTHROPIC_API_KEY not set on this workspace; add it in account settings")
         return cmd
 
@@ -216,7 +219,7 @@ def tick(
         triage = generate_triage(email, factory=factory, api_key=api_key, model=model, max_tokens=max_tokens)
     except Exception as e:
         lightsei.emit("inbox.crash", {"command_id": cmd_id, "error": repr(e),
-                                      "traceback": traceback.format_exc()})
+                                      "traceback": traceback.format_exc()}, run_id=run_id)
         try:
             _send_with_source("hermes", "hermes.post",
                               {"channel": hermes_channel,
@@ -242,7 +245,7 @@ def tick(
         "model": model,
         "severity": "error" if flagged else "info",
     }
-    lightsei.emit("inbox.processed", outcome)
+    lightsei.emit("inbox.processed", outcome, run_id=run_id)
 
     # Only interrupt the owner for urgent / needs-a-human mail. Everything
     # else is triaged + drafted in the event stream without a ping.
