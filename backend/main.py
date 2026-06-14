@@ -3488,7 +3488,15 @@ def put_secret(
         row.encrypted_value = blob
         row.updated_at = now
     session.flush()
-    return _serialize_secret_meta(row)
+
+    # When the owner adds/updates the Anthropic key, auto-redeploy the
+    # running AI assistants so they pick it up — secrets inject at spawn,
+    # and a non-technical owner shouldn't have to redeploy bots by hand.
+    redeployed: list[str] = []
+    if name == "ANTHROPIC_API_KEY":
+        redeployed = _redeploy_active_ai_assistants(session, workspace_id, now)
+
+    return _serialize_secret_meta(row) | {"redeployed_assistants": redeployed}
 
 
 @app.delete("/workspaces/me/secrets/{name}")
@@ -5502,6 +5510,55 @@ def stop_deployment(
     return _serialize_deployment(dep)
 
 
+def _redeploy_from(session: Session, old: Deployment, now: datetime) -> Deployment:
+    """Stop `old` and queue a fresh deployment from the same source blob.
+    The worker claims the new one and re-spawns the bot, which re-fetches
+    workspace secrets — so this is how a bot picks up a newly-added secret
+    (env is injected at spawn, not hot-reloaded). Does not commit."""
+    old.desired_state = "stopped"
+    old.updated_at = now
+    new = Deployment(
+        id=str(uuid.uuid4()),
+        workspace_id=old.workspace_id,
+        agent_name=old.agent_name,
+        status="queued",
+        desired_state="running",
+        source_blob_id=old.source_blob_id,
+        # Carry provenance forward — a redeploy reuses the same blob.
+        source=old.source,
+        source_commit_sha=old.source_commit_sha,
+        created_at=now,
+        updated_at=now,
+    )
+    session.add(new)
+    session.flush()
+    return new
+
+
+def _redeploy_active_ai_assistants(
+    session: Session, workspace_id: str, now: datetime
+) -> list[str]:
+    """Redeploy the workspace's running AI personas so they pick up a
+    changed ANTHROPIC_API_KEY. Secrets are injected at spawn, so a bot
+    started before the key existed can't see it until it restarts — this
+    makes "add a key" just work without the owner touching deployments.
+    Returns the agent names redeployed."""
+    import builtin_personas
+
+    rows = session.execute(
+        select(Deployment).where(
+            Deployment.workspace_id == workspace_id,
+            Deployment.agent_name.in_(list(builtin_personas.LLM_PERSONAS)),
+            Deployment.desired_state == "running",
+            Deployment.status.in_(["queued", "building", "running"]),
+            Deployment.source_blob_id.isnot(None),
+        )
+    ).scalars().all()
+    for old in rows:
+        _redeploy_from(session, old, now)
+    return [d.agent_name for d in rows]
+
+
 @app.post("/workspaces/me/deployments/{deployment_id}/redeploy")
 def redeploy_deployment(
     deployment_id: str,
@@ -5519,28 +5576,7 @@ def redeploy_deployment(
             status_code=400,
             detail="deployment has no source blob to redeploy from",
         )
-    now = utcnow()
-    old.desired_state = "stopped"
-    old.updated_at = now
-
-    new = Deployment(
-        id=str(uuid.uuid4()),
-        workspace_id=workspace_id,
-        agent_name=old.agent_name,
-        status="queued",
-        desired_state="running",
-        source_blob_id=old.source_blob_id,
-        # Carry the original provenance forward — a redeploy reuses the
-        # same source blob, so the same commit/upload origin still
-        # applies. Otherwise a "redeploy" of a github_push deploy would
-        # falsely look like a CLI upload in the dashboard.
-        source=old.source,
-        source_commit_sha=old.source_commit_sha,
-        created_at=now,
-        updated_at=now,
-    )
-    session.add(new)
-    session.flush()
+    new = _redeploy_from(session, old, utcnow())
     return _serialize_deployment(new)
 
 
