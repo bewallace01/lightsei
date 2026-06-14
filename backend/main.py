@@ -3092,6 +3092,7 @@ def get_workspace_constellation(
             """
             SELECT
                 a.name,
+                a.display_name,
                 a.role,
                 a.system_prompt,
                 a.sensitivity_level,
@@ -3171,8 +3172,13 @@ def get_workspace_constellation(
             status = "active"
         else:
             status = "stale"
+        import assistant_identity
+        _ident = assistant_identity.identity(r.name, r.display_name)
         agents_out.append({
             "name": r.name,
+            # Phase 35: customer-facing constellation name (star or rename).
+            "display_name": _ident["name"],
+            "assistant_role": _ident["role"],
             "role": r.role,
             "model": r.recent_model,
             "status": status,

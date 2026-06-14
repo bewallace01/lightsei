@@ -445,6 +445,36 @@ export default function Constellation() {
           })}
         </g>
 
+        {/* Phase 35: business workspaces have no Polaris orchestrator (it's
+            a retired dev bot), so the center would be an empty glow. Anchor
+            the constellation with a faint "your team" core instead. */}
+        {placements.length > 0 &&
+          !placements.some((p) => p.agent.role === "orchestrator") && (
+            <g className="pointer-events-none">
+              <circle cx={CENTER.x} cy={CENTER.y} r={5} fill="rgb(165 180 252)" opacity={0.55} />
+              <circle
+                cx={CENTER.x}
+                cy={CENTER.y}
+                r={11}
+                fill="none"
+                stroke="rgb(129 140 248)"
+                strokeWidth={0.6}
+                opacity={0.4}
+              />
+              <text
+                x={CENTER.x}
+                y={CENTER.y + 27}
+                textAnchor="middle"
+                fill="rgb(165 180 252)"
+                fontSize={9.5}
+                opacity={0.7}
+                className="uppercase tracking-widest pointer-events-none"
+              >
+                your team
+              </text>
+            </g>
+          )}
+
         {/* Agent stars. */}
         <g>
           {placements.map(({ agent, pos, size, tint }) => {
@@ -573,7 +603,7 @@ export default function Constellation() {
                   fontSize={isSun ? 12 : 11}
                   fontWeight={isSun ? 600 : 400}
                 >
-                  {agent.name}
+                  {agent.display_name}
                 </text>
               </g>
             );
@@ -656,11 +686,11 @@ function Tooltip({
       }}
     >
       <div className="flex items-center justify-between gap-3 mb-2">
-        <span className="font-mono font-medium text-indigo-50">
-          {agent.name}
+        <span className="font-medium text-indigo-50">
+          {agent.display_name}
         </span>
         <span className="text-[10px] uppercase tracking-wider text-indigo-300">
-          {agent.role}
+          {agent.assistant_role ?? agent.role}
         </span>
       </div>
       {/* Phase 18.4: surface trust zone in the tooltip so the wedge

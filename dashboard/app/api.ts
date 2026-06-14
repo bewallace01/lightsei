@@ -2066,6 +2066,9 @@ export async function fetchTeamPlan(input: TeamPlanInput): Promise<TeamPlan> {
 
 export type ConstellationAgent = {
   name: string;
+  // Phase 35: customer-facing constellation name + business role.
+  display_name: string;
+  assistant_role: string | null;
   role: "orchestrator" | "executor" | "notifier" | "specialist";
   model: string | null;
   status: "active" | "stale" | "stopped";

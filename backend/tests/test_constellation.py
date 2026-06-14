@@ -25,6 +25,22 @@ def test_constellation_empty_workspace(client, alice):
     assert body == {"agents": [], "edges": []}
 
 
+def test_constellation_carries_display_name_and_business_role(client, alice):
+    """Phase 35: the map shows the constellation star name + business role,
+    not the raw internal id."""
+    h = auth_headers(alice["api_key"]["plaintext"])
+    client.post(
+        "/events",
+        json={"kind": "run_started", "run_id": "r1",
+              "agent_name": "reputation", "payload": {}},
+        headers=h,
+    )
+    body = client.get("/workspaces/me/constellation", headers=h).json()
+    rep = next(a for a in body["agents"] if a["name"] == "reputation")
+    assert rep["display_name"] == "Lyra"
+    assert rep["assistant_role"] == "Reputation"
+
+
 def test_constellation_lists_agents_with_runs(client, alice):
     """An agent that has emitted at least one run shows up in `agents`
     with status='stopped' (no heartbeat row) and runs_24h reflecting
