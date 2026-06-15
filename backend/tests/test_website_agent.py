@@ -46,6 +46,13 @@ def _fetcher(status_map):
     return fetch
 
 
+class _FakeResponse:
+    def __init__(self, status_code=200, text="", headers=None):
+        self.status_code = status_code
+        self.text = text
+        self.headers = headers or {}
+
+
 # ---------- pure helpers ---------- #
 
 
@@ -239,6 +246,7 @@ def test_classify_status_carries_reason(fake_lightsei):
     assert bot.classify_status(500, None)["reason"] == "http_error"
     assert bot.classify_status(None, "SSLError: certificate verify failed")["reason"] == "tls"
     assert bot.classify_status(None, "ConnectTimeout")["reason"] == "unreachable"
+    assert bot.classify_status(None, "UnsafeURL: private address")["reason"] == "unsafe_url"
     # Backward-compatible: up/severity still present.
     s = bot.classify_status(None, "SSLError: bad cert")
     assert s["up"] is False and s["severity"] == "error"
@@ -270,6 +278,10 @@ def test_hermes_text_distinguishes_tls_from_down(fake_lightsei):
         {"up": False, "reason": "http_error", "url": "https://x.com", "status_code": 503,
          "broken_links": []})
     assert "error" in http and "503" in http
+    unsafe = bot.hermes_text_for(
+        {"up": False, "reason": "unsafe_url", "url": "http://169.254.169.254",
+         "status_code": None, "broken_links": []})
+    assert "not a public website address" in unsafe
 
 
 def test_tick_tls_error_alerts_with_cert_message_not_down(fake_lightsei):
@@ -285,6 +297,51 @@ def test_tick_tls_error_alerts_with_cert_message_not_down(fake_lightsei):
     hp = fake.send_command.call_args.args[2]
     assert hp["severity"] == "error"
     assert "certificate" in hp["text"] and "DOWN" not in hp["text"]
+
+
+# ---------- unsafe URL / SSRF guard ---------- #
+
+
+def test_unsafe_url_reason_blocks_private_dns_resolution(fake_lightsei):
+    _, bot = fake_lightsei
+
+    def resolver(host, port, *, type=None):
+        return [(None, None, None, "", ("10.0.0.5", port))]
+
+    reason = bot._unsafe_url_reason("https://public.example", resolver=resolver)
+    assert "private address" in reason
+
+
+def test_httpx_fetch_blocks_private_literal_without_request(fake_lightsei, monkeypatch):
+    _, bot = fake_lightsei
+    fake_httpx = types.SimpleNamespace(request=MagicMock())
+    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+
+    r = bot._httpx_fetch("http://169.254.169.254/latest/meta-data/")
+
+    assert r["status_code"] is None
+    assert "UnsafeURL" in r["error"]
+    fake_httpx.request.assert_not_called()
+
+
+def test_httpx_fetch_blocks_redirect_to_private_address(fake_lightsei, monkeypatch):
+    _, bot = fake_lightsei
+    calls = []
+
+    def request(method, url, **kwargs):
+        calls.append(url)
+        return _FakeResponse(
+            302,
+            headers={"location": "http://169.254.169.254/latest/meta-data/"},
+        )
+
+    monkeypatch.setitem(sys.modules, "httpx", types.SimpleNamespace(request=request))
+
+    r = bot._httpx_fetch("http://93.184.216.34/")
+
+    assert r["status_code"] is None
+    assert "UnsafeURL" in r["error"]
+    assert calls == ["http://93.184.216.34/"]
 
 
 # ---------- TLS cert-expiry early warning ---------- #

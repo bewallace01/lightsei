@@ -162,6 +162,7 @@ def normalize_website_url(raw: Optional[str]) -> Optional[str]:
     so a bare word ("home") or empty string can't become a target. Returns
     the normalized URL string, or None when it can't be made into one.
     """
+    import ipaddress
     from urllib.parse import urlparse, urlunparse
 
     if not raw:
@@ -174,13 +175,37 @@ def normalize_website_url(raw: Optional[str]) -> Optional[str]:
     parsed = urlparse(candidate)
     if parsed.scheme not in ("http", "https"):
         return None
-    host = parsed.netloc
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    host = parsed.hostname
+    if parsed.username or parsed.password:
+        return None
     if not host or "." not in host or host.startswith(".") or host.endswith("."):
         return None
+    host_l = host.lower().rstrip(".")
+    if host_l == "localhost" or host_l.endswith((".localhost", ".local", ".internal")):
+        return None
+    try:
+        ip = ipaddress.ip_address(host_l.strip("[]"))
+    except ValueError:
+        pass
+    else:
+        if (
+            ip.is_private
+            or ip.is_loopback
+            or ip.is_link_local
+            or ip.is_multicast
+            or ip.is_reserved
+            or ip.is_unspecified
+        ):
+            return None
     # Rebuild from parsed parts so we drop stray whitespace / fragments and
     # store a canonical form. Keep path/query (a contact page may be deep).
+    netloc = host if port is None else f"{host}:{port}"
     return urlunparse(
-        (parsed.scheme, parsed.netloc, parsed.path, "", parsed.query, "")
+        (parsed.scheme, netloc, parsed.path, "", parsed.query, "")
     )
 
 # Stamped into every feeder-enqueued command's payload so we can tell a
