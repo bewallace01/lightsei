@@ -285,3 +285,106 @@ def test_tick_tls_error_alerts_with_cert_message_not_down(fake_lightsei):
     hp = fake.send_command.call_args.args[2]
     assert hp["severity"] == "error"
     assert "certificate" in hp["text"] and "DOWN" not in hp["text"]
+
+
+# ---------- TLS cert-expiry early warning ---------- #
+
+from datetime import datetime, timezone, timedelta
+
+
+_NOW = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _cert_fmt(dt):
+    # OpenSSL getpeercert() notAfter form, always UTC ("GMT").
+    return dt.strftime("%b %d %H:%M:%S %Y GMT")
+
+
+def _cert_fetcher(days_out):
+    """A cert_fetch stub whose cert expires `days_out` days from _NOW."""
+    na = None if days_out is None else _cert_fmt(_NOW + timedelta(days=days_out))
+    return lambda url: {"not_after": na, "error": None}
+
+
+def test_days_until_expiry_parses_and_computes(fake_lightsei):
+    _, bot = fake_lightsei
+    na = _cert_fmt(_NOW + timedelta(days=10))
+    assert bot.days_until_expiry(na, _NOW) == 10
+    # already-expired -> negative
+    assert bot.days_until_expiry(_cert_fmt(_NOW - timedelta(days=2)), _NOW) == -2
+    # missing / unparseable -> None
+    assert bot.days_until_expiry(None, _NOW) is None
+    assert bot.days_until_expiry("not a date", _NOW) is None
+
+
+def test_ssl_cert_fetch_skips_non_https(fake_lightsei):
+    _, bot = fake_lightsei
+    # Pure: an http URL needs no network and yields no cert.
+    assert bot._ssl_cert_fetch("http://example.com")["not_after"] is None
+
+
+def test_check_site_warns_on_soon_expiring_cert(fake_lightsei):
+    _, bot = fake_lightsei
+    fetch = _fetcher({"https://s.com/": {"status_code": 200, "text": "<a href='/ok'>x</a>"},
+                      "https://s.com/ok": {"status_code": 200}})
+    r = bot.check_site("https://s.com/", fetch, cert_fetch=_cert_fetcher(9), now=_NOW)
+    assert r["up"] is True
+    assert r["cert_days_remaining"] == 9
+    assert r["cert_expiring"] is True
+    assert r["severity"] == "warning"  # within 14d but outside urgent 3d
+
+
+def test_check_site_urgent_cert_is_error_severity(fake_lightsei):
+    _, bot = fake_lightsei
+    fetch = _fetcher({"https://s.com/": {"status_code": 200, "text": ""}})
+    r = bot.check_site("https://s.com/", fetch, cert_fetch=_cert_fetcher(2), now=_NOW)
+    assert r["cert_expiring"] is True and r["severity"] == "error"
+
+
+def test_check_site_healthy_cert_no_warning(fake_lightsei):
+    _, bot = fake_lightsei
+    fetch = _fetcher({"https://s.com/": {"status_code": 200, "text": ""}})
+    r = bot.check_site("https://s.com/", fetch, cert_fetch=_cert_fetcher(90), now=_NOW)
+    assert r["cert_days_remaining"] == 90
+    assert r["cert_expiring"] is False and r["severity"] == "info"
+
+
+def test_check_site_no_cert_fetch_is_unaffected(fake_lightsei):
+    _, bot = fake_lightsei
+    fetch = _fetcher({"https://s.com/": {"status_code": 200, "text": ""}})
+    r = bot.check_site("https://s.com/", fetch)  # no cert_fetch
+    assert r["cert_days_remaining"] is None and r["cert_expiring"] is False
+    assert r["severity"] == "info"
+
+
+def test_hermes_text_cert_expiry_message(fake_lightsei):
+    _, bot = fake_lightsei
+    msg = bot.hermes_text_for(
+        {"up": True, "url": "https://s.com", "broken_links": [],
+         "cert_expiring": True, "cert_days_remaining": 9})
+    assert "certificate expires in 9 days" in msg and "DOWN" not in msg
+    today = bot.hermes_text_for(
+        {"up": True, "url": "https://s.com", "broken_links": [],
+         "cert_expiring": True, "cert_days_remaining": 0})
+    assert "expires today" in today
+
+
+def test_broken_links_take_priority_over_cert_in_message(fake_lightsei):
+    _, bot = fake_lightsei
+    # Active customer harm leads the one-line alert.
+    msg = bot.hermes_text_for(
+        {"up": True, "url": "https://s.com",
+         "broken_links": [{"url": "https://s.com/x"}],
+         "cert_expiring": True, "cert_days_remaining": 5})
+    assert "broken link" in msg
+
+
+def test_tick_expiring_cert_alerts_hermes_with_warning(fake_lightsei):
+    fake, bot = fake_lightsei
+    fake.claim_command.return_value = _cmd(payload={"url": "https://s.com/"})
+    fetch = _fetcher({"https://s.com/": {"status_code": 200, "text": ""}})
+    bot.tick(fake, fetch, hermes_channel="alerts", cert_fetch=_cert_fetcher(7))
+    fake.send_command.assert_called_once()
+    hp = fake.send_command.call_args.args[2]
+    assert "certificate expires" in hp["text"]
+    assert hp["severity"] == "warning"  # 7d out -> not urgent

@@ -29,7 +29,8 @@ Public surface (for tests):
   extract_links(html, base_url) -> [absolute url]
   extract_forms(html) -> [{action, method}]
   classify_status(status_code, error) -> {up, severity, reason}
-  check_site(url, fetch, *, max_links) -> report dict
+  days_until_expiry(not_after, now) -> int | None
+  check_site(url, fetch, *, max_links, cert_fetch, now) -> report dict
   tick(client, fetch, *, hermes_channel=...)
   main()
 """
@@ -39,6 +40,7 @@ import re
 import sys
 import time
 import traceback
+from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 from urllib.parse import urljoin, urlparse
 
@@ -58,6 +60,11 @@ POLL_S = float(os.environ.get("WEBSITE_POLL_S", "5"))
 HERMES_CHANNEL = os.environ.get("WEBSITE_HERMES_CHANNEL", "default")
 MAX_LINKS = int(os.environ.get("WEBSITE_MAX_LINKS", "25"))
 TIMEOUT_S = float(os.environ.get("WEBSITE_TIMEOUT_S", "10"))
+# Warn the owner this many days before the TLS certificate expires (so they
+# renew before visitors ever see a "not secure" warning), and escalate to a
+# red alert inside the urgent window.
+CERT_WARN_DAYS = int(os.environ.get("WEBSITE_CERT_WARN_DAYS", "14"))
+CERT_URGENT_DAYS = int(os.environ.get("WEBSITE_CERT_URGENT_DAYS", "3"))
 
 
 # ---------- Pure helpers ---------- #
@@ -127,6 +134,32 @@ def classify_status(status_code: Optional[int], error: Optional[str]) -> dict[st
     return {"up": False, "severity": "error", "reason": "http_error"}
 
 
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def days_until_expiry(not_after: Optional[str], now: datetime) -> Optional[int]:
+    """Whole days until a cert's `notAfter` (negative if already past), or
+    None if it's missing / unparseable. Pure + testable.
+
+    `not_after` is the OpenSSL form `getpeercert()` returns, e.g.
+    'Jun 14 23:59:59 2026 GMT'. We parse it as UTC (the trailing 'GMT' is
+    always UTC for X.509) rather than relying on %Z, which is unreliable.
+    """
+    if not not_after:
+        return None
+    s = not_after.strip()
+    if s.endswith(" GMT"):
+        s = s[:-4]
+    try:
+        exp = datetime.strptime(s, "%b %d %H:%M:%S %Y").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return (exp - now).days
+
+
 def is_broken_link(status_code: Optional[int], error: Optional[str]) -> bool:
     """Whether a link a customer would click is genuinely broken.
 
@@ -146,11 +179,24 @@ def is_broken_link(status_code: Optional[int], error: Optional[str]) -> bool:
 # Fetcher DI seam. Production passes an httpx-backed one; tests stub it.
 # Returns {status_code: int|None, error: str|None, text: str, latency_ms: int}.
 Fetcher = Callable[..., dict[str, Any]]
+# Cert-fetch seam. Production passes an ssl-backed one; tests stub it.
+# Returns {not_after: str|None, error: str|None}.
+CertFetcher = Callable[..., dict[str, Any]]
 
 
-def check_site(url: str, fetch: Fetcher, *, max_links: int = 25) -> dict[str, Any]:
+def check_site(
+    url: str,
+    fetch: Fetcher,
+    *,
+    max_links: int = 25,
+    cert_fetch: Optional[CertFetcher] = None,
+    now: Optional[datetime] = None,
+) -> dict[str, Any]:
     """Core check. GETs the page (uptime + html), probes up to `max_links`
-    links (HEAD), and detects forms. Pure given an injected `fetch`."""
+    links, detects forms, and — for an https site that's up — checks how
+    soon its TLS certificate expires. Pure given the injected `fetch`,
+    `cert_fetch`, and `now`. With no `cert_fetch`, the cert step is skipped
+    (cert_days_remaining stays None), so existing callers are unaffected."""
     page = fetch(url, method="GET")
     status = classify_status(page.get("status_code"), page.get("error"))
     report: dict[str, Any] = {
@@ -162,6 +208,9 @@ def check_site(url: str, fetch: Fetcher, *, max_links: int = 25) -> dict[str, An
         "broken_links": [],
         "forms_found": 0,
         "links_checked": 0,
+        "cert_days_remaining": None,
+        "cert_expires_at": None,
+        "cert_expiring": False,
     }
     if not status["up"]:
         report["severity"] = "error"
@@ -181,7 +230,26 @@ def check_site(url: str, fetch: Fetcher, *, max_links: int = 25) -> dict[str, An
             broken.append({"url": link, "status": res.get("status_code"), "error": res.get("error")})
     report["links_checked"] = len(links)
     report["broken_links"] = broken
-    report["severity"] = "error" if broken else "info"
+
+    # TLS certificate expiry (https only). Best-effort: a non-https URL or any
+    # fetch failure leaves cert_days_remaining None and never false-warns. An
+    # already-expired cert fails the up-check above (verification fails), so
+    # this only ever fires for a currently-valid cert nearing its end.
+    days: Optional[int] = None
+    if cert_fetch is not None:
+        info = cert_fetch(url)
+        days = days_until_expiry(info.get("not_after"), now or _utcnow())
+        report["cert_expires_at"] = info.get("not_after")
+        report["cert_days_remaining"] = days
+        report["cert_expiring"] = days is not None and days <= CERT_WARN_DAYS
+
+    urgent_cert = report["cert_expiring"] and days is not None and days <= CERT_URGENT_DAYS
+    if broken or urgent_cert:
+        report["severity"] = "error"
+    elif report["cert_expiring"]:
+        report["severity"] = "warning"
+    else:
+        report["severity"] = "info"
     return report
 
 
@@ -203,8 +271,17 @@ def hermes_text_for(report: dict[str, Any]) -> str:
             return f"\U0001f534 website: {url} is returning an error (status {report.get('status_code')})."
         # unreachable (connection refused / timeout / DNS) or unknown
         return f"\U0001f534 website: {url} appears DOWN (couldn't connect)."
+    # Up, but something needs attention. Active customer harm (broken links)
+    # leads; the cert-expiry heads-up is the quieter, time-based nudge.
     n = len(report["broken_links"])
-    return f"⚠️ website: {n} broken link{'s' if n != 1 else ''} on {url}"
+    if n:
+        return f"⚠️ website: {n} broken link{'s' if n != 1 else ''} on {url}"
+    if report.get("cert_expiring"):
+        d = report.get("cert_days_remaining")
+        when = "today" if d == 0 else f"in {d} day{'s' if d != 1 else ''}"
+        return (f"\U0001f514 website: {url}'s security certificate expires {when}. "
+                "Renew it so visitors don't see a \"not secure\" warning.")
+    return f"⚠️ website: {url} needs attention"
 
 
 # ---------- Production fetcher ---------- #
@@ -229,10 +306,33 @@ def _httpx_fetch(url: str, *, method: str = "GET") -> dict[str, Any]:
                 "latency_ms": int((time.monotonic() - started) * 1000)}
 
 
+def _ssl_cert_fetch(url: str) -> dict[str, Any]:
+    """Read the leaf TLS certificate's notAfter for an https URL. Best-effort:
+    a non-https URL, an unreachable host, or an invalid cert (verification
+    fails) all return not_after=None so the caller simply skips the expiry
+    check rather than false-warning."""
+    parsed = urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        return {"not_after": None, "error": None}
+    host = parsed.hostname
+    port = parsed.port or 443
+    import socket
+    import ssl
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((host, port), timeout=TIMEOUT_S) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as ssock:
+                cert = ssock.getpeercert() or {}
+        return {"not_after": cert.get("notAfter"), "error": None}
+    except Exception as e:
+        return {"not_after": None, "error": f"{type(e).__name__}: {e}"}
+
+
 # ---------- Bot loop ---------- #
 
 
-def tick(client: Any, fetch: Fetcher = _httpx_fetch, *, hermes_channel: str = "default") -> Optional[dict[str, Any]]:
+def tick(client: Any, fetch: Fetcher = _httpx_fetch, *, hermes_channel: str = "default",
+         cert_fetch: CertFetcher = _ssl_cert_fetch) -> Optional[dict[str, Any]]:
     cmd = lightsei.claim_command(agent_name="website")
     if cmd is None:
         return None
@@ -251,7 +351,7 @@ def tick(client: Any, fetch: Fetcher = _httpx_fetch, *, hermes_channel: str = "d
         return cmd
 
     try:
-        report = check_site(url, fetch, max_links=MAX_LINKS)
+        report = check_site(url, fetch, max_links=MAX_LINKS, cert_fetch=cert_fetch)
     except Exception as e:
         lightsei.emit("website.crash", {"command_id": cmd_id, "error": repr(e),
                                         "traceback": traceback.format_exc()}, run_id=run_id)
@@ -268,11 +368,15 @@ def tick(client: Any, fetch: Fetcher = _httpx_fetch, *, hermes_channel: str = "d
     report["command_id"] = cmd_id
     lightsei.emit("website.check_complete", report, run_id=run_id)
 
-    # Only wake the owner when something is actually wrong.
-    if not report["up"] or report["broken_links"]:
+    # Wake the owner when something is wrong now (down / broken links) OR
+    # coming soon (cert expiring). The post's severity mirrors the report's,
+    # so an expiring-but-not-urgent cert is a quieter "warning", not a red
+    # alert.
+    if not report["up"] or report["broken_links"] or report.get("cert_expiring"):
         try:
             _send_with_source("hermes", "hermes.post",
-                              {"channel": hermes_channel, "text": hermes_text_for(report), "severity": "error"},
+                              {"channel": hermes_channel, "text": hermes_text_for(report),
+                               "severity": report.get("severity", "error")},
                               source_agent="website")
         except Exception as e:
             print(f"website: hermes dispatch failed: {e}", flush=True)
