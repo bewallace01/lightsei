@@ -35,6 +35,15 @@ def _agent_names(s, ws: str) -> set[str]:
     return set(rows)
 
 
+def _agent_caps(s, ws: str, name: str) -> list[str]:
+    row = s.execute(
+        text("SELECT capabilities FROM agents "
+             "WHERE workspace_id = :ws AND name = :n"),
+        {"ws": ws, "n": name},
+    ).first()
+    return list(row[0] or []) if row else []
+
+
 # ---------- pure plan builder ---------- #
 
 
@@ -194,3 +203,48 @@ def test_onboarding_submit_provisions_and_persists(client, alice):
     # Now the profile is persisted: GET reflects it.
     r2 = client.get("/workspaces/me/onboarding", headers=h)
     assert r2.json()["profile"]["industry"] == "professional"
+
+
+# ---------- connector capability grant (the onboarding gap fix) ---------- #
+
+
+def test_apply_grants_connector_capability_to_assistant():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        # "email" -> inbox needs connector:gmail; "reviews" -> reputation
+        # needs connector:google_business.
+        plan = onboarding.build_provisioning_plan(
+            "professional", ["email", "reviews"]
+        )
+        onboarding.apply_provisioning_plan(s, ws, plan, now)
+
+    with session_scope() as s:
+        assert "connector:gmail" in _agent_caps(s, ws, "inbox")
+        assert "connector:google_business" in _agent_caps(s, ws, "reputation")
+
+
+def test_apply_no_capability_for_connectorless_goal():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        # "summary" -> bi has no connector; "website" -> website has none.
+        plan = onboarding.build_provisioning_plan("other", ["summary", "website"])
+        onboarding.apply_provisioning_plan(s, ws, plan, now)
+
+    with session_scope() as s:
+        assert _agent_caps(s, ws, "bi") == []
+        assert _agent_caps(s, ws, "website") == []
+
+
+def test_apply_capability_grant_is_idempotent():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        plan = onboarding.build_provisioning_plan("professional", ["email"])
+        onboarding.apply_provisioning_plan(s, ws, plan, now)
+    with session_scope() as s:
+        onboarding.apply_provisioning_plan(s, ws, plan, now)
+    with session_scope() as s:
+        # Granted once, not duplicated on a re-apply.
+        assert _agent_caps(s, ws, "inbox").count("connector:gmail") == 1

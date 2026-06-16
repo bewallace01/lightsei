@@ -190,21 +190,63 @@ def build_provisioning_plan(
     }
 
 
+def _grant_connector_capability(
+    session: Session, workspace_id: str, agent_name: str, connector: str,
+    now: datetime,
+) -> None:
+    """Grant an assistant the `connector:<type>` capability so the feeder's
+    gated connector call (dispatched as that assistant) passes the Phase 16
+    capability guardrail. Without it, a user who connects Gmail / reviews
+    gets a feeder that's silently refused and never runs. Idempotent: a
+    capability already present is left as-is. Does not commit.
+    """
+    import json
+
+    capability = f"connector:{connector}"
+    row = session.execute(
+        text("SELECT capabilities FROM agents "
+             "WHERE workspace_id = :w AND name = :n"),
+        {"w": workspace_id, "n": agent_name},
+    ).first()
+    if row is None:
+        return
+    caps = list(row[0] or [])
+    if capability in caps:
+        return
+    caps.append(capability)
+    session.execute(
+        text("UPDATE agents SET capabilities = CAST(:caps AS JSONB), "
+             "updated_at = :now WHERE workspace_id = :w AND name = :n"),
+        {"caps": json.dumps(caps), "now": now, "w": workspace_id, "n": agent_name},
+    )
+
+
 def apply_provisioning_plan(
     session: Session,
     workspace_id: str,
     plan: dict[str, Any],
     now: datetime,
 ) -> None:
-    """Provision the plan: create assistant rows, enable feeders, store the
-    profile on the workspace. Idempotent (ensure_agent + feeder upsert +
-    profile overwrite). Does not commit.
+    """Provision the plan: create assistant rows, grant each assistant the
+    connector capability its goal needs, enable feeders, store the profile
+    on the workspace. Idempotent (ensure_agent + capability dedup + feeder
+    upsert + profile overwrite). Does not commit.
     """
     import feeder
     from db import ensure_agent
 
     for agent_name in plan.get("assistants", []):
         ensure_agent(session, workspace_id, agent_name, now)
+
+    # Grant each goal's connector capability to its assistant (after the
+    # rows exist). The "email" goal -> inbox needs connector:gmail, "reviews"
+    # -> reputation needs connector:google_business, etc.
+    for goal_key in plan.get("goals", []):
+        g = _GOAL_BY_KEY.get(goal_key)
+        if g and g.get("connector"):
+            _grant_connector_capability(
+                session, workspace_id, g["agent"], g["connector"], now
+            )
 
     for feeder_kind in plan.get("feeders", []):
         feeder.set_feeder_enabled(session, workspace_id, feeder_kind, True, now)
