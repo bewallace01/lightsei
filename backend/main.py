@@ -5181,6 +5181,9 @@ async def upload_deployment(
     session.flush()
 
     ensure_agent(session, workspace_id, agent_name, now)
+    builtin_personas.grant_required_capabilities(
+        session, workspace_id, agent_name, now
+    )
     _retire_active_deployments_for_agent(
         session, workspace_id=workspace_id, agent_name=agent_name,
     )
@@ -5332,6 +5335,9 @@ def deploy_team(
     deployed: list[str] = []
     already_running: list[str] = []
     for name in provisioned:
+        builtin_personas.grant_required_capabilities(
+            session, workspace_id, name, now
+        )
         if _has_active_deployment(session, workspace_id, name):
             already_running.append(name)
             continue

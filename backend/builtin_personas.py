@@ -17,8 +17,13 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import zipfile
+from datetime import datetime
+
+from sqlalchemy import text
+from sqlalchemy.orm import Session
 
 # The business-persona roster onboarding can deploy. Names match the
 # agent_name the feeders target + the worker runs.
@@ -36,6 +41,17 @@ BUILTIN_PERSONAS = [
 # tell an owner "add an API key" after deploying.
 LLM_PERSONAS = {"marketing", "bi", "inbox"}
 
+# Capabilities each bundled persona needs for the code it ships with.
+# Connector capabilities stay goal-specific and are granted by onboarding.
+_REQUIRED_CAPABILITIES = {
+    "website": ["internet", "send_command"],
+    "lead": ["send_command"],
+    "reputation": ["send_command"],
+    "marketing": ["internet", "send_command"],
+    "bi": ["internet", "send_command"],
+    "inbox": ["internet", "send_command"],
+}
+
 _BASE_DIR = os.path.join(os.path.dirname(__file__), "builtin_personas")
 # Files copied into each bundle, in a stable order so the zip bytes (and
 # thus the sha) are deterministic.
@@ -44,6 +60,44 @@ _BUNDLE_FILES = ["bot.py", "requirements.txt"]
 
 def is_builtin_persona(name: str) -> bool:
     return name in BUILTIN_PERSONAS
+
+
+def required_capabilities(name: str) -> list[str]:
+    return list(_REQUIRED_CAPABILITIES.get(name, []))
+
+
+def grant_required_capabilities(
+    session: Session, workspace_id: str, name: str, now: datetime
+) -> bool:
+    """Add the capabilities a bundled persona needs, preserving extra grants."""
+    required = required_capabilities(name)
+    if not required:
+        return False
+    row = session.execute(
+        text(
+            "SELECT capabilities FROM agents "
+            "WHERE workspace_id = :w AND name = :n"
+        ),
+        {"w": workspace_id, "n": name},
+    ).first()
+    if row is None:
+        return False
+    caps = list(row[0] or [])
+    changed = False
+    for cap in required:
+        if cap not in caps:
+            caps.append(cap)
+            changed = True
+    if not changed:
+        return False
+    session.execute(
+        text(
+            "UPDATE agents SET capabilities = CAST(:caps AS JSONB), "
+            "updated_at = :now WHERE workspace_id = :w AND name = :n"
+        ),
+        {"caps": json.dumps(caps), "now": now, "w": workspace_id, "n": name},
+    )
+    return True
 
 
 def persona_dir(name: str) -> str:

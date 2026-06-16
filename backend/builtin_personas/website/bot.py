@@ -35,8 +35,10 @@ Public surface (for tests):
   main()
 """
 import os
+import ipaddress
 import uuid
 import re
+import socket
 import sys
 import time
 import traceback
@@ -72,6 +74,37 @@ CERT_URGENT_DAYS = int(os.environ.get("WEBSITE_CERT_URGENT_DAYS", "3"))
 _HREF_RE = re.compile(r"""<a\b[^>]*?\bhref\s*=\s*["']([^"'#]+)["']""", re.IGNORECASE)
 _FORM_RE = re.compile(r"""<form\b([^>]*)>""", re.IGNORECASE)
 _ATTR_RE = re.compile(r"""(\w+)\s*=\s*["']([^"']*)["']""")
+_MAX_REDIRECTS = 5
+
+
+def _is_global_ip_literal(hostname: str) -> Optional[bool]:
+    try:
+        return ipaddress.ip_address(hostname).is_global
+    except ValueError:
+        return None
+
+
+def _hostname_resolves_globally(hostname: str) -> bool:
+    try:
+        infos = socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)
+    except OSError:
+        return False
+    addresses = {info[4][0] for info in infos if info and info[4]}
+    if not addresses:
+        return False
+    return all(ipaddress.ip_address(addr).is_global for addr in addresses)
+
+
+def is_safe_public_http_url(url: str, *, resolve: bool = False) -> bool:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return False
+    literal_is_global = _is_global_ip_literal(parsed.hostname)
+    if literal_is_global is False:
+        return False
+    if resolve and literal_is_global is None:
+        return _hostname_resolves_globally(parsed.hostname)
+    return True
 
 
 def extract_links(html: str, base_url: str) -> list[str]:
@@ -85,6 +118,8 @@ def extract_links(html: str, base_url: str) -> list[str]:
             continue
         absolute = urljoin(base_url, raw)
         if urlparse(absolute).scheme not in ("http", "https"):
+            continue
+        if not is_safe_public_http_url(absolute, resolve=False):
             continue
         if absolute not in seen:
             seen.add(absolute)
@@ -290,11 +325,32 @@ def hermes_text_for(report: dict[str, Any]) -> str:
 def _httpx_fetch(url: str, *, method: str = "GET") -> dict[str, Any]:
     import httpx
     started = time.monotonic()
+    current = url
     try:
-        resp = httpx.request(
-            method, url, timeout=TIMEOUT_S, follow_redirects=True,
-            headers={"User-Agent": "Lightsei-Website-Assistant/1.0"},
-        )
+        for _ in range(_MAX_REDIRECTS + 1):
+            if not is_safe_public_http_url(current, resolve=True):
+                return {
+                    "status_code": None,
+                    "error": "BlockedURL: target host is not public",
+                    "text": "",
+                    "latency_ms": int((time.monotonic() - started) * 1000),
+                }
+            resp = httpx.request(
+                method, current, timeout=TIMEOUT_S, follow_redirects=False,
+                headers={"User-Agent": "Lightsei-Website-Assistant/1.0"},
+            )
+            location = resp.headers.get("location")
+            if resp.is_redirect and location:
+                current = urljoin(str(resp.url), location)
+                continue
+            break
+        else:
+            return {
+                "status_code": None,
+                "error": "TooManyRedirects: exceeded safe redirect limit",
+                "text": "",
+                "latency_ms": int((time.monotonic() - started) * 1000),
+            }
         return {
             "status_code": resp.status_code,
             "error": None,
@@ -314,6 +370,8 @@ def _ssl_cert_fetch(url: str) -> dict[str, Any]:
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.hostname:
         return {"not_after": None, "error": None}
+    if not is_safe_public_http_url(url, resolve=True):
+        return {"not_after": None, "error": "BlockedURL: target host is not public"}
     host = parsed.hostname
     port = parsed.port or 443
     import socket

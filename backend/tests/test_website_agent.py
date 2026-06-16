@@ -60,6 +60,25 @@ def test_extract_links_absolute_dedup_and_skip(fake_lightsei):
     assert links == ["https://site.com/about", "https://x.com/p"]
 
 
+def test_extract_links_skips_private_literal_hosts(fake_lightsei):
+    _, bot = fake_lightsei
+    html = """
+      <a href="http://127.0.0.1:8000/admin">local</a>
+      <a href="http://169.254.169.254/latest/meta-data/">meta</a>
+      <a href="/ok">ok</a>
+    """
+    links = bot.extract_links(html, "https://site.com/")
+    assert links == ["https://site.com/ok"]
+
+
+def test_public_url_guard_blocks_non_public_targets(fake_lightsei):
+    _, bot = fake_lightsei
+    assert bot.is_safe_public_http_url("http://127.0.0.1:8000") is False
+    assert bot.is_safe_public_http_url("http://10.0.0.5/") is False
+    assert bot.is_safe_public_http_url("http://169.254.169.254/") is False
+    assert bot.is_safe_public_http_url("https://8.8.8.8/") is True
+
+
 def test_extract_forms(fake_lightsei):
     _, bot = fake_lightsei
     html = '<form action="/lead" method="POST">..</form><form>..</form>'
@@ -321,6 +340,19 @@ def test_ssl_cert_fetch_skips_non_https(fake_lightsei):
     _, bot = fake_lightsei
     # Pure: an http URL needs no network and yields no cert.
     assert bot._ssl_cert_fetch("http://example.com")["not_after"] is None
+
+
+def test_httpx_fetch_blocks_private_url_without_network(fake_lightsei, monkeypatch):
+    _, bot = fake_lightsei
+    import httpx
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("network should not be called for private hosts")
+
+    monkeypatch.setattr(httpx, "request", fail_if_called)
+    res = bot._httpx_fetch("http://127.0.0.1:8000")
+    assert res["status_code"] is None
+    assert "BlockedURL" in res["error"]
 
 
 def test_check_site_warns_on_soon_expiring_cert(fake_lightsei):
