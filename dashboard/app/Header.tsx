@@ -92,6 +92,7 @@ const NAV: NavItem[] = [
   },
   { kind: "link", href: "/zones", label: "Trust zones" },
   { kind: "link", href: "/inbox", label: "Inbox" },
+  { kind: "link", href: "/seo", label: "SEO" },
   {
     kind: "group",
     label: "Integrations",

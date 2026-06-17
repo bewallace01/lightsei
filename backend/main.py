@@ -2531,6 +2531,49 @@ def get_feed(
     return {"items": items}
 
 
+@app.get("/workspaces/me/seo/drafts")
+def get_seo_drafts(
+    limit: int = 20,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Recent SEO pages Spica has drafted (seo.page_drafted events), newest
+    first, with the full page payload so the dashboard can preview each and
+    publish it to a connected repo."""
+    limit = max(1, min(limit, 100))
+    rows = session.execute(
+        text(
+            """
+            SELECT id, payload, timestamp
+              FROM events
+             WHERE workspace_id = :ws AND kind = 'seo.page_drafted'
+             ORDER BY timestamp DESC
+             LIMIT :limit
+            """
+        ),
+        {"ws": workspace_id, "limit": limit},
+    ).mappings().all()
+
+    drafts = []
+    for r in rows:
+        p = r["payload"] or {}
+        page = p.get("page") or {}
+        ts = r["timestamp"]
+        drafts.append({
+            "id": str(r["id"]),
+            "keyword": p.get("keyword"),
+            "created_at": ts.isoformat() if hasattr(ts, "isoformat") else ts,
+            "page": {
+                "title": page.get("title"),
+                "meta_description": page.get("meta_description"),
+                "slug": page.get("slug"),
+                "h1": page.get("h1"),
+                "body_html": page.get("body_html"),
+            },
+        })
+    return {"drafts": drafts}
+
+
 class AskQuestion(BaseModel):
     question: str
 
