@@ -34,9 +34,11 @@ Public surface (for tests):
   tick(client, fetch, *, hermes_channel=...)
   main()
 """
+import ipaddress
 import os
 import uuid
 import re
+import socket
 import sys
 import time
 import traceback
@@ -65,6 +67,7 @@ TIMEOUT_S = float(os.environ.get("WEBSITE_TIMEOUT_S", "10"))
 # red alert inside the urgent window.
 CERT_WARN_DAYS = int(os.environ.get("WEBSITE_CERT_WARN_DAYS", "14"))
 CERT_URGENT_DAYS = int(os.environ.get("WEBSITE_CERT_URGENT_DAYS", "3"))
+MAX_REDIRECTS = int(os.environ.get("WEBSITE_MAX_REDIRECTS", "5"))
 
 
 # ---------- Pure helpers ---------- #
@@ -72,6 +75,49 @@ CERT_URGENT_DAYS = int(os.environ.get("WEBSITE_CERT_URGENT_DAYS", "3"))
 _HREF_RE = re.compile(r"""<a\b[^>]*?\bhref\s*=\s*["']([^"'#]+)["']""", re.IGNORECASE)
 _FORM_RE = re.compile(r"""<form\b([^>]*)>""", re.IGNORECASE)
 _ATTR_RE = re.compile(r"""(\w+)\s*=\s*["']([^"']*)["']""")
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
+
+
+def _unsafe_host_reason(host: str, *, port: Optional[int] = None,
+                        resolve: bool = False) -> Optional[str]:
+    lower = host.strip("[]").rstrip(".").lower()
+    if lower == "localhost" or lower.endswith(".localhost"):
+        return "local hostnames are not allowed"
+    try:
+        ip = ipaddress.ip_address(lower)
+    except ValueError:
+        ip = None
+    if ip is not None:
+        if not ip.is_global:
+            return "private or reserved IP addresses are not allowed"
+        return None
+    if not resolve:
+        return None
+    try:
+        infos = socket.getaddrinfo(host, port or 443, type=socket.SOCK_STREAM)
+    except socket.gaierror:
+        return None
+    for info in infos:
+        addr = info[4][0]
+        try:
+            resolved = ipaddress.ip_address(addr)
+        except ValueError:
+            return "unrecognized resolved IP address"
+        if not resolved.is_global:
+            return "host resolves to a private or reserved IP address"
+    return None
+
+
+def _unsafe_url_reason(url: str, *, resolve: bool = False) -> Optional[str]:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return "only http and https URLs are allowed"
+    if parsed.username or parsed.password:
+        return "credentials in URLs are not allowed"
+    if not parsed.hostname:
+        return "URL host is required"
+    return _unsafe_host_reason(parsed.hostname, port=parsed.port,
+                               resolve=resolve)
 
 
 def extract_links(html: str, base_url: str) -> list[str]:
@@ -85,6 +131,8 @@ def extract_links(html: str, base_url: str) -> list[str]:
             continue
         absolute = urljoin(base_url, raw)
         if urlparse(absolute).scheme not in ("http", "https"):
+            continue
+        if _unsafe_url_reason(absolute):
             continue
         if absolute not in seen:
             seen.add(absolute)
@@ -290,17 +338,34 @@ def hermes_text_for(report: dict[str, Any]) -> str:
 def _httpx_fetch(url: str, *, method: str = "GET") -> dict[str, Any]:
     import httpx
     started = time.monotonic()
+    current = url
+    current_method = method
     try:
-        resp = httpx.request(
-            method, url, timeout=TIMEOUT_S, follow_redirects=True,
-            headers={"User-Agent": "Lightsei-Website-Assistant/1.0"},
-        )
-        return {
-            "status_code": resp.status_code,
-            "error": None,
-            "text": resp.text if method == "GET" else "",
-            "latency_ms": int((time.monotonic() - started) * 1000),
-        }
+        for _ in range(MAX_REDIRECTS + 1):
+            unsafe = _unsafe_url_reason(current, resolve=True)
+            if unsafe:
+                return {"status_code": None, "error": f"UnsafeURL: {unsafe}",
+                        "text": "",
+                        "latency_ms": int((time.monotonic() - started) * 1000)}
+            resp = httpx.request(
+                current_method, current, timeout=TIMEOUT_S,
+                follow_redirects=False,
+                headers={"User-Agent": "Lightsei-Website-Assistant/1.0"},
+            )
+            location = resp.headers.get("location")
+            if resp.status_code in _REDIRECT_STATUSES and location:
+                current = urljoin(current, location)
+                if resp.status_code == 303:
+                    current_method = "GET"
+                continue
+            return {
+                "status_code": resp.status_code,
+                "error": None,
+                "text": resp.text if current_method == "GET" else "",
+                "latency_ms": int((time.monotonic() - started) * 1000),
+            }
+        return {"status_code": None, "error": "TooManyRedirects", "text": "",
+                "latency_ms": int((time.monotonic() - started) * 1000)}
     except Exception as e:
         return {"status_code": None, "error": f"{type(e).__name__}: {e}", "text": "",
                 "latency_ms": int((time.monotonic() - started) * 1000)}
@@ -314,6 +379,9 @@ def _ssl_cert_fetch(url: str) -> dict[str, Any]:
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.hostname:
         return {"not_after": None, "error": None}
+    unsafe = _unsafe_url_reason(url, resolve=True)
+    if unsafe:
+        return {"not_after": None, "error": f"UnsafeURL: {unsafe}"}
     host = parsed.hostname
     port = parsed.port or 443
     import socket

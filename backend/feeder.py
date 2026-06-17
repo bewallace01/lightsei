@@ -31,6 +31,7 @@ Design notes:
 from __future__ import annotations
 
 import logging
+import ipaddress
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -174,6 +175,19 @@ SEO_SOURCE = "feeder-seo"
 SEO_DEDUP_WINDOW = timedelta(hours=20)
 
 
+def _unsafe_website_host_reason(host: str) -> Optional[str]:
+    lower = host.strip("[]").rstrip(".").lower()
+    if lower == "localhost" or lower.endswith(".localhost"):
+        return "local hostnames are not allowed"
+    try:
+        ip = ipaddress.ip_address(lower)
+    except ValueError:
+        return None
+    if not ip.is_global:
+        return "private or reserved IP addresses are not allowed"
+    return None
+
+
 def normalize_website_url(raw: Optional[str]) -> Optional[str]:
     """Coerce an owner-typed site address into a fetchable URL, or None if
     it isn't one. Pure + testable.
@@ -195,8 +209,12 @@ def normalize_website_url(raw: Optional[str]) -> Optional[str]:
     parsed = urlparse(candidate)
     if parsed.scheme not in ("http", "https"):
         return None
-    host = parsed.netloc
+    if parsed.username or parsed.password:
+        return None
+    host = parsed.hostname
     if not host or "." not in host or host.startswith(".") or host.endswith("."):
+        return None
+    if _unsafe_website_host_reason(host):
         return None
     # Rebuild from parsed parts so we drop stray whitespace / fragments and
     # store a canonical form. Keep path/query (a contact page may be deep).

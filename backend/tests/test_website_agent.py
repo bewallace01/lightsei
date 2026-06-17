@@ -60,6 +60,16 @@ def test_extract_links_absolute_dedup_and_skip(fake_lightsei):
     assert links == ["https://site.com/about", "https://x.com/p"]
 
 
+def test_extract_links_skips_private_targets(fake_lightsei):
+    _, bot = fake_lightsei
+    html = """
+      <a href="https://169.254.169.254/latest/meta-data">metadata</a>
+      <a href="http://127.0.0.1:8000/admin">local</a>
+      <a href="/about">about</a>
+    """
+    assert bot.extract_links(html, "https://site.com/") == ["https://site.com/about"]
+
+
 def test_extract_forms(fake_lightsei):
     _, bot = fake_lightsei
     html = '<form action="/lead" method="POST">..</form><form>..</form>'
@@ -147,6 +157,52 @@ def test_check_site_respects_max_links(fake_lightsei):
     fetch = _fetcher({"https://s.com/": {"status_code": 200, "text": html}})
     r = bot.check_site("https://s.com/", fetch, max_links=10)
     assert r["links_checked"] == 10
+
+
+def test_httpx_fetch_blocks_private_url_before_request(fake_lightsei, monkeypatch):
+    _, bot = fake_lightsei
+    fake_httpx = types.SimpleNamespace(request=MagicMock())
+    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+
+    r = bot._httpx_fetch("https://169.254.169.254/latest/meta-data")
+
+    assert r["status_code"] is None
+    assert "UnsafeURL" in r["error"]
+    fake_httpx.request.assert_not_called()
+
+
+def test_httpx_fetch_blocks_redirect_to_private_url(fake_lightsei, monkeypatch):
+    _, bot = fake_lightsei
+
+    class Resp:
+        status_code = 302
+        text = ""
+        headers = {"location": "http://127.0.0.1:8000/admin"}
+
+    fake_httpx = types.SimpleNamespace(request=MagicMock(return_value=Resp()))
+    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+    monkeypatch.setattr(bot.socket, "getaddrinfo", MagicMock(
+        return_value=[(bot.socket.AF_INET, bot.socket.SOCK_STREAM, 0, "",
+                       ("93.184.216.34", 443))]
+    ))
+
+    r = bot._httpx_fetch("https://public.example/")
+
+    assert r["status_code"] is None
+    assert "UnsafeURL" in r["error"]
+    assert fake_httpx.request.call_count == 1
+
+
+def test_ssl_cert_fetch_blocks_private_url_before_socket(fake_lightsei, monkeypatch):
+    _, bot = fake_lightsei
+    connect = MagicMock()
+    monkeypatch.setattr(bot.socket, "create_connection", connect)
+
+    r = bot._ssl_cert_fetch("https://169.254.169.254/")
+
+    assert r["not_after"] is None
+    assert "UnsafeURL" in r["error"]
+    connect.assert_not_called()
 
 
 # ---------- tick ---------- #
