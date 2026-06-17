@@ -58,6 +58,7 @@ FEEDER_COST_SPIKE = "cost_spike"
 FEEDER_INBOX_GMAIL = "inbox_gmail"
 FEEDER_REPUTATION_REVIEWS = "reputation_reviews"
 FEEDER_WEBSITE_HEALTH = "website_health"
+FEEDER_SEO_AUDIT = "seo_audit"
 
 # Each entry carries `default_enabled`: the on/off a workspace gets before
 # the owner has toggled anything. The two internal-data feeders default ON
@@ -123,6 +124,19 @@ FEEDER_CATALOG = [
         # connector account. The settings UI renders a URL input for it.
         "url_target": True,
     },
+    {
+        "kind": FEEDER_SEO_AUDIT,
+        "name": "SEO checkups",
+        "description": (
+            "Audits your website's on-page SEO on a schedule (titles, meta "
+            "tags, headings, structured data, content) and surfaces a "
+            "prioritized list of fixes. Add your site address to start."
+        ),
+        # Same shape as website health: watches the owner's own public site,
+        # no-op until a URL is set. Defaults ON.
+        "default_enabled": True,
+        "url_target": True,
+    },
 ]
 
 _DEFAULT_ENABLED = {e["kind"]: e["default_enabled"] for e in FEEDER_CATALOG}
@@ -151,6 +165,13 @@ WEBSITE_AGENT = "website"
 WEBSITE_KIND = "website.check"
 WEBSITE_SOURCE = "feeder-website"
 WEBSITE_DEDUP_WINDOW = timedelta(hours=20)
+
+# The SEO feeder's target + dedup constants. Same periodic-sweep shape as
+# website health: one seo.audit per cadence window for the configured URL.
+SEO_AGENT = "seo"
+SEO_KIND = "seo.audit"
+SEO_SOURCE = "feeder-seo"
+SEO_DEDUP_WINDOW = timedelta(hours=20)
 
 
 def normalize_website_url(raw: Optional[str]) -> Optional[str]:
@@ -229,6 +250,8 @@ _NOTABLE_KINDS = {
     "website.check_complete": "website_checks",
     "marketing.created": "marketing_drafts",
     "inbox.processed": "inbox_items",
+    "seo.audit_complete": "seo_audits",
+    "seo.page_drafted": "seo_pages_drafted",
 }
 
 
@@ -922,6 +945,79 @@ def enqueue_website_check_for_workspace(
     return 1
 
 
+def _has_recent_seo_audit(
+    session: Session, workspace_id: str, now: datetime
+) -> bool:
+    """True if a feeder seo.audit was enqueued inside the cadence window."""
+    floor = now - SEO_DEDUP_WINDOW
+    found = session.execute(
+        text(
+            """
+            SELECT 1
+              FROM commands
+             WHERE workspace_id = :ws
+               AND agent_name = :agent
+               AND kind = :kind
+               AND created_at >= :floor
+               AND payload ->> 'source' = :source
+             LIMIT 1
+            """
+        ),
+        {"ws": workspace_id, "agent": SEO_AGENT, "kind": SEO_KIND,
+         "floor": floor, "source": SEO_SOURCE},
+    ).first()
+    return found is not None
+
+
+def enqueue_seo_audit_for_workspace(
+    session: Session, workspace_id: str, now: datetime
+) -> int:
+    """Enqueue one seo.audit for the workspace's configured site, on a daily
+    cadence. Returns 1 if enqueued, 0 if skipped. Same periodic-sweep shape
+    as the website-health feeder: URL from the seo_audit feeder config,
+    time-window dedup, no-op until a URL is set. Does not commit."""
+    url = normalize_website_url(
+        get_feeder_config(session, workspace_id, FEEDER_SEO_AUDIT).get("url")
+    )
+    if not url:
+        return 0
+    if _has_recent_seo_audit(session, workspace_id, now):
+        return 0
+
+    cmd_id = str(uuid.uuid4())
+    payload = {"source": SEO_SOURCE, "url": url}
+    session.execute(
+        text(
+            """
+            INSERT INTO commands (
+                id, workspace_id, agent_name, kind, payload, status,
+                approval_state, approved_at, created_at, expires_at,
+                dispatch_chain_id, dispatch_depth
+            ) VALUES (
+                :id, :ws, :agent, :kind, CAST(:payload AS JSONB),
+                'pending', 'auto_approved', :now, :now, :expires,
+                :chain, 0
+            )
+            """
+        ),
+        {
+            "id": cmd_id,
+            "ws": workspace_id,
+            "agent": SEO_AGENT,
+            "kind": SEO_KIND,
+            "payload": _json_dumps(payload),
+            "now": now,
+            "expires": now + _COMMAND_TTL,
+            "chain": cmd_id,
+        },
+    )
+    logger.info(
+        "feeder: enqueued seo audit ws=%s url=%s cmd=%s",
+        workspace_id, url, cmd_id,
+    )
+    return 1
+
+
 def _has_recent_feeder_command(
     session: Session,
     workspace_id: str,
@@ -1141,6 +1237,21 @@ def tick(session: Session, now: datetime) -> int:
             except Exception:  # noqa: BLE001 — best-effort, keep going
                 logger.exception(
                     "feeder: failed to enqueue website check for ws=%s",
+                    workspace_id,
+                )
+
+    # SEO feeder (default ON, no-op until a URL is configured) over
+    # workspaces running the SEO assistant. One on-page audit per day for
+    # the owner's configured site — this is the "constantly working" part.
+    for workspace_id in _workspaces_running_agent(session, SEO_AGENT):
+        if is_feeder_enabled(session, workspace_id, FEEDER_SEO_AUDIT):
+            try:
+                enqueued += enqueue_seo_audit_for_workspace(
+                    session, workspace_id, now
+                )
+            except Exception:  # noqa: BLE001 — best-effort, keep going
+                logger.exception(
+                    "feeder: failed to enqueue seo audit for ws=%s",
                     workspace_id,
                 )
     return enqueued

@@ -151,3 +151,23 @@ def test_feed_endpoint_orders_newest_first_and_filters(client, alice):
 def test_feed_empty_for_fresh_workspace(client, alice):
     h = auth_headers(alice["session_token"])
     assert client.get("/workspaces/me/feed", headers=h).json()["items"] == []
+
+
+def test_feed_item_seo_audit():
+    from feed import build_feed_item
+    item = build_feed_item({
+        "kind": "seo.audit_complete", "agent_name": "seo",
+        "payload": {"url": "https://acme.com", "score": 70, "issues": 2, "reachable": True},
+    })
+    assert "70/100" in item["title"]
+    assert "2 issue" in item["detail"]
+
+
+def test_feed_item_seo_page_drafted():
+    from feed import build_feed_item
+    item = build_feed_item({
+        "kind": "seo.page_drafted", "agent_name": "seo",
+        "payload": {"keyword": "plumber austin",
+                    "page": {"h1": "Plumber in Austin", "meta_description": "Fast help"}},
+    })
+    assert "Plumber in Austin" in item["title"]

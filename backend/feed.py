@@ -23,10 +23,12 @@ _FEED_KINDS = {
     "website.check_complete",
     "marketing.created",
     "bi.summary",
+    "seo.audit_complete",
+    "seo.page_drafted",
 }
 _CRASH_KINDS = {
     "reputation.crash", "lead.crash", "inbox.crash",
-    "website.crash", "marketing.crash", "bi.crash",
+    "website.crash", "marketing.crash", "bi.crash", "seo.crash",
 }
 
 # All kinds this module knows how to render (for the endpoint's WHERE).
@@ -131,5 +133,17 @@ def _render(kind: str, p: dict[str, Any]) -> tuple[str, Optional[str]]:
         is_answer = p.get("kind") == "answer"
         title = "Answered a question" if is_answer else "Business summary ready"
         return title, _truncate(p.get("summary"))
+
+    if kind == "seo.audit_complete":
+        if p.get("reachable") is False:
+            return "SEO audit: site unreachable", _truncate(p.get("url"))
+        score, issues = p.get("score"), p.get("issues") or 0
+        title = f"SEO audit: scored {score}/100"
+        detail = f"{issues} issue(s) to fix on {p.get('url')}" if issues else _truncate(p.get("url"))
+        return title, detail
+
+    if kind == "seo.page_drafted":
+        page = p.get("page") or {}
+        return f"New SEO page drafted: {page.get('h1') or p.get('keyword')}", _truncate(page.get("meta_description"))
 
     return kind, None
