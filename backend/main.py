@@ -4780,6 +4780,62 @@ def _owned_github_repo(session: Session, repo_id: str, workspace_id: str) -> Git
     return repo
 
 
+class PublishPageIn(BaseModel):
+    repo_id: str
+    path: str               # repo-relative file path, e.g. content/blog/x.md
+    content: str            # the page file contents
+    title: str              # used for the commit + PR title + branch name
+    body: Optional[str] = None        # PR body (defaults to a Lightsei note)
+    branch_name: Optional[str] = None  # override the derived branch name
+
+
+@app.post("/workspaces/me/github/publish-page")
+def github_publish_page(
+    body: PublishPageIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Commit a generated page to a connected repo on a fresh branch and open
+    a pull request. This is the git-deploy publish path: every git-hosted
+    platform (Vercel / Cloudflare Pages / Railway / Netlify) auto-deploys
+    when the PR is merged, so one mechanism covers all of them. The PR is
+    the owner's review gate — nothing lands on the default branch
+    automatically.
+    """
+    import github_publish
+
+    if not secrets_crypto.is_available():
+        raise HTTPException(status_code=503, detail="secrets store unavailable: LIGHTSEI_SECRETS_KEY is not configured")
+    if not github_publish.is_safe_repo_path(body.path):
+        raise HTTPException(status_code=400, detail="path must be a repo-relative file path (no leading slash or ..)")
+    if not str(body.content or "").strip():
+        raise HTTPException(status_code=400, detail="content is required")
+
+    repo = _owned_github_repo(session, body.repo_id, workspace_id)
+    conn = session.execute(
+        select(GithubConnection).where(GithubConnection.workspace_id == workspace_id)
+    ).scalar_one_or_none()
+    if conn is None:
+        raise HTTPException(status_code=400, detail="connect GitHub first (no token on this workspace)")
+
+    token = secrets_crypto.decrypt(conn.encrypted_token)
+    branch = body.branch_name or github_publish.branch_name_for(body.title)
+    try:
+        result = github_publish.publish_page_to_repo(
+            request=github_publish._httpx_request, token=token,
+            owner=repo.repo_owner, repo=repo.repo_name, base_branch=repo.branch,
+            path=body.path, content=body.content, branch_name=branch,
+            commit_message=f"Add page: {body.title}",
+            pr_title=f"Add SEO page: {body.title}",
+            pr_body=body.body or (
+                "New SEO page drafted by Spica (Lightsei). Review the page, "
+                "then merge to publish it on your site."),
+        )
+    except github_publish.GithubPublishError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return result
+
+
 @app.get("/workspaces/me/github/repos/{repo_id}/branch-targets")
 def list_github_branch_targets(
     repo_id: str,
