@@ -936,3 +936,76 @@ def test_website_feeder_skips_when_disabled():
         feeder.tick(s, now)
     with session_scope() as s:
         assert _count_website_cmds(s, ws) == 0
+
+
+# ---------- SEO audit feeder ---------- #
+
+
+def _deploy_seo(s, workspace_id: str) -> None:
+    now = _now()
+    s.add(Agent(workspace_id=workspace_id, name=feeder.SEO_AGENT,
+                role="executor", created_at=now, updated_at=now))
+    s.flush()
+
+
+def _count_seo_cmds(s, workspace_id: str) -> int:
+    return s.execute(
+        text("SELECT count(*) FROM commands WHERE workspace_id = :ws "
+             "AND kind = :kind AND payload ->> 'source' = :source"),
+        {"ws": workspace_id, "kind": feeder.SEO_KIND, "source": feeder.SEO_SOURCE},
+    ).scalar_one()
+
+
+def test_seo_feeder_enqueues_audit_for_configured_url():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_seo(s, ws)
+        feeder.set_feeder_config(s, ws, feeder.FEEDER_SEO_AUDIT,
+                                 {"url": "https://acme.example"}, now)
+    with session_scope() as s:
+        assert feeder.enqueue_seo_audit_for_workspace(s, ws, now) == 1
+    with session_scope() as s:
+        assert _count_seo_cmds(s, ws) == 1
+        row = s.execute(text("SELECT payload FROM commands WHERE workspace_id=:ws"),
+                        {"ws": ws}).mappings().first()
+        assert row["payload"]["url"] == "https://acme.example"
+        assert row["payload"]["source"] == feeder.SEO_SOURCE
+
+
+def test_seo_feeder_noop_without_url():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_seo(s, ws)
+    with session_scope() as s:
+        assert feeder.is_feeder_enabled(s, ws, feeder.FEEDER_SEO_AUDIT)
+        assert feeder.enqueue_seo_audit_for_workspace(s, ws, now) == 0
+
+
+def test_seo_feeder_dedups_within_window():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_seo(s, ws)
+        feeder.set_feeder_config(s, ws, feeder.FEEDER_SEO_AUDIT,
+                                 {"url": "https://acme.example"}, now)
+    with session_scope() as s:
+        assert feeder.enqueue_seo_audit_for_workspace(s, ws, now) == 1
+    with session_scope() as s:
+        assert feeder.enqueue_seo_audit_for_workspace(s, ws, now + timedelta(hours=3)) == 0
+    with session_scope() as s:
+        assert _count_seo_cmds(s, ws) == 1
+
+
+def test_seo_feeder_runs_in_tick_when_enabled():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        _deploy_seo(s, ws)
+        feeder.set_feeder_config(s, ws, feeder.FEEDER_SEO_AUDIT,
+                                 {"url": "https://acme.example"}, now)
+    with session_scope() as s:
+        feeder.tick(s, now)
+    with session_scope() as s:
+        assert _count_seo_cmds(s, ws) == 1

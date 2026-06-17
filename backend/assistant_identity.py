@@ -24,6 +24,7 @@ DEFAULT_IDENTITY: dict[str, dict[str, str]] = {
     "marketing": {"name": "Nova", "role": "Marketing"},
     "bi": {"name": "Altair", "role": "Business Intelligence"},
     "inbox": {"name": "Mira", "role": "Inbox"},
+    "seo": {"name": "Spica", "role": "SEO"},
 }
 
 

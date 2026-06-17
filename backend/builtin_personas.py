@@ -29,12 +29,14 @@ BUILTIN_PERSONAS = [
     "marketing",
     "bi",
     "inbox",
+    "seo",
 ]
 
 # LLM-backed personas need ANTHROPIC_API_KEY in the workspace secrets to do
 # real work; the heuristic ones (website, lead, reputation) don't. Used to
-# tell an owner "add an API key" after deploying.
-LLM_PERSONAS = {"marketing", "bi", "inbox"}
+# tell an owner "add an API key" after deploying. (seo audits without a key
+# but needs one to generate pages, so it counts as LLM-backed.)
+LLM_PERSONAS = {"marketing", "bi", "inbox", "seo"}
 
 _BASE_DIR = os.path.join(os.path.dirname(__file__), "builtin_personas")
 # Files copied into each bundle, in a stable order so the zip bytes (and
