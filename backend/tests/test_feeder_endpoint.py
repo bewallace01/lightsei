@@ -171,6 +171,16 @@ def test_set_url_config_rejects_garbage_400(client, alice):
     assert r.status_code == 400
 
 
+def test_set_url_config_rejects_private_targets_400(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.patch(
+        "/workspaces/me/feeders/website_health/config",
+        headers=h,
+        json={"config": {"url": "https://169.254.169.254/latest/meta-data"}},
+    )
+    assert r.status_code == 400
+
+
 def test_set_config_on_non_targetable_feeder_400(client, alice):
     h = auth_headers(alice["session_token"])
     r = client.patch(

@@ -823,6 +823,12 @@ def test_normalize_website_url_adds_scheme_and_validates():
     assert n(None) is None
     assert n("homepage") is None
     assert n("ftp://example.com") is None
+    assert n("https://user:pass@example.com") is None
+    # Owner-provided feeder URLs are fetched from worker infrastructure, so
+    # private, loopback, and metadata addresses are not valid website targets.
+    assert n("127.0.0.1") is None
+    assert n("http://10.0.0.4") is None
+    assert n("https://169.254.169.254/latest/meta-data") is None
 
 
 def test_website_feeder_enqueues_check_for_configured_url():

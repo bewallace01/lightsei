@@ -151,6 +151,40 @@ def test_audit_site_unreachable(fake_lightsei):
     assert r["findings"] == []
 
 
+def test_httpx_fetch_blocks_private_url_before_request(fake_lightsei, monkeypatch):
+    _, bot = fake_lightsei
+    fake_httpx = types.SimpleNamespace(request=MagicMock())
+    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+
+    r = bot._httpx_fetch("http://127.0.0.1:8000/admin")
+
+    assert r["status_code"] is None
+    assert "UnsafeURL" in r["error"]
+    fake_httpx.request.assert_not_called()
+
+
+def test_httpx_fetch_blocks_redirect_to_private_url(fake_lightsei, monkeypatch):
+    _, bot = fake_lightsei
+
+    class Resp:
+        status_code = 301
+        text = ""
+        headers = {"location": "https://169.254.169.254/latest/meta-data"}
+
+    fake_httpx = types.SimpleNamespace(request=MagicMock(return_value=Resp()))
+    monkeypatch.setitem(sys.modules, "httpx", fake_httpx)
+    monkeypatch.setattr(bot.socket, "getaddrinfo", MagicMock(
+        return_value=[(bot.socket.AF_INET, bot.socket.SOCK_STREAM, 0, "",
+                       ("93.184.216.34", 443))]
+    ))
+
+    r = bot._httpx_fetch("https://public.example/")
+
+    assert r["status_code"] is None
+    assert "UnsafeURL" in r["error"]
+    assert fake_httpx.request.call_count == 1
+
+
 def test_hermes_audit_text_has_score(fake_lightsei):
     _, bot = fake_lightsei
     r = bot.audit_site("https://x.com/", _fetcher(_BAD_PAGE))
