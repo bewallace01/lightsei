@@ -139,6 +139,37 @@ def test_pin_provider_only_falls_back_to_env_default_model(fake_polaris, monkeyp
     assert anth[0][2] == "claude-sonnet-4-6"
 
 
+def test_google_provider_without_model_uses_gemini_default(fake_polaris, monkeypatch):
+    fake, bot, anth, gem = fake_polaris
+    fake.get_agent_config.return_value = {
+        "provider": "google",
+        "model": None,
+    }
+    monkeypatch.setattr(bot, "GEMINI_MODEL", "gemini-2.0-flash-exp", raising=False)
+    monkeypatch.setattr(bot, "MODEL", "claude-opus-4-7", raising=False)
+
+    bot._call_llm("sys", {"docs": {"X.md": "x"}})
+    assert anth == []
+    assert len(gem) == 1
+    assert gem[0][2] == "gemini-2.0-flash-exp"
+
+
+def test_model_only_pin_ignores_model_and_uses_anthropic_default(
+    fake_polaris, monkeypatch,
+):
+    fake, bot, anth, gem = fake_polaris
+    fake.get_agent_config.return_value = {
+        "provider": None,
+        "model": "gemini-1.5-flash",
+    }
+    monkeypatch.setattr(bot, "MODEL", "claude-opus-4-7", raising=False)
+
+    bot._call_llm("sys", {"docs": {"X.md": "x"}})
+    assert len(anth) == 1
+    assert anth[0][2] == "claude-opus-4-7"
+    assert gem == []
+
+
 def test_get_agent_config_failure_falls_back_to_anthropic(fake_polaris, monkeypatch):
     fake, bot, anth, gem = fake_polaris
     fake.get_agent_config.side_effect = RuntimeError("backend down")
@@ -150,19 +181,18 @@ def test_get_agent_config_failure_falls_back_to_anthropic(fake_polaris, monkeypa
     assert gem == []
 
 
-def test_unknown_provider_raises_helpful_error(fake_polaris):
+def test_unknown_provider_falls_back_to_anthropic_default(fake_polaris, monkeypatch):
     fake, bot, anth, gem = fake_polaris
     fake.get_agent_config.return_value = {
         "provider": "groq",
         "model": "llama-3-70b",
     }
+    monkeypatch.setattr(bot, "MODEL", "claude-opus-4-7", raising=False)
 
-    with pytest.raises(RuntimeError) as exc:
-        bot._call_llm("sys", {"docs": {"X.md": "x"}})
-    msg = str(exc.value).lower()
-    assert "groq" in msg
-    assert "anthropic" in msg and "google" in msg
-    assert anth == [] and gem == []
+    bot._call_llm("sys", {"docs": {"X.md": "x"}})
+    assert len(anth) == 1
+    assert anth[0][2] == "claude-opus-4-7"
+    assert gem == []
 
 
 # ---------- _strip_schema_for_gemini ---------- #
