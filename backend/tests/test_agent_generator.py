@@ -618,3 +618,43 @@ def test_generate_records_cost_on_lightsei_system_run(client, alice, monkeypatch
     listed = client.get("/agents", headers=auth_headers(api_key)).json()
     names = [a["name"] for a in listed["agents"]]
     assert "lightsei.system" not in names
+
+
+def test_generate_respects_workspace_monthly_budget(client, alice, monkeypatch):
+    api_key = alice["api_key"]["plaintext"]
+    headers = auth_headers(api_key)
+    _set_anthropic_secret(client, api_key)
+
+    r = client.patch(
+        "/workspaces/me",
+        headers=headers,
+        json={"budget_usd_monthly": 0.01},
+    )
+    assert r.status_code == 200, r.text
+
+    calls = {"n": 0}
+
+    def fake_create(**kw):
+        calls["n"] += 1
+        return _fake_response(agent_name="vega")
+
+    fake = _FakeClient()
+    fake.messages.create = fake_create
+    monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
+
+    r = client.post(
+        "/workspaces/me/agents/generate",
+        headers=headers,
+        json={"description": "Build a code review bot."},
+    )
+    assert r.status_code == 200, r.text
+    assert calls["n"] == 1
+
+    r = client.post(
+        "/workspaces/me/agents/generate",
+        headers=headers,
+        json={"description": "Build a deploy bot."},
+    )
+    assert r.status_code == 429
+    assert "budget" in r.json()["detail"].lower()
+    assert calls["n"] == 1
