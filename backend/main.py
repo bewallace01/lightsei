@@ -1,5 +1,7 @@
 import hashlib
 import hmac
+from html import escape as _html_escape
+from html.parser import HTMLParser
 import json
 import os
 import secrets as _stdlib_secrets
@@ -2531,6 +2533,98 @@ def get_feed(
     return {"items": items}
 
 
+_SEO_BODY_ALLOWED_TAGS = {
+    "h2", "h3", "p", "ul", "ol", "li", "strong", "em", "b", "i", "a", "br",
+}
+_SEO_BODY_DROP_CONTENT_TAGS = {
+    "script", "style", "iframe", "object", "embed", "svg", "math", "template",
+}
+_SEO_BODY_ALLOWED_HREF_SCHEMES = {"", "http", "https", "mailto", "tel"}
+
+
+class _SeoBodySanitizer(HTMLParser):
+    """Small allow-list sanitizer for Spica's draft body HTML.
+
+    The model is instructed to return semantic body markup, but drafts are
+    untrusted event payloads by the time they reach the dashboard. Keep the
+    harmless formatting tags and strip executable markup/attributes.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.parts: list[str] = []
+        self._drop_depth = 0
+        self._open_tags: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        tag = tag.lower()
+        if tag in _SEO_BODY_DROP_CONTENT_TAGS:
+            self._drop_depth += 1
+            return
+        if self._drop_depth or tag not in _SEO_BODY_ALLOWED_TAGS:
+            return
+        if tag == "br":
+            self.parts.append("<br>")
+            return
+        attr_text = self._safe_attrs(tag, attrs)
+        self.parts.append(f"<{tag}{attr_text}>")
+        self._open_tags.append(tag)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> None:
+        if tag.lower() == "br" and not self._drop_depth:
+            self.parts.append("<br>")
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in _SEO_BODY_DROP_CONTENT_TAGS:
+            if self._drop_depth:
+                self._drop_depth -= 1
+            return
+        if self._drop_depth or tag == "br" or tag not in _SEO_BODY_ALLOWED_TAGS:
+            return
+        if tag not in self._open_tags:
+            return
+        while self._open_tags:
+            open_tag = self._open_tags.pop()
+            self.parts.append(f"</{open_tag}>")
+            if open_tag == tag:
+                break
+
+    def handle_data(self, data: str) -> None:
+        if not self._drop_depth:
+            self.parts.append(_html_escape(data, quote=False))
+
+    def _safe_attrs(self, tag: str, attrs: list[tuple[str, Optional[str]]]) -> str:
+        if tag != "a":
+            return ""
+        from urllib.parse import urlparse
+
+        for name, value in attrs:
+            if name.lower() != "href" or value is None:
+                continue
+            href = value.strip()
+            if not href:
+                continue
+            scheme = urlparse(href).scheme.lower()
+            if scheme not in _SEO_BODY_ALLOWED_HREF_SCHEMES:
+                continue
+            safe_href = _html_escape(href, quote=True)
+            return f' href="{safe_href}" rel="noopener noreferrer"'
+        return ""
+
+    def finish(self) -> str:
+        while self._open_tags:
+            self.parts.append(f"</{self._open_tags.pop()}>")
+        return "".join(self.parts)
+
+
+def _sanitize_seo_body_html(raw: Any) -> str:
+    parser = _SeoBodySanitizer()
+    parser.feed(str(raw or ""))
+    parser.close()
+    return parser.finish()
+
+
 @app.get("/workspaces/me/seo/drafts")
 def get_seo_drafts(
     limit: int = 20,
@@ -2568,7 +2662,7 @@ def get_seo_drafts(
                 "meta_description": page.get("meta_description"),
                 "slug": page.get("slug"),
                 "h1": page.get("h1"),
-                "body_html": page.get("body_html"),
+                "body_html": _sanitize_seo_body_html(page.get("body_html")),
             },
         })
     return {"drafts": drafts}
