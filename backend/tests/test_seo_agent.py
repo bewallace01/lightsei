@@ -269,3 +269,50 @@ def test_tick_empty_queue_returns_none(fake_lightsei):
     fake.claim_command.return_value = None
     assert bot.tick(fake, _fetcher("")) is None
     fake.emit.assert_not_called()
+
+
+# ---------- SPA / JavaScript-rendered detection ---------- #
+
+_SPA_SHELL = (
+    '<html lang="en"><head>'
+    '<title>The Restaurant Owners Guide — Tips, Tools and Resources</title>'
+    '<meta name="description" content="Everything restaurant owners need to run a better business, in one place for you.">'
+    '<meta name="viewport" content="width=device-width, initial-scale=1">'
+    '<link rel="canonical" href="https://x.com/">'
+    '<meta property="og:title" content="Guide">'
+    '</head><body><div id="root"></div>'
+    '<script src="/static/js/react.bundle.js"></script></body></html>'
+)
+
+
+def test_looks_like_spa(fake_lightsei):
+    _, bot = fake_lightsei
+    assert bot.looks_like_spa(_SPA_SHELL) is True
+    # A content-rich server-rendered page is not a SPA even with a root div.
+    rich = '<div id="root"></div>' + "<p>" + ("word " * 80) + "</p>"
+    assert bot.looks_like_spa(rich) is False
+
+
+def test_audit_spa_skips_body_checks_and_notes_it(fake_lightsei):
+    _, bot = fake_lightsei
+    findings = bot.audit_html(_SPA_SHELL, "https://x.com/")
+    checks = {f["check"] for f in findings}
+    # The honest note is present...
+    assert "javascript_rendered" in checks
+    # ...and the unreliable body-derived checks are NOT emitted (no false flags).
+    assert "h1" not in checks
+    assert "content_length" not in checks
+    assert "internal_links" not in checks
+    assert "image_alt" not in checks
+    # Head checks still run + stay accurate.
+    assert "title" in checks and "meta_description" in checks
+    by = {f["check"]: f for f in findings}
+    assert by["meta_description"]["status"] == "good"
+
+
+def test_audit_server_rendered_runs_body_checks(fake_lightsei):
+    _, bot = fake_lightsei
+    findings = bot.audit_html(_CLEAN_PAGE, "https://acme.com/")
+    checks = {f["check"] for f in findings}
+    assert "javascript_rendered" not in checks
+    assert "h1" in checks and "content_length" in checks
