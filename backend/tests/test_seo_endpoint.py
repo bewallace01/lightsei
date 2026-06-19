@@ -14,7 +14,14 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _add_draft(ws: str, *, keyword: str, slug: str, h1: str) -> None:
+def _add_draft(
+    ws: str,
+    *,
+    keyword: str,
+    slug: str,
+    h1: str,
+    body_html: str = "<h2>Why us</h2><p>We are great.</p>",
+) -> None:
     with session_scope() as s:
         s.add(Event(
             workspace_id=ws, run_id=str(uuid.uuid4()), agent_name="seo",
@@ -26,7 +33,7 @@ def _add_draft(ws: str, *, keyword: str, slug: str, h1: str) -> None:
                     "title": f"{h1} — Top Choice",
                     "meta_description": "A great page.",
                     "slug": slug, "h1": h1,
-                    "body_html": "<h2>Why us</h2><p>We are great.</p>",
+                    "body_html": body_html,
                 },
             },
         ))
@@ -61,6 +68,36 @@ def test_seo_drafts_isolated_per_workspace(client, alice, bob):
                    headers=auth_headers(bob["session_token"]))
     assert r.status_code == 200
     assert r.json()["drafts"] == []
+
+
+def test_seo_drafts_sanitizes_untrusted_body_html(client, alice):
+    ws = alice["workspace"]["id"]
+    _add_draft(
+        ws,
+        keyword="k",
+        slug="s",
+        h1="H",
+        body_html=(
+            '<h2 onclick="steal()">Safe heading</h2>'
+            '<script>window.evil = true</script>'
+            '<p><a href="javascript:alert(1)" onmouseover="steal()">bad</a>'
+            '<a href="/safe?x=1&y=2">safe</a></p>'
+            '<img src=x onerror="steal()">'
+        ),
+    )
+    r = client.get("/workspaces/me/seo/drafts",
+                   headers=auth_headers(alice["session_token"]))
+    assert r.status_code == 200, r.text
+    html = r.json()["drafts"][0]["page"]["body_html"]
+    assert "<h2>Safe heading</h2>" in html
+    assert '<a>bad</a>' in html
+    assert '<a href="/safe?x=1&amp;y=2" rel="noopener noreferrer">safe</a>' in html
+    assert "script" not in html
+    assert "onclick" not in html
+    assert "onmouseover" not in html
+    assert "onerror" not in html
+    assert "javascript:" not in html
+    assert "<img" not in html
 
 
 # ---------- generate trigger (POST /workspaces/me/seo/generate) ---------- #
