@@ -87,6 +87,20 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _SCRIPT_STYLE_RE = re.compile(
     r"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL
 )
+# An empty mount point a JS framework hydrates into (React/Vue/Next/etc.).
+_SPA_ROOT_RE = re.compile(r"""\bid\s*=\s*["'](?:root|app|__next|__nuxt)["']""", re.IGNORECASE)
+_SPA_LIB_RE = re.compile(r"\b(react|vue|angular|svelte|nuxt|/_next/)\b", re.IGNORECASE)
+
+
+def looks_like_spa(html: str) -> bool:
+    """Heuristic: the page ships almost no rendered content but loads a JS
+    framework — i.e. the body is client-rendered, so Spica (which reads raw
+    HTML, no JS) can't see the real H1 / content / links. The low-word gate
+    keeps content-rich server-rendered pages from tripping it."""
+    if _visible_word_count(html) >= 50:
+        return False
+    h = html or ""
+    return bool(_SPA_ROOT_RE.search(h)) or bool(_SPA_LIB_RE.search(h))
 
 
 def _attrs(s: str) -> dict[str, str]:
@@ -188,27 +202,43 @@ def audit_html(html: str, url: str) -> list[dict[str, Any]]:
     else:
         out.append(_finding("meta_description", "good", f"Meta description present ({len(desc)} chars).", ""))
 
-    # Exactly one H1.
-    h1s = [h.strip() for h in _H1_RE.findall(html)]
-    if len(h1s) == 0:
-        out.append(_finding("h1", "issue", "No <h1> heading.",
-                            "Add one clear H1 describing the page's topic."))
-    elif len(h1s) > 1:
-        out.append(_finding("h1", "warn", f"{len(h1s)} H1 headings.",
-                            "Use a single H1; demote the rest to H2/H3."))
-    else:
-        out.append(_finding("h1", "good", "One H1 heading.", ""))
+    # If the page is a JavaScript-rendered shell, Spica only sees the empty
+    # mount HTML, so the body-derived checks (H1, content, links, images)
+    # would false-flag. Note it once and skip those; the <head> checks are
+    # still accurate.
+    spa = looks_like_spa(html)
+    if spa:
+        out.append(_finding(
+            "javascript_rendered", "warn",
+            "Page renders its content with JavaScript; Spica reads the initial "
+            "HTML, so content checks (H1, length, links, images) can't be "
+            "verified from here.",
+            "Use server-side rendering or prerendering so search tools (and "
+            "some crawlers) see your content directly."))
 
-    # Image alt coverage.
-    imgs = _IMG_RE.findall(html)
-    if imgs:
-        missing = sum(1 for i in imgs if not _attrs(i).get("alt", "").strip())
-        if missing:
-            out.append(_finding("image_alt", "warn",
-                                f"{missing} of {len(imgs)} images missing alt text.",
-                                "Add descriptive alt text to every meaningful image."))
+    # Exactly one H1. (Body-rendered: skipped on JS-shell pages.)
+    if not spa:
+        h1s = [h.strip() for h in _H1_RE.findall(html)]
+        if len(h1s) == 0:
+            out.append(_finding("h1", "issue", "No <h1> heading.",
+                                "Add one clear H1 describing the page's topic."))
+        elif len(h1s) > 1:
+            out.append(_finding("h1", "warn", f"{len(h1s)} H1 headings.",
+                                "Use a single H1; demote the rest to H2/H3."))
         else:
-            out.append(_finding("image_alt", "good", f"All {len(imgs)} images have alt text.", ""))
+            out.append(_finding("h1", "good", "One H1 heading.", ""))
+
+    # Image alt coverage. (Body-rendered: skipped on JS-shell pages.)
+    if not spa:
+        imgs = _IMG_RE.findall(html)
+        if imgs:
+            missing = sum(1 for i in imgs if not _attrs(i).get("alt", "").strip())
+            if missing:
+                out.append(_finding("image_alt", "warn",
+                                    f"{missing} of {len(imgs)} images missing alt text.",
+                                    "Add descriptive alt text to every meaningful image."))
+            else:
+                out.append(_finding("image_alt", "good", f"All {len(imgs)} images have alt text.", ""))
 
     # Canonical tag.
     if not _has_canonical(html):
@@ -245,21 +275,23 @@ def audit_html(html: str, url: str) -> list[dict[str, Any]]:
     else:
         out.append(_finding("indexable", "good", "Page is indexable.", ""))
 
-    # Thin content.
-    words = _visible_word_count(html)
-    if words < 300:
-        out.append(_finding("content_length", "warn", f"Thin content ({words} words).",
-                            "Aim for 300+ words of useful, original content."))
-    else:
-        out.append(_finding("content_length", "good", f"Content length OK ({words} words).", ""))
+    # Thin content. (Body-rendered: skipped on JS-shell pages.)
+    if not spa:
+        words = _visible_word_count(html)
+        if words < 300:
+            out.append(_finding("content_length", "warn", f"Thin content ({words} words).",
+                                "Aim for 300+ words of useful, original content."))
+        else:
+            out.append(_finding("content_length", "good", f"Content length OK ({words} words).", ""))
 
-    # Internal linking.
-    links = _internal_link_count(html, url)
-    if links < 3:
-        out.append(_finding("internal_links", "warn", f"Few internal links ({links}).",
-                            "Link to related pages to spread authority and help navigation."))
-    else:
-        out.append(_finding("internal_links", "good", f"Internal links OK ({links}).", ""))
+    # Internal linking. (Body-rendered: skipped on JS-shell pages.)
+    if not spa:
+        links = _internal_link_count(html, url)
+        if links < 3:
+            out.append(_finding("internal_links", "warn", f"Few internal links ({links}).",
+                                "Link to related pages to spread authority and help navigation."))
+        else:
+            out.append(_finding("internal_links", "good", f"Internal links OK ({links}).", ""))
 
     return out
 
