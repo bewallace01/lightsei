@@ -383,8 +383,14 @@ def test_tick_expiring_cert_alerts_hermes_with_warning(fake_lightsei):
     fake, bot = fake_lightsei
     fake.claim_command.return_value = _cmd(payload={"url": "https://s.com/"})
     fetch = _fetcher({"https://s.com/": {"status_code": 200, "text": ""}})
-    bot.tick(fake, fetch, hermes_channel="alerts", cert_fetch=_cert_fetcher(7))
+    # tick() has no `now` override and computes days from the REAL clock, so
+    # build the cert relative to real now (not the fixed _NOW) or this flakes
+    # as wall-clock time drifts. 10 days out is unambiguously in the warn band
+    # (> CERT_URGENT_DAYS=3, <= CERT_WARN_DAYS=14).
+    na = (datetime.now(timezone.utc) + timedelta(days=10)).strftime("%b %d %H:%M:%S %Y GMT")
+    real_now_cert = lambda url: {"not_after": na, "error": None}
+    bot.tick(fake, fetch, hermes_channel="alerts", cert_fetch=real_now_cert)
     fake.send_command.assert_called_once()
     hp = fake.send_command.call_args.args[2]
     assert "certificate expires" in hp["text"]
-    assert hp["severity"] == "warning"  # 7d out -> not urgent
+    assert hp["severity"] == "warning"  # ~10d out -> not urgent
