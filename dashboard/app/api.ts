@@ -1917,6 +1917,44 @@ export async function fetchGithubConnection(): Promise<GithubConnectionState> {
   return (await authedJson("/workspaces/me/github/connection")) as GithubConnectionState;
 }
 
+// ---------- SEO assistant (Spica) ---------- //
+
+export interface SeoPage {
+  title: string;
+  meta_description: string;
+  slug: string;
+  h1: string;
+  body_html: string;
+}
+
+export interface SeoDraft {
+  id: string;
+  keyword: string | null;
+  created_at: string | null;
+  page: SeoPage;
+}
+
+export async function fetchSeoDrafts(): Promise<SeoDraft[]> {
+  const body = (await authedJson("/workspaces/me/seo/drafts")) as {
+    drafts: SeoDraft[];
+  };
+  return body.drafts;
+}
+
+export async function publishPage(input: {
+  repo_id: string;
+  path: string;
+  content: string;
+  title: string;
+  body?: string;
+}): Promise<{ pr_url: string; pr_number: number; branch: string }> {
+  return (await authedJson("/workspaces/me/github/publish-page", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  })) as { pr_url: string; pr_number: number; branch: string };
+}
+
 export async function addGithubRepo(input: {
   repo_owner: string;
   repo_name: string;
