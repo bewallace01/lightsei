@@ -61,3 +61,65 @@ def test_seo_drafts_isolated_per_workspace(client, alice, bob):
                    headers=auth_headers(bob["session_token"]))
     assert r.status_code == 200
     assert r.json()["drafts"] == []
+
+
+# ---------- generate trigger (POST /workspaces/me/seo/generate) ---------- #
+
+import seo_generate  # noqa: E402
+from sqlalchemy import text as _text  # noqa: E402
+
+
+def _seo_cmd_count(ws: str) -> int:
+    with session_scope() as s:
+        return s.execute(
+            _text("SELECT count(*) FROM commands WHERE workspace_id=:w "
+                  "AND agent_name='seo' AND kind='seo.generate_page'"),
+            {"w": ws},
+        ).scalar_one()
+
+
+def test_seo_generate_enqueues_command(client, alice):
+    ws = alice["workspace"]["id"]
+    h = auth_headers(alice["session_token"])
+    r = client.post("/workspaces/me/seo/generate", headers=h,
+                    json={"keyword": "emergency plumber austin", "page_type": "service"})
+    assert r.status_code == 200, r.text
+    assert r.json()["command_id"]
+    assert _seo_cmd_count(ws) == 1
+    with session_scope() as s:
+        row = s.execute(
+            _text("SELECT payload FROM commands WHERE workspace_id=:w "
+                  "AND kind='seo.generate_page'"), {"w": ws},
+        ).mappings().first()
+        assert row["payload"]["keyword"] == "emergency plumber austin"
+        assert row["payload"]["page_type"] == "service"
+
+
+def test_seo_generate_empty_keyword_400(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.post("/workspaces/me/seo/generate", headers=h, json={"keyword": "  "})
+    assert r.status_code == 400
+
+
+def test_seo_generate_unknown_page_type_defaults_landing(client, alice):
+    ws = alice["workspace"]["id"]
+    h = auth_headers(alice["session_token"])
+    client.post("/workspaces/me/seo/generate", headers=h,
+                json={"keyword": "k", "page_type": "not_a_type"})
+    with session_scope() as s:
+        row = s.execute(
+            _text("SELECT payload FROM commands WHERE workspace_id=:w "
+                  "AND kind='seo.generate_page'"), {"w": ws},
+        ).mappings().first()
+        assert row["payload"]["page_type"] == "landing"
+
+
+def test_seo_deployed_reflects_agent(client, alice):
+    ws = alice["workspace"]["id"]
+    with session_scope() as s:
+        assert seo_generate.seo_deployed(s, ws) is False
+        s.execute(_text(
+            "INSERT INTO agents (workspace_id, name, created_at, updated_at) "
+            "VALUES (:w, 'seo', now(), now())"), {"w": ws})
+    with session_scope() as s:
+        assert seo_generate.seo_deployed(s, ws) is True

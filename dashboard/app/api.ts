@@ -1955,6 +1955,18 @@ export async function publishPage(input: {
   })) as { pr_url: string; pr_number: number; branch: string };
 }
 
+export async function generateSeoPage(input: {
+  keyword: string;
+  page_type?: string;
+  business_context?: string;
+}): Promise<{ command_id: string; seo_assistant_deployed: boolean }> {
+  return (await authedJson("/workspaces/me/seo/generate", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  })) as { command_id: string; seo_assistant_deployed: boolean };
+}
+
 export async function addGithubRepo(input: {
   repo_owner: string;
   repo_name: string;
