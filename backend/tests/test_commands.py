@@ -53,6 +53,24 @@ def test_complete_with_error_marks_failed(client, alice):
     assert r.json()["error"] == "boom"
 
 
+def test_complete_requires_claimed_command(client, alice):
+    h = auth_headers(alice["api_key"]["plaintext"])
+    cmd = client.post(
+        "/agents/demo/commands",
+        json={"kind": "greet", "payload": {}},
+        headers=h,
+    ).json()
+
+    r = client.post(
+        f"/commands/{cmd['id']}/complete",
+        json={"result": {"greeting": "hi world"}},
+        headers=h,
+    )
+
+    assert r.status_code == 400
+    assert "claimed" in r.json()["detail"]
+
+
 def test_cancel_pending_command(client, alice):
     h = auth_headers(alice["api_key"]["plaintext"])
     cmd = client.post(

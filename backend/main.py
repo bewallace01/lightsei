@@ -11609,8 +11609,11 @@ def complete_command(
     cmd = session.get(Command, command_id)
     if cmd is None or cmd.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="command not found")
-    if cmd.status not in ("claimed", "pending"):
-        raise HTTPException(status_code=400, detail=f"command already {cmd.status}")
+    if cmd.status != "claimed":
+        raise HTTPException(
+            status_code=400,
+            detail=f"can only complete claimed commands; this one is {cmd.status}",
+        )
     if body.error:
         cmd.status = "failed"
         cmd.error = body.error
