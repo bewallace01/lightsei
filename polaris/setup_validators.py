@@ -53,11 +53,8 @@ POLARIS_PLAN_SCHEMA = {
         "text": {"type": "string"},
         "doc_hashes": {
             "type": "object",
-            "properties": {
-                "memory_md": {"type": "string"},
-                "tasks_md": {"type": "string"},
-            },
-            "required": ["memory_md", "tasks_md"],
+            "minProperties": 1,
+            "additionalProperties": {"type": "string"},
         },
         "model": {"type": "string"},
         "tokens_in": {"type": "integer"},
