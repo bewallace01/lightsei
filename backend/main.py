@@ -2574,6 +2574,38 @@ def get_seo_drafts(
     return {"drafts": drafts}
 
 
+class SeoGenerateIn(BaseModel):
+    keyword: str
+    page_type: Optional[str] = None
+    business_context: Optional[str] = None
+
+
+@app.post("/workspaces/me/seo/generate")
+def seo_generate_page(
+    body: SeoGenerateIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Ask Spica to draft a new SEO page for a target keyword. Enqueues a
+    seo.generate_page command; the assistant drafts it on the worker and the
+    draft shows up via GET /workspaces/me/seo/drafts. Async by design."""
+    import seo_generate
+
+    if not str(body.keyword or "").strip():
+        raise HTTPException(status_code=400, detail="keyword is required")
+
+    cmd_id = seo_generate.enqueue_generate_page(
+        session, workspace_id,
+        keyword=body.keyword, page_type=body.page_type,
+        business_context=body.business_context, now=utcnow(),
+    )
+    session.commit()
+    return {
+        "command_id": cmd_id,
+        "seo_assistant_deployed": seo_generate.seo_deployed(session, workspace_id),
+    }
+
+
 class AskQuestion(BaseModel):
     question: str
 

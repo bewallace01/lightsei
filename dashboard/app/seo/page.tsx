@@ -9,9 +9,82 @@ import {
   SeoDraft,
   fetchGithubConnection,
   fetchSeoDrafts,
+  generateSeoPage,
   handleAuthError,
   publishPage,
 } from "../api";
+
+const PAGE_TYPES = ["landing", "service", "location", "blog"];
+
+/** "Ask Spica to write a page" — enqueues a generate command, then nudges a
+ * refetch so the new draft appears below. */
+function GeneratePanel({ onRequested }: { onRequested: () => void }) {
+  const [keyword, setKeyword] = useState("");
+  const [pageType, setPageType] = useState("landing");
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  async function onGenerate() {
+    if (!keyword.trim()) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      const res = await generateSeoPage({ keyword: keyword.trim(), page_type: pageType });
+      setKeyword("");
+      setNote(
+        res.seo_assistant_deployed
+          ? "Spica is writing the page. It'll appear below in a moment."
+          : "Queued, but the SEO assistant isn't deployed yet — add it from your team page.",
+      );
+      // Give the worker a head start, then refresh drafts.
+      setTimeout(onRequested, 6000);
+      setTimeout(onRequested, 15000);
+    } catch (e) {
+      setNote(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-gray-200 p-5">
+      <div className="text-sm font-medium text-gray-900">Write a new SEO page</div>
+      <div className="text-xs text-gray-500 mt-0.5">
+        Give Spica a target keyword and it drafts a full, optimized page.
+      </div>
+      <div className="mt-3 flex flex-col sm:flex-row gap-2">
+        <input
+          value={keyword}
+          onChange={(e) => setKeyword(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && keyword.trim()) onGenerate();
+          }}
+          placeholder="e.g. emergency plumber in Austin"
+          className="flex-1 text-sm rounded-md ring-1 ring-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-600"
+        />
+        <select
+          value={pageType}
+          onChange={(e) => setPageType(e.target.value)}
+          className="text-sm rounded-md ring-1 ring-gray-300 px-2 py-2 focus:outline-none focus:ring-2 focus:ring-accent-600"
+        >
+          {PAGE_TYPES.map((t) => (
+            <option key={t} value={t}>
+              {t}
+            </option>
+          ))}
+        </select>
+        <button
+          onClick={onGenerate}
+          disabled={busy || !keyword.trim()}
+          className="text-sm px-4 py-2 rounded-md bg-accent-600 text-white hover:bg-accent-700 disabled:opacity-50"
+        >
+          {busy ? "Sending…" : "Write the page"}
+        </button>
+      </div>
+      {note && <p className="mt-2 text-xs text-gray-500">{note}</p>}
+    </div>
+  );
+}
 
 /** A complete, deployable HTML page built from Spica's draft fields. The
  * owner can edit the path/format for their framework before publishing. */
@@ -163,6 +236,14 @@ export default function SeoPage() {
   const [githubConnected, setGithubConnected] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  async function refetchDrafts() {
+    try {
+      setDrafts(await fetchSeoDrafts());
+    } catch {
+      /* best-effort refresh */
+    }
+  }
+
   useEffect(() => {
     let alive = true;
     (async () => {
@@ -196,6 +277,10 @@ export default function SeoPage() {
           {error}
         </div>
       )}
+
+      <div className="mt-6">
+        <GeneratePanel onRequested={refetchDrafts} />
+      </div>
 
       {githubConnected === false && (
         <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
