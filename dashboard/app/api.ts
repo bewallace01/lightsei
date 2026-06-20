@@ -2041,6 +2041,36 @@ export async function generateSeoPage(input: {
   })) as { command_id: string; seo_assistant_deployed: boolean };
 }
 
+// ---------- Design assistant (Capella) ---------- //
+
+export type DesignContentType = "page" | "email" | "social" | "generic";
+
+export interface DesignResult {
+  status: "pending" | "formatted" | "failed";
+  output?: string;
+  content_type?: string;
+  error?: string;
+}
+
+export async function designFormat(input: {
+  content: string;
+  content_type?: DesignContentType;
+  accent_color?: string;
+  instructions?: string;
+}): Promise<{ command_id: string; design_assistant_deployed: boolean }> {
+  return (await authedJson("/workspaces/me/design/format", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  })) as { command_id: string; design_assistant_deployed: boolean };
+}
+
+export async function fetchDesignResult(commandId: string): Promise<DesignResult> {
+  return (await authedJson(
+    `/workspaces/me/design/format/${encodeURIComponent(commandId)}`,
+  )) as DesignResult;
+}
+
 export interface SeoSuggestion {
   keyword: string;
   page_type: string;

@@ -152,17 +152,21 @@ function ConnectForm({
           className="w-full px-3 py-2 border border-gray-300 rounded-md text-sm font-mono focus:outline-none focus:ring-2 focus:ring-accent-500"
         />
         <p className="mt-1 text-xs text-gray-500">
-          Fine-grained PAT with <code className="font-mono">Contents: read</code>{" "}
-          on this repo. We validate the token against GitHub before
-          storing — wrong tokens fail here, not at first webhook.
+          To <strong>publish pages</strong>, the token needs write access: a
+          classic token with the <code className="font-mono">repo</code> scope,
+          or a fine-grained PAT with{" "}
+          <code className="font-mono">Contents: Read and write</code> +{" "}
+          <code className="font-mono">Pull requests: Read and write</code> on
+          this repo. (Read-only is enough only for watching a repo, not
+          publishing.) We validate the token against GitHub before storing.
           See{" "}
           <a
-            href="https://github.com/settings/personal-access-tokens/new"
+            href="https://github.com/settings/tokens/new"
             target="_blank"
             rel="noreferrer"
             className="text-accent-700 hover:underline"
           >
-            github.com/settings/personal-access-tokens/new
+            github.com/settings/tokens/new
           </a>
           .
         </p>

@@ -11,6 +11,8 @@ import {
   SeoCrawl,
   SeoDraft,
   SeoSuggestion,
+  designFormat,
+  fetchDesignResult,
   fetchGithubConnection,
   fetchSeoAudit,
   fetchSeoCrawl,
@@ -371,6 +373,25 @@ type PublishState = {
   error?: string;
 };
 
+/** A plain full-HTML document from the draft's fields — the input Capella
+ * restyles when polishing. */
+function basicPageHtml(d: SeoDraft): string {
+  const p = d.page;
+  const esc = (s: string) =>
+    (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  return [
+    "<!doctype html>",
+    '<html lang="en"><head><meta charset="utf-8">',
+    '<meta name="viewport" content="width=device-width, initial-scale=1">',
+    `<title>${esc(p.title)}</title>`,
+    `<meta name="description" content="${esc(p.meta_description)}">`,
+    "</head><body>",
+    `<h1>${esc(p.h1)}</h1>`,
+    p.body_html || "",
+    "</body></html>",
+  ].join("\n");
+}
+
 function DraftCard({
   draft,
   repos,
@@ -387,11 +408,58 @@ function DraftCard({
     busy: false,
   });
   const [open, setOpen] = useState(false);
+  // Capella polish: the styled full-HTML version, when produced.
+  const [polished, setPolished] = useState<string | null>(null);
+  const [polishBusy, setPolishBusy] = useState(false);
+  const [polishNote, setPolishNote] = useState<string | null>(null);
 
   function onFormat(format: PageFormat) {
     const def = FORMATS.find((f) => f.value === format)!.path(slug);
     // Re-default the path when the owner hasn't hand-edited it.
     setSt((s) => ({ ...s, format, path: s.pathEdited ? s.path : def }));
+  }
+
+  async function onPolish() {
+    setPolishBusy(true);
+    setPolishNote(null);
+    try {
+      const { command_id, design_assistant_deployed } = await designFormat({
+        content: basicPageHtml(draft),
+        content_type: "page",
+      });
+      if (!design_assistant_deployed) {
+        setPolishNote("Add the Design assistant (Capella) to your team to polish pages.");
+        setPolishBusy(false);
+        return;
+      }
+      // Poll for the styled result (Capella runs on the worker).
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 2500));
+        const res = await fetchDesignResult(command_id);
+        if (res.status === "formatted" && res.output) {
+          setPolished(res.output);
+          // A polished page is a full HTML doc -> publish as HTML.
+          setSt((s) => ({
+            ...s,
+            format: "html",
+            path: s.pathEdited ? s.path : FORMATS[0].path(slug),
+          }));
+          setPolishNote("Polished. Publishing will use the styled version.");
+          setPolishBusy(false);
+          return;
+        }
+        if (res.status === "failed") {
+          setPolishNote("Capella couldn't polish this page. Try again.");
+          setPolishBusy(false);
+          return;
+        }
+      }
+      setPolishNote("Still working — check back in a moment.");
+      setPolishBusy(false);
+    } catch (e) {
+      setPolishNote(String(e));
+      setPolishBusy(false);
+    }
   }
 
   async function onPublish() {
@@ -401,11 +469,15 @@ function DraftCard({
       const res = await publishPage({
         repo_id: st.repoId,
         title: draft.page.title || draft.page.h1 || "New page",
-        page: draft.page,
-        format: st.format,
-        // Send the path only if the owner customized it; otherwise let the
-        // backend use the format's default.
-        ...(st.pathEdited ? { path: st.path.trim() } : {}),
+        // Use Capella's styled HTML if polished; otherwise the backend
+        // renders the chosen format from the structured page.
+        ...(polished
+          ? { content: polished, path: st.path.trim() || FORMATS[0].path(slug) }
+          : {
+              page: draft.page,
+              format: st.format,
+              ...(st.pathEdited ? { path: st.path.trim() } : {}),
+            }),
       });
       setSt((s) => ({ ...s, busy: false, result: { pr_url: res.pr_url, branch: res.branch } }));
     } catch (e) {
@@ -428,13 +500,29 @@ function DraftCard({
         dangerouslySetInnerHTML={{ __html: draft.page.body_html || "" }}
       />
 
+      {polished && (
+        <div className="mt-3 text-xs text-emerald-700 flex items-center gap-1">
+          🎨 Polished by Capella — publishing uses the styled version.
+        </div>
+      )}
       {!open ? (
-        <button
-          onClick={() => setOpen(true)}
-          className="mt-4 text-sm px-3 py-1.5 rounded-md bg-accent-600 text-white hover:bg-accent-700"
-        >
-          Publish to my site →
-        </button>
+        <div className="mt-4 flex items-center gap-2">
+          <button
+            onClick={() => setOpen(true)}
+            className="text-sm px-3 py-1.5 rounded-md bg-accent-600 text-white hover:bg-accent-700"
+          >
+            Publish to my site →
+          </button>
+          <button
+            onClick={onPolish}
+            disabled={polishBusy}
+            className="text-sm px-3 py-1.5 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+            title="Have Capella restyle this page so it looks good"
+          >
+            {polishBusy ? "Polishing…" : polished ? "Re-polish" : "🎨 Polish design"}
+          </button>
+          {polishNote && <span className="text-xs text-gray-500">{polishNote}</span>}
+        </div>
       ) : st.result ? (
         <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
           ✅ Opened a pull request on <span className="font-mono">{st.result.branch}</span>.{" "}
