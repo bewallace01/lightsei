@@ -2747,6 +2747,60 @@ def get_seo_crawl(
     }
 
 
+class SeoSuggestIn(BaseModel):
+    business_context: Optional[str] = None
+    count: Optional[int] = None
+
+
+@app.post("/workspaces/me/seo/suggestions")
+def seo_run_suggestions(
+    body: SeoSuggestIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Ask Spica for new-page ideas. Pulls the latest crawl's page list so
+    suggestions avoid duplicating existing pages. Enqueues seo.suggest;
+    results surface via GET /workspaces/me/seo/suggestions."""
+    import seo_generate
+
+    existing = seo_generate.latest_crawl_pages(session, workspace_id)
+    cmd_id = seo_generate.enqueue_suggest(
+        session, workspace_id, business_context=body.business_context,
+        existing_pages=existing, count=body.count or 5, now=utcnow())
+    session.commit()
+    return {
+        "command_id": cmd_id,
+        "seo_assistant_deployed": seo_generate.seo_deployed(session, workspace_id),
+    }
+
+
+@app.get("/workspaces/me/seo/suggestions")
+def get_seo_suggestions(
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """The most recent page-idea suggestions (seo.suggestions) for this
+    workspace."""
+    row = session.execute(
+        text(
+            """
+            SELECT payload, timestamp FROM events
+             WHERE workspace_id = :ws AND kind = 'seo.suggestions'
+             ORDER BY timestamp DESC LIMIT 1
+            """
+        ),
+        {"ws": workspace_id},
+    ).mappings().first()
+    if row is None:
+        return {"suggestions": [], "suggested_at": None}
+    p = row["payload"] or {}
+    ts = row["timestamp"]
+    return {
+        "suggestions": p.get("suggestions") or [],
+        "suggested_at": ts.isoformat() if hasattr(ts, "isoformat") else ts,
+    }
+
+
 class AskQuestion(BaseModel):
     question: str
 

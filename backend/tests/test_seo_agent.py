@@ -425,3 +425,69 @@ def test_tick_crawl_emits_complete(fake_lightsei):
     bot.tick(fake, _fetcher(_PAGE_WITH_LINKS))
     assert fake.emit.call_args.args[0] == "seo.crawl_complete"
     assert fake.emit.call_args.args[1]["pages_audited"] >= 1
+
+
+# ---------- page-idea suggestions ---------- #
+
+
+def test_build_suggest_prompt_uses_existing_pages(fake_lightsei):
+    _, bot = fake_lightsei
+    system, user = bot.build_suggest_prompt({
+        "business_context": "Acme Plumbing in Austin",
+        "existing_pages": ["https://acme.com/services", "https://acme.com/about"],
+        "count": 3})
+    assert "Acme Plumbing" in user
+    assert "do NOT duplicate" in user
+    assert "/services" in user
+    assert "3" in user
+
+
+def test_parse_suggestions_valid(fake_lightsei):
+    _, bot = fake_lightsei
+    js = ('{"suggestions":[{"keyword":"emergency plumber austin","page_type":"service",'
+          '"rationale":"high intent"},{"keyword":"water heater repair","page_type":"blog",'
+          '"rationale":"common search"}]}')
+    out = bot._parse_suggestions(js)
+    assert len(out) == 2
+    assert out[0]["keyword"] == "emergency plumber austin"
+    assert out[0]["page_type"] == "service"
+
+
+def test_parse_suggestions_coerces_bad_page_type(fake_lightsei):
+    _, bot = fake_lightsei
+    out = bot._parse_suggestions('{"suggestions":[{"keyword":"k","page_type":"weird"}]}')
+    assert out[0]["page_type"] == "landing"
+
+
+def test_parse_suggestions_empty_raises(fake_lightsei):
+    _, bot = fake_lightsei
+    import pytest
+    with pytest.raises(bot.SEOError):
+        bot._parse_suggestions('{"suggestions":[]}')
+
+
+def test_generate_suggestions_with_fake_factory(fake_lightsei):
+    _, bot = fake_lightsei
+    js = '{"suggestions":[{"keyword":"k1","page_type":"service","rationale":"r"}]}'
+    out = bot.generate_suggestions({"business_context": "x"},
+                                   factory=_fake_factory(js), api_key="sk")
+    assert out["suggestions"][0]["keyword"] == "k1"
+    assert out["input_tokens"] == 10
+
+
+def test_tick_suggest_emits(fake_lightsei, monkeypatch):
+    fake, bot = fake_lightsei
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    js = '{"suggestions":[{"keyword":"k","page_type":"blog","rationale":"r"}]}'
+    fake.claim_command.return_value = _cmd(kind="seo.suggest", payload={"business_context": "x"})
+    bot.tick(fake, _fetcher(""), factory=_fake_factory(js))
+    assert fake.emit.call_args.args[0] == "seo.suggestions"
+    assert fake.emit.call_args.args[1]["suggestions"][0]["keyword"] == "k"
+
+
+def test_tick_suggest_without_key_crashes_cleanly(fake_lightsei, monkeypatch):
+    fake, bot = fake_lightsei
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    fake.claim_command.return_value = _cmd(kind="seo.suggest", payload={})
+    bot.tick(fake, _fetcher(""))
+    assert fake.emit.call_args.args[0] == "seo.crash"

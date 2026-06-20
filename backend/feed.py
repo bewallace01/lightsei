@@ -26,6 +26,7 @@ _FEED_KINDS = {
     "seo.audit_complete",
     "seo.crawl_complete",
     "seo.page_drafted",
+    "seo.suggestions",
 }
 _CRASH_KINDS = {
     "reputation.crash", "lead.crash", "inbox.crash",
@@ -152,5 +153,11 @@ def _render(kind: str, p: dict[str, Any]) -> tuple[str, Optional[str]]:
     if kind == "seo.page_drafted":
         page = p.get("page") or {}
         return f"New SEO page drafted: {page.get('h1') or p.get('keyword')}", _truncate(page.get("meta_description"))
+
+    if kind == "seo.suggestions":
+        sugg = p.get("suggestions") or []
+        n = len(sugg)
+        first = sugg[0].get("keyword") if sugg else None
+        return f"{n} SEO page idea(s)", _truncate(first)
 
     return kind, None

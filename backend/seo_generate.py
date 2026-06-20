@@ -155,6 +155,58 @@ def enqueue_crawl(
     return cmd_id
 
 
+SUGGEST_KIND = "seo.suggest"
+
+
+def latest_crawl_pages(session: Session, workspace_id: str) -> list[str]:
+    """URLs from the most recent crawl (so suggestions avoid duplicating
+    pages the site already has). Empty if no crawl yet."""
+    row = session.execute(
+        text("SELECT payload FROM events WHERE workspace_id = :ws "
+             "AND kind = 'seo.crawl_complete' ORDER BY timestamp DESC LIMIT 1"),
+        {"ws": workspace_id},
+    ).first()
+    if row is None:
+        return []
+    pages = (row[0] or {}).get("pages") or []
+    return [p.get("url") for p in pages if p.get("url")]
+
+
+def enqueue_suggest(
+    session: Session, workspace_id: str, *, business_context: Optional[str],
+    existing_pages: list[str], count: int, now: datetime
+) -> str:
+    """Enqueue a seo.suggest (LLM page-idea suggestions). Returns the command
+    id. Does not commit."""
+    cmd_id = str(uuid.uuid4())
+    payload: dict = {"source": AUDIT_SOURCE, "count": max(1, min(int(count), 10))}
+    bc = (business_context or "").strip()[:_MAX_CONTEXT_LEN]
+    if bc:
+        payload["business_context"] = bc
+    if existing_pages:
+        payload["existing_pages"] = existing_pages[:30]
+    session.execute(
+        text(
+            """
+            INSERT INTO commands (
+                id, workspace_id, agent_name, kind, payload, status,
+                approval_state, approved_at, created_at, expires_at,
+                dispatch_chain_id, dispatch_depth
+            ) VALUES (
+                :id, :ws, :agent, :kind, CAST(:payload AS JSONB), 'pending',
+                'auto_approved', :now, :now, :expires, :chain, 0
+            )
+            """
+        ),
+        {
+            "id": cmd_id, "ws": workspace_id, "agent": SEO_AGENT,
+            "kind": SUGGEST_KIND, "payload": json.dumps(payload),
+            "now": now, "expires": now + _COMMAND_TTL, "chain": cmd_id,
+        },
+    )
+    return cmd_id
+
+
 def seo_deployed(session: Session, workspace_id: str) -> bool:
     """Whether the SEO assistant exists for this workspace (so the dashboard
     can prompt to add it before the generate command sits unhandled)."""

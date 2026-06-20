@@ -15,7 +15,7 @@ Part of the roster. Two jobs:
 
 Command kinds: `seo.audit`, `seo.generate_page`.
 Events: `seo.audit_complete`, `seo.crawl_complete`, `seo.page_drafted`,
-`seo.crash`.
+`seo.suggestions`, `seo.crash`.
 Downstream: one `hermes.post` (audit found issues / a draft is ready).
 
 The audit half needs no API key (pure HTTP + parsing). The generate half is
@@ -607,6 +607,113 @@ def generate_page(
     }
 
 
+# ---------- Page-idea suggestions (LLM) ---------- #
+
+_SUGGEST_SYSTEM = (
+    "You are an SEO strategist on a small business's team. You recommend new "
+    "pages the business should create to win search traffic: high-intent, "
+    "realistic topics a real customer would search. No fluff, no keyword "
+    "stuffing, no em dashes. You return ONLY a single JSON object."
+)
+
+
+def build_suggest_prompt(
+    payload: dict[str, Any], *, industry: Optional[str] = None
+) -> tuple[str, str]:
+    """Return (system, user) for suggesting pages to create. Pure + testable.
+    `existing_pages` (a list of URLs/titles already on the site) steers the
+    model away from duplicating what's there."""
+    if industry is None:
+        industry = os.environ.get("LIGHTSEI_BUSINESS_INDUSTRY")
+    business = str(payload.get("business_context") or payload.get("business") or "").strip()
+    existing = payload.get("existing_pages") or []
+    try:
+        count = int(payload.get("count") or 5)
+    except (TypeError, ValueError):
+        count = 5
+    count = max(1, min(count, 10))
+
+    parts = [f"Suggest {count} new pages this business should create for SEO."]
+    if business:
+        parts.append(f"Business context: {business}.")
+    if existing:
+        listed = "\n".join(f"- {p}" for p in list(existing)[:30])
+        parts.append("Pages the site already has (do NOT duplicate these):\n" + listed)
+    parts.append(
+        "Return a JSON object with a single field \"suggestions\": an array of "
+        f"{count} objects, each with \"keyword\" (the search phrase to target), "
+        "\"page_type\" (one of service, location, blog, landing), and "
+        "\"rationale\" (one short sentence on why it's worth creating)."
+    )
+    return _SUGGEST_SYSTEM + _industry_clause(industry), "\n\n".join(parts)
+
+
+_SUGGEST_TYPES = {"service", "location", "blog", "landing"}
+
+
+def _parse_suggestions(text: str) -> list[dict[str, Any]]:
+    """Tolerant parse of the suggestions JSON. Returns a clean list of
+    {keyword, page_type, rationale}; raises SEOError if unusable."""
+    text = (text or "").strip()
+    start = text.find("{")
+    end = text.rfind("}")
+    if start == -1 or end == -1 or end <= start:
+        raise SEOError("model did not return a JSON object")
+    try:
+        obj = json.loads(text[start:end + 1])
+    except json.JSONDecodeError as e:
+        raise SEOError(f"model returned invalid JSON: {e}")
+    raw = obj.get("suggestions")
+    if not isinstance(raw, list) or not raw:
+        raise SEOError("no suggestions in response")
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        kw = str(item.get("keyword") or "").strip()
+        if not kw:
+            continue
+        pt = str(item.get("page_type") or "landing").strip().lower()
+        if pt not in _SUGGEST_TYPES:
+            pt = "landing"
+        out.append({"keyword": kw, "page_type": pt,
+                    "rationale": str(item.get("rationale") or "").strip()})
+    if not out:
+        raise SEOError("no usable suggestions in response")
+    return out
+
+
+def generate_suggestions(
+    payload: dict[str, Any],
+    *,
+    factory: ClientFactory,
+    api_key: str,
+    model: str = MODEL,
+    max_tokens: int = MAX_TOKENS,
+) -> dict[str, Any]:
+    """Call Claude for page-idea suggestions. Returns {suggestions, tokens}."""
+    system, user = build_suggest_prompt(payload)
+    client = factory(api_key)
+    resp = client.messages.create(
+        model=model, max_tokens=max_tokens, system=system,
+        messages=[{"role": "user", "content": user}],
+    )
+    text = "".join(
+        getattr(b, "text", "")
+        for b in (getattr(resp, "content", None) or [])
+        if getattr(b, "type", None) == "text"
+    ).strip()
+    if not text:
+        raise SEOError("model returned no text")
+    suggestions = _parse_suggestions(text)
+    usage = getattr(resp, "usage", None)
+    return {
+        "suggestions": suggestions,
+        "input_tokens": getattr(usage, "input_tokens", 0) if usage else 0,
+        "output_tokens": getattr(usage, "output_tokens", 0) if usage else 0,
+    }
+
+
 # ---------- Production fetcher ---------- #
 
 
@@ -667,6 +774,40 @@ def _handle_crawl(cmd_id, payload, fetch, run_id, hermes_channel):
         except Exception as e:
             print(f"seo: hermes dispatch failed: {e}", flush=True)
     lightsei.complete_command(cmd_id, result=report)
+
+
+def _handle_suggest(cmd_id, payload, run_id, hermes_channel, factory, model, max_tokens):
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        lightsei.emit("seo.crash", {"command_id": cmd_id,
+                                    "error": "ANTHROPIC_API_KEY not set on this workspace"}, run_id=run_id)
+        lightsei.complete_command(cmd_id, error="ANTHROPIC_API_KEY not set on this workspace; add it in account settings")
+        return
+    try:
+        result = generate_suggestions(payload, factory=factory, api_key=api_key, model=model, max_tokens=max_tokens)
+    except Exception as e:
+        lightsei.emit("seo.crash", {"command_id": cmd_id, "error": repr(e),
+                                    "traceback": traceback.format_exc()}, run_id=run_id)
+        lightsei.complete_command(cmd_id, error=repr(e))
+        return
+    outcome = {
+        "command_id": cmd_id,
+        "suggestions": result["suggestions"],
+        "input_tokens": result["input_tokens"],
+        "output_tokens": result["output_tokens"],
+        "model": model,
+        "severity": "info",
+    }
+    lightsei.emit("seo.suggestions", outcome, run_id=run_id)
+    try:
+        n = len(result["suggestions"])
+        _send_with_source("hermes", "hermes.post",
+                          {"channel": hermes_channel,
+                           "text": f"\U0001f4a1 SEO: {n} new page idea{'s' if n != 1 else ''} for your site",
+                           "severity": "info"}, source_agent="seo")
+    except Exception as e:
+        print(f"seo: hermes dispatch failed: {e}", flush=True)
+    lightsei.complete_command(cmd_id, result=outcome)
 
 
 def _handle_generate(cmd_id, payload, run_id, hermes_channel, factory, model, max_tokens):
@@ -736,6 +877,8 @@ def tick(
             _handle_crawl(cmd_id, payload, fetch, run_id, hermes_channel)
         elif kind == "seo.generate_page":
             _handle_generate(cmd_id, payload, run_id, hermes_channel, factory, model, max_tokens)
+        elif kind == "seo.suggest":
+            _handle_suggest(cmd_id, payload, run_id, hermes_channel, factory, model, max_tokens)
         else:
             lightsei.complete_command(cmd_id, error=f"seo does not handle kind={kind!r}")
     except Exception as e:
