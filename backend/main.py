@@ -2606,6 +2606,79 @@ def seo_generate_page(
     }
 
 
+@app.get("/workspaces/me/seo/audit")
+def get_seo_audit(
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """The most recent SEO audit (seo.audit_complete) for this workspace,
+    plus the site URL the daily audit feeder is pointed at. Powers the
+    'site health' panel on /seo."""
+    import seo_generate
+
+    row = session.execute(
+        text(
+            """
+            SELECT payload, timestamp FROM events
+             WHERE workspace_id = :ws AND kind = 'seo.audit_complete'
+             ORDER BY timestamp DESC LIMIT 1
+            """
+        ),
+        {"ws": workspace_id},
+    ).mappings().first()
+
+    latest = None
+    if row is not None:
+        p = row["payload"] or {}
+        ts = row["timestamp"]
+        latest = {
+            "url": p.get("url"),
+            "reachable": p.get("reachable"),
+            "score": p.get("score"),
+            "issues": p.get("issues"),
+            "warnings": p.get("warnings"),
+            "findings": p.get("findings") or [],
+            "checked_at": ts.isoformat() if hasattr(ts, "isoformat") else ts,
+        }
+    return {
+        "configured_url": seo_generate.configured_audit_url(session, workspace_id),
+        "latest": latest,
+    }
+
+
+class SeoAuditIn(BaseModel):
+    url: Optional[str] = None
+
+
+@app.post("/workspaces/me/seo/audit")
+def seo_run_audit(
+    body: SeoAuditIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Run an SEO audit now. Uses the provided URL, or the configured audit
+    URL if omitted. Enqueues a seo.audit; the result surfaces via
+    GET /workspaces/me/seo/audit. Async by design."""
+    import feeder
+    import seo_generate
+
+    url = feeder.normalize_website_url(
+        body.url or seo_generate.configured_audit_url(session, workspace_id)
+    )
+    if not url:
+        raise HTTPException(
+            status_code=400,
+            detail="no site URL — pass one or set the SEO audit site in feeder settings",
+        )
+    cmd_id = seo_generate.enqueue_audit(session, workspace_id, url=url, now=utcnow())
+    session.commit()
+    return {
+        "command_id": cmd_id,
+        "url": url,
+        "seo_assistant_deployed": seo_generate.seo_deployed(session, workspace_id),
+    }
+
+
 class AskQuestion(BaseModel):
     question: str
 
