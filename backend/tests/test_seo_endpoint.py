@@ -250,3 +250,52 @@ def test_seo_crawl_view_empty(client, alice):
     h = auth_headers(alice["session_token"])
     r = client.get("/workspaces/me/seo/crawl", headers=h)
     assert r.json()["latest"] is None
+
+
+# ---------- page-idea suggestions ---------- #
+
+
+def test_seo_suggestions_run_enqueues(client, alice):
+    ws = alice["workspace"]["id"]
+    h = auth_headers(alice["session_token"])
+    r = client.post("/workspaces/me/seo/suggestions", headers=h,
+                    json={"business_context": "Acme Plumbing", "count": 4})
+    assert r.status_code == 200, r.text
+    assert r.json()["command_id"]
+    with session_scope() as s:
+        row = s.execute(_text("SELECT payload FROM commands WHERE workspace_id=:w "
+                              "AND kind='seo.suggest'"), {"w": ws}).mappings().first()
+        assert row["payload"]["count"] == 4
+        assert row["payload"]["business_context"] == "Acme Plumbing"
+
+
+def test_seo_suggestions_pulls_crawl_pages(client, alice):
+    ws = alice["workspace"]["id"]
+    _add_crawl(ws, pages=2, avg=80)  # adds a crawl with one page url x.com/
+    h = auth_headers(alice["session_token"])
+    client.post("/workspaces/me/seo/suggestions", headers=h, json={})
+    with session_scope() as s:
+        row = s.execute(_text("SELECT payload FROM commands WHERE workspace_id=:w "
+                              "AND kind='seo.suggest'"), {"w": ws}).mappings().first()
+        assert "https://x.com/" in (row["payload"].get("existing_pages") or [])
+
+
+def test_seo_suggestions_view_latest(client, alice):
+    ws = alice["workspace"]["id"]
+    with session_scope() as s:
+        s.add(Event(workspace_id=ws, run_id=str(uuid.uuid4()), agent_name="seo",
+                    kind="seo.suggestions", timestamp=_now(),
+                    payload={"suggestions": [
+                        {"keyword": "emergency plumber austin", "page_type": "service",
+                         "rationale": "high intent"}]}))
+    h = auth_headers(alice["session_token"])
+    r = client.get("/workspaces/me/seo/suggestions", headers=h)
+    assert r.status_code == 200, r.text
+    s = r.json()["suggestions"]
+    assert len(s) == 1 and s[0]["keyword"] == "emergency plumber austin"
+
+
+def test_seo_suggestions_view_empty(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.get("/workspaces/me/seo/suggestions", headers=h)
+    assert r.json()["suggestions"] == []

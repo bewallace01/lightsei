@@ -2041,6 +2041,29 @@ export async function generateSeoPage(input: {
   })) as { command_id: string; seo_assistant_deployed: boolean };
 }
 
+export interface SeoSuggestion {
+  keyword: string;
+  page_type: string;
+  rationale: string;
+}
+
+export async function fetchSeoSuggestions(): Promise<SeoSuggestion[]> {
+  const body = (await authedJson("/workspaces/me/seo/suggestions")) as {
+    suggestions: SeoSuggestion[];
+  };
+  return body.suggestions;
+}
+
+export async function runSeoSuggestions(
+  businessContext?: string,
+): Promise<{ command_id: string; seo_assistant_deployed: boolean }> {
+  return (await authedJson("/workspaces/me/seo/suggestions", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(businessContext ? { business_context: businessContext } : {}),
+  })) as { command_id: string; seo_assistant_deployed: boolean };
+}
+
 export async function addGithubRepo(input: {
   repo_owner: string;
   repo_name: string;

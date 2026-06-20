@@ -10,16 +10,104 @@ import {
   SeoAuditState,
   SeoCrawl,
   SeoDraft,
+  SeoSuggestion,
   fetchGithubConnection,
   fetchSeoAudit,
   fetchSeoCrawl,
   fetchSeoDrafts,
+  fetchSeoSuggestions,
   generateSeoPage,
   handleAuthError,
   publishPage,
   runSeoAudit,
   runSeoCrawl,
+  runSeoSuggestions,
 } from "../api";
+
+/** "Page ideas" — Spica suggests new pages worth creating, each with a
+ * one-click "Draft this" that hands the keyword to the generator. */
+function IdeasPanel({
+  initial,
+  onDraft,
+}: {
+  initial: SeoSuggestion[];
+  onDraft: (keyword: string, pageType: string) => void;
+}) {
+  const [ideas, setIdeas] = useState<SeoSuggestion[]>(initial);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  useEffect(() => setIdeas(initial), [initial]);
+
+  async function refresh() {
+    try {
+      setIdeas(await fetchSeoSuggestions());
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  async function onGetIdeas() {
+    setBusy(true);
+    setNote(null);
+    try {
+      await runSeoSuggestions();
+      setNote("Spica is thinking up page ideas. They appear in a moment.");
+      setTimeout(refresh, 8000);
+      setTimeout(refresh, 18000);
+    } catch (e) {
+      setNote(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-gray-200 p-5">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="text-sm font-medium text-gray-900">Page ideas</div>
+          <div className="text-xs text-gray-500 mt-0.5">
+            Pages worth creating to win more search traffic.
+          </div>
+        </div>
+        <button
+          onClick={onGetIdeas}
+          disabled={busy}
+          className="text-xs px-2.5 py-1 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+        >
+          {busy ? "Thinking…" : "Get ideas"}
+        </button>
+      </div>
+      {note && <p className="mt-2 text-xs text-gray-500">{note}</p>}
+      {ideas.length > 0 && (
+        <ul className="mt-3 border-t border-gray-100 pt-3 space-y-2">
+          {ideas.map((idea, i) => (
+            <li key={i} className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm text-gray-900">
+                  {idea.keyword}{" "}
+                  <span className="text-[10px] uppercase tracking-wider text-gray-400">
+                    {idea.page_type}
+                  </span>
+                </div>
+                {idea.rationale && (
+                  <div className="text-xs text-gray-500">{idea.rationale}</div>
+                )}
+              </div>
+              <button
+                onClick={() => onDraft(idea.keyword, idea.page_type)}
+                className="shrink-0 text-xs px-2.5 py-1 rounded-md bg-accent-600 text-white hover:bg-accent-700"
+              >
+                Draft this
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 /** "Whole-site crawl" — audits the homepage + the pages it links to, with a
  * per-page score table and a rollup of the most common issues. */
@@ -427,6 +515,7 @@ export default function SeoPage() {
   const [repos, setRepos] = useState<GithubRepo[]>([]);
   const [audit, setAudit] = useState<SeoAuditState | null>(null);
   const [crawl, setCrawl] = useState<SeoCrawl | null>(null);
+  const [ideas, setIdeas] = useState<SeoSuggestion[]>([]);
   const [githubConnected, setGithubConnected] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -438,15 +527,26 @@ export default function SeoPage() {
     }
   }
 
+  async function draftFromIdea(keyword: string, pageType: string) {
+    try {
+      await generateSeoPage({ keyword, page_type: pageType });
+      setTimeout(refetchDrafts, 6000);
+      setTimeout(refetchDrafts, 15000);
+    } catch {
+      /* surfaced on next refetch */
+    }
+  }
+
   useEffect(() => {
     let alive = true;
     (async () => {
       try {
-        const [d, gh, a, c] = await Promise.all([
+        const [d, gh, a, c, ix] = await Promise.all([
           fetchSeoDrafts(),
           fetchGithubConnection(),
           fetchSeoAudit().catch(() => null),
           fetchSeoCrawl().then((r) => r.latest).catch(() => null),
+          fetchSeoSuggestions().catch(() => []),
         ]);
         if (!alive) return;
         setDrafts(d);
@@ -454,6 +554,7 @@ export default function SeoPage() {
         setGithubConnected(gh.connection !== null);
         setAudit(a);
         setCrawl(c);
+        setIdeas(ix);
       } catch (e) {
         if (!alive) return;
         if (handleAuthError(e, router)) return;
@@ -485,6 +586,10 @@ export default function SeoPage() {
 
       <div className="mt-4">
         <CrawlPanel initial={crawl} />
+      </div>
+
+      <div className="mt-4">
+        <IdeasPanel initial={ideas} onDraft={draftFromIdea} />
       </div>
 
       <div className="mt-4">
