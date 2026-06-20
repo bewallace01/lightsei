@@ -81,6 +81,47 @@ def enqueue_generate_page(
     return cmd_id
 
 
+AUDIT_KIND = "seo.audit"
+AUDIT_SOURCE = "dashboard"
+
+
+def enqueue_audit(
+    session: Session, workspace_id: str, *, url: str, now: datetime
+) -> str:
+    """Enqueue an on-demand seo.audit for a URL (owner clicked "audit now").
+    Returns the command id. Does not commit. Caller validates the URL."""
+    cmd_id = str(uuid.uuid4())
+    payload = {"source": AUDIT_SOURCE, "url": (url or "").strip()}
+    session.execute(
+        text(
+            """
+            INSERT INTO commands (
+                id, workspace_id, agent_name, kind, payload, status,
+                approval_state, approved_at, created_at, expires_at,
+                dispatch_chain_id, dispatch_depth
+            ) VALUES (
+                :id, :ws, :agent, :kind, CAST(:payload AS JSONB), 'pending',
+                'auto_approved', :now, :now, :expires, :chain, 0
+            )
+            """
+        ),
+        {
+            "id": cmd_id, "ws": workspace_id, "agent": SEO_AGENT,
+            "kind": AUDIT_KIND, "payload": json.dumps(payload),
+            "now": now, "expires": now + _COMMAND_TTL, "chain": cmd_id,
+        },
+    )
+    return cmd_id
+
+
+def configured_audit_url(session: Session, workspace_id: str) -> Optional[str]:
+    """The site URL the SEO audit feeder is pointed at (None if unset)."""
+    import feeder
+    return feeder.normalize_website_url(
+        feeder.get_feeder_config(session, workspace_id, feeder.FEEDER_SEO_AUDIT).get("url")
+    )
+
+
 def seo_deployed(session: Session, workspace_id: str) -> bool:
     """Whether the SEO assistant exists for this workspace (so the dashboard
     can prompt to add it before the generate command sits unhandled)."""

@@ -1934,6 +1934,42 @@ export interface SeoDraft {
   page: SeoPage;
 }
 
+export interface SeoFinding {
+  check: string;
+  status: "good" | "warn" | "issue";
+  detail: string;
+  recommendation: string;
+}
+
+export interface SeoAudit {
+  url: string | null;
+  reachable: boolean | null;
+  score: number | null;
+  issues: number | null;
+  warnings: number | null;
+  findings: SeoFinding[];
+  checked_at: string | null;
+}
+
+export interface SeoAuditState {
+  configured_url: string | null;
+  latest: SeoAudit | null;
+}
+
+export async function fetchSeoAudit(): Promise<SeoAuditState> {
+  return (await authedJson("/workspaces/me/seo/audit")) as SeoAuditState;
+}
+
+export async function runSeoAudit(
+  url?: string,
+): Promise<{ command_id: string; url: string; seo_assistant_deployed: boolean }> {
+  return (await authedJson("/workspaces/me/seo/audit", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(url ? { url } : {}),
+  })) as { command_id: string; url: string; seo_assistant_deployed: boolean };
+}
+
 export async function fetchSeoDrafts(): Promise<SeoDraft[]> {
   const body = (await authedJson("/workspaces/me/seo/drafts")) as {
     drafts: SeoDraft[];

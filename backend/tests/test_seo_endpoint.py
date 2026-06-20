@@ -123,3 +123,77 @@ def test_seo_deployed_reflects_agent(client, alice):
             "VALUES (:w, 'seo', now(), now())"), {"w": ws})
     with session_scope() as s:
         assert seo_generate.seo_deployed(s, ws) is True
+
+
+# ---------- audit view + on-demand audit ---------- #
+import feeder as _feeder  # noqa: E402
+
+
+def _add_audit(ws: str, *, url: str, score: int, issues: int, warnings: int) -> None:
+    with session_scope() as s:
+        s.add(Event(
+            workspace_id=ws, run_id=str(uuid.uuid4()), agent_name="seo",
+            kind="seo.audit_complete", timestamp=_now(),
+            payload={"url": url, "reachable": True, "score": score,
+                     "issues": issues, "warnings": warnings,
+                     "findings": [{"check": "title", "status": "warn",
+                                   "detail": "short", "recommendation": "longer"}]},
+        ))
+
+
+def test_seo_audit_view_returns_latest(client, alice):
+    ws = alice["workspace"]["id"]
+    _add_audit(ws, url="https://x.com", score=85, issues=0, warnings=3)
+    h = auth_headers(alice["session_token"])
+    r = client.get("/workspaces/me/seo/audit", headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["latest"]["score"] == 85
+    assert body["latest"]["warnings"] == 3
+    assert body["latest"]["findings"][0]["check"] == "title"
+
+
+def test_seo_audit_view_empty(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.get("/workspaces/me/seo/audit", headers=h)
+    assert r.status_code == 200
+    assert r.json()["latest"] is None
+
+
+def test_seo_audit_view_exposes_configured_url(client, alice):
+    ws = alice["workspace"]["id"]
+    with session_scope() as s:
+        _feeder.set_feeder_config(s, ws, _feeder.FEEDER_SEO_AUDIT,
+                                  {"url": "https://mysite.com"}, _now())
+    h = auth_headers(alice["session_token"])
+    r = client.get("/workspaces/me/seo/audit", headers=h)
+    assert r.json()["configured_url"] == "https://mysite.com"
+
+
+def test_seo_run_audit_with_url(client, alice):
+    ws = alice["workspace"]["id"]
+    h = auth_headers(alice["session_token"])
+    r = client.post("/workspaces/me/seo/audit", headers=h, json={"url": "mysite.com"})
+    assert r.status_code == 200, r.text
+    assert r.json()["url"] == "https://mysite.com"
+    with session_scope() as s:
+        n = s.execute(_text("SELECT count(*) FROM commands WHERE workspace_id=:w "
+                            "AND kind='seo.audit'"), {"w": ws}).scalar_one()
+        assert n == 1
+
+
+def test_seo_run_audit_falls_back_to_configured(client, alice):
+    ws = alice["workspace"]["id"]
+    with session_scope() as s:
+        _feeder.set_feeder_config(s, ws, _feeder.FEEDER_SEO_AUDIT,
+                                  {"url": "https://configured.com"}, _now())
+    h = auth_headers(alice["session_token"])
+    r = client.post("/workspaces/me/seo/audit", headers=h, json={})
+    assert r.status_code == 200
+    assert r.json()["url"] == "https://configured.com"
+
+
+def test_seo_run_audit_no_url_400(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.post("/workspaces/me/seo/audit", headers=h, json={})
+    assert r.status_code == 400

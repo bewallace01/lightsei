@@ -7,13 +7,105 @@ import { useEffect, useState } from "react";
 import {
   GithubRepo,
   PageFormat,
+  SeoAuditState,
   SeoDraft,
   fetchGithubConnection,
+  fetchSeoAudit,
   fetchSeoDrafts,
   generateSeoPage,
   handleAuthError,
   publishPage,
+  runSeoAudit,
 } from "../api";
+
+/** "Site health" — the latest SEO audit Spica ran on the owner's site, with
+ * a score, the prioritized findings, and an "audit now" button. This is the
+ * visible face of the always-on audit feeder. */
+function SiteHealthPanel({ audit }: { audit: SeoAuditState | null }) {
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const [local, setLocal] = useState<SeoAuditState | null>(audit);
+
+  useEffect(() => setLocal(audit), [audit]);
+
+  async function refresh() {
+    try {
+      setLocal(await fetchSeoAudit());
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  async function onAuditNow() {
+    setBusy(true);
+    setNote(null);
+    try {
+      await runSeoAudit();
+      setNote("Spica is auditing your site. The score updates in a moment.");
+      setTimeout(refresh, 6000);
+      setTimeout(refresh, 14000);
+    } catch (e) {
+      setNote(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const latest = local?.latest ?? null;
+  const url = local?.configured_url ?? latest?.url ?? null;
+  const score = latest?.score ?? null;
+  const scoreColor =
+    score == null ? "text-gray-400"
+      : score >= 85 ? "text-emerald-600"
+      : score >= 60 ? "text-amber-600"
+      : "text-red-600";
+  const bad = (latest?.findings ?? []).filter((f) => f.status !== "good");
+
+  return (
+    <div className="rounded-lg border border-gray-200 p-5">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="text-sm font-medium text-gray-900">Site health</div>
+          <div className="text-xs text-gray-500 mt-0.5">
+            {url ? <span className="font-mono">{url}</span> : "No site set yet — add one in feeder settings."}
+          </div>
+        </div>
+        <div className="text-right">
+          {score != null && (
+            <div className={"text-2xl font-semibold " + scoreColor}>{score}<span className="text-sm text-gray-400">/100</span></div>
+          )}
+          <button
+            onClick={onAuditNow}
+            disabled={busy}
+            className="mt-1 text-xs px-2.5 py-1 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            {busy ? "Auditing…" : "Audit now"}
+          </button>
+        </div>
+      </div>
+      {note && <p className="mt-2 text-xs text-gray-500">{note}</p>}
+      {latest && bad.length > 0 && (
+        <ul className="mt-3 border-t border-gray-100 pt-3 space-y-1.5">
+          {bad.map((f, i) => (
+            <li key={i} className="text-sm flex gap-2">
+              <span className={f.status === "issue" ? "text-red-500" : "text-amber-500"}>
+                {f.status === "issue" ? "●" : "○"}
+              </span>
+              <span className="text-gray-700">
+                <span className="font-medium">{f.check.replace(/_/g, " ")}:</span> {f.detail}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {latest && bad.length === 0 && (
+        <p className="mt-3 text-sm text-emerald-700 border-t border-gray-100 pt-3">
+          No issues found — your on-page SEO looks clean.
+        </p>
+      )}
+    </div>
+  );
+}
 
 const PAGE_TYPES = ["landing", "service", "location", "blog"];
 
@@ -247,6 +339,7 @@ export default function SeoPage() {
   const router = useRouter();
   const [drafts, setDrafts] = useState<SeoDraft[] | null>(null);
   const [repos, setRepos] = useState<GithubRepo[]>([]);
+  const [audit, setAudit] = useState<SeoAuditState | null>(null);
   const [githubConnected, setGithubConnected] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -262,11 +355,16 @@ export default function SeoPage() {
     let alive = true;
     (async () => {
       try {
-        const [d, gh] = await Promise.all([fetchSeoDrafts(), fetchGithubConnection()]);
+        const [d, gh, a] = await Promise.all([
+          fetchSeoDrafts(),
+          fetchGithubConnection(),
+          fetchSeoAudit().catch(() => null),
+        ]);
         if (!alive) return;
         setDrafts(d);
         setRepos(gh.repos.filter((r) => r.is_active));
         setGithubConnected(gh.connection !== null);
+        setAudit(a);
       } catch (e) {
         if (!alive) return;
         if (handleAuthError(e, router)) return;
@@ -293,6 +391,10 @@ export default function SeoPage() {
       )}
 
       <div className="mt-6">
+        <SiteHealthPanel audit={audit} />
+      </div>
+
+      <div className="mt-4">
         <GeneratePanel onRequested={refetchDrafts} />
       </div>
 
