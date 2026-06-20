@@ -8,15 +8,101 @@ import {
   GithubRepo,
   PageFormat,
   SeoAuditState,
+  SeoCrawl,
   SeoDraft,
   fetchGithubConnection,
   fetchSeoAudit,
+  fetchSeoCrawl,
   fetchSeoDrafts,
   generateSeoPage,
   handleAuthError,
   publishPage,
   runSeoAudit,
+  runSeoCrawl,
 } from "../api";
+
+/** "Whole-site crawl" — audits the homepage + the pages it links to, with a
+ * per-page score table and a rollup of the most common issues. */
+function CrawlPanel({ initial }: { initial: SeoCrawl | null }) {
+  const [crawl, setCrawl] = useState<SeoCrawl | null>(initial);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  useEffect(() => setCrawl(initial), [initial]);
+
+  async function refresh() {
+    try {
+      setCrawl((await fetchSeoCrawl()).latest);
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  async function onCrawl() {
+    setBusy(true);
+    setNote(null);
+    try {
+      await runSeoCrawl();
+      setNote("Spica is crawling your site. Results appear in a moment.");
+      setTimeout(refresh, 10000);
+      setTimeout(refresh, 22000);
+    } catch (e) {
+      setNote(String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const scoreColor = (s: number) =>
+    s >= 85 ? "text-emerald-600" : s >= 60 ? "text-amber-600" : "text-red-600";
+
+  return (
+    <div className="rounded-lg border border-gray-200 p-5">
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <div className="text-sm font-medium text-gray-900">Whole-site crawl</div>
+          <div className="text-xs text-gray-500 mt-0.5">
+            {crawl
+              ? `${crawl.pages_audited} page(s) · avg ${crawl.average_score}/100 · lowest ${crawl.lowest_score}`
+              : "Audit your homepage and the pages it links to."}
+          </div>
+        </div>
+        <button
+          onClick={onCrawl}
+          disabled={busy}
+          className="text-xs px-2.5 py-1 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+        >
+          {busy ? "Crawling…" : "Audit whole site"}
+        </button>
+      </div>
+      {note && <p className="mt-2 text-xs text-gray-500">{note}</p>}
+      {crawl && crawl.pages.length > 0 && (
+        <div className="mt-3 border-t border-gray-100 pt-3">
+          <ul className="space-y-1">
+            {crawl.pages.map((pg, i) => (
+              <li key={i} className="flex items-center justify-between text-sm gap-3">
+                <span className="font-mono text-gray-600 truncate">{pg.url}</span>
+                {pg.reachable ? (
+                  <span className={"font-medium shrink-0 " + scoreColor(pg.score)}>{pg.score}</span>
+                ) : (
+                  <span className="text-xs text-red-500 shrink-0">unreachable</span>
+                )}
+              </li>
+            ))}
+          </ul>
+          {crawl.top_findings.length > 0 && (
+            <p className="mt-3 text-xs text-gray-500">
+              Most common:{" "}
+              {crawl.top_findings
+                .map((f) => `${f.check.replace(/_/g, " ")} (${f.pages})`)
+                .join(", ")}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** "Site health" — the latest SEO audit Spica ran on the owner's site, with
  * a score, the prioritized findings, and an "audit now" button. This is the
@@ -340,6 +426,7 @@ export default function SeoPage() {
   const [drafts, setDrafts] = useState<SeoDraft[] | null>(null);
   const [repos, setRepos] = useState<GithubRepo[]>([]);
   const [audit, setAudit] = useState<SeoAuditState | null>(null);
+  const [crawl, setCrawl] = useState<SeoCrawl | null>(null);
   const [githubConnected, setGithubConnected] = useState<boolean | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -355,16 +442,18 @@ export default function SeoPage() {
     let alive = true;
     (async () => {
       try {
-        const [d, gh, a] = await Promise.all([
+        const [d, gh, a, c] = await Promise.all([
           fetchSeoDrafts(),
           fetchGithubConnection(),
           fetchSeoAudit().catch(() => null),
+          fetchSeoCrawl().then((r) => r.latest).catch(() => null),
         ]);
         if (!alive) return;
         setDrafts(d);
         setRepos(gh.repos.filter((r) => r.is_active));
         setGithubConnected(gh.connection !== null);
         setAudit(a);
+        setCrawl(c);
       } catch (e) {
         if (!alive) return;
         if (handleAuthError(e, router)) return;
@@ -392,6 +481,10 @@ export default function SeoPage() {
 
       <div className="mt-6">
         <SiteHealthPanel audit={audit} />
+      </div>
+
+      <div className="mt-4">
+        <CrawlPanel initial={crawl} />
       </div>
 
       <div className="mt-4">

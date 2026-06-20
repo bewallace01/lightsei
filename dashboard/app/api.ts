@@ -1970,6 +1970,38 @@ export async function runSeoAudit(
   })) as { command_id: string; url: string; seo_assistant_deployed: boolean };
 }
 
+export interface SeoCrawlPage {
+  url: string;
+  score: number;
+  issues: number;
+  warnings: number;
+  reachable: boolean;
+}
+
+export interface SeoCrawl {
+  start_url: string | null;
+  pages_audited: number | null;
+  average_score: number | null;
+  lowest_score: number | null;
+  pages: SeoCrawlPage[];
+  top_findings: { check: string; pages: number }[];
+  crawled_at: string | null;
+}
+
+export async function fetchSeoCrawl(): Promise<{ latest: SeoCrawl | null }> {
+  return (await authedJson("/workspaces/me/seo/crawl")) as { latest: SeoCrawl | null };
+}
+
+export async function runSeoCrawl(
+  url?: string,
+): Promise<{ command_id: string; url: string; seo_assistant_deployed: boolean }> {
+  return (await authedJson("/workspaces/me/seo/crawl", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(url ? { url } : {}),
+  })) as { command_id: string; url: string; seo_assistant_deployed: boolean };
+}
+
 export async function fetchSeoDrafts(): Promise<SeoDraft[]> {
   const body = (await authedJson("/workspaces/me/seo/drafts")) as {
     drafts: SeoDraft[];

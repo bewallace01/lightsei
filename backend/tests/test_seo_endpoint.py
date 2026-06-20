@@ -197,3 +197,56 @@ def test_seo_run_audit_no_url_400(client, alice):
     h = auth_headers(alice["session_token"])
     r = client.post("/workspaces/me/seo/audit", headers=h, json={})
     assert r.status_code == 400
+
+
+# ---------- site crawl ---------- #
+
+
+def _add_crawl(ws: str, *, pages: int, avg: int) -> None:
+    with session_scope() as s:
+        s.add(Event(
+            workspace_id=ws, run_id=str(uuid.uuid4()), agent_name="seo",
+            kind="seo.crawl_complete", timestamp=_now(),
+            payload={"start_url": "https://x.com/", "pages_audited": pages,
+                     "average_score": avg, "lowest_score": avg - 5,
+                     "pages": [{"url": "https://x.com/", "score": avg,
+                                "issues": 0, "warnings": 1, "reachable": True}],
+                     "top_findings": [{"check": "title", "pages": 2}]},
+        ))
+
+
+def test_seo_crawl_run_with_url(client, alice):
+    ws = alice["workspace"]["id"]
+    h = auth_headers(alice["session_token"])
+    r = client.post("/workspaces/me/seo/crawl", headers=h,
+                    json={"url": "mysite.com", "max_pages": 4})
+    assert r.status_code == 200, r.text
+    assert r.json()["url"] == "https://mysite.com"
+    with session_scope() as s:
+        row = s.execute(_text("SELECT payload FROM commands WHERE workspace_id=:w "
+                              "AND kind='seo.crawl'"), {"w": ws}).mappings().first()
+        assert row["payload"]["max_pages"] == 4
+
+
+def test_seo_crawl_no_url_400(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.post("/workspaces/me/seo/crawl", headers=h, json={})
+    assert r.status_code == 400
+
+
+def test_seo_crawl_view_latest(client, alice):
+    ws = alice["workspace"]["id"]
+    _add_crawl(ws, pages=3, avg=82)
+    h = auth_headers(alice["session_token"])
+    r = client.get("/workspaces/me/seo/crawl", headers=h)
+    assert r.status_code == 200, r.text
+    latest = r.json()["latest"]
+    assert latest["pages_audited"] == 3
+    assert latest["average_score"] == 82
+    assert latest["top_findings"][0]["check"] == "title"
+
+
+def test_seo_crawl_view_empty(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.get("/workspaces/me/seo/crawl", headers=h)
+    assert r.json()["latest"] is None
