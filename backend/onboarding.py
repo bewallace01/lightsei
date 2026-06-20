@@ -82,7 +82,20 @@ GOALS = [
         # the wizard collects it when this goal is checked.
         "needs_url": True,
     },
+    {
+        "key": "seo",
+        "label": "Improve our search ranking (SEO)",
+        "agent": "seo",
+        "feeders": ["seo_audit"],
+        "connector": None,
+        # Shares the same site URL as the website goal.
+        "needs_url": True,
+    },
 ]
+# Goals whose feeder targets the owner's own site URL (collected once in the
+# wizard, applied to each selected goal's url-target feeder).
+_URL_GOALS = {"website", "seo"}
+_URL_GOAL_FEEDER = {"website": "website_health", "seo": "seo_audit"}
 _GOAL_BY_KEY = {g["key"]: g for g in GOALS}
 
 # Industry -> the goals we pre-check. A starting point the owner edits, not
@@ -168,12 +181,12 @@ def build_provisioning_plan(
         if c and c not in connectors:
             connectors.append(c)
 
-    # Carry the site URL only when the website goal is in play and it
-    # normalizes to a real URL — otherwise the plan stays clean (no target
+    # Carry the site URL only when a URL goal (website / seo) is in play and
+    # it normalizes to a real URL — otherwise the plan stays clean (no target
     # for an unselected goal, no garbage from a typo).
     normalized_url = (
         feeder.normalize_website_url(website_url)
-        if "website" in ordered_keys
+        if _URL_GOALS & set(ordered_keys)
         else None
     )
 
@@ -251,15 +264,17 @@ def apply_provisioning_plan(
     for feeder_kind in plan.get("feeders", []):
         feeder.set_feeder_enabled(session, workspace_id, feeder_kind, True, now)
 
-    # Store the website feeder's target URL if the owner gave one. Done
-    # after enabling so the config upsert just touches the url; with no URL
-    # the feeder stays a no-op until one is set in settings.
-    website_url = plan.get("website_url")
-    if website_url:
-        feeder.set_feeder_config(
-            session, workspace_id, feeder.FEEDER_WEBSITE_HEALTH,
-            {"url": website_url}, now,
-        )
+    # Store the site URL on each selected url-target feeder (website_health
+    # and/or seo_audit). Done after enabling so the config upsert just touches
+    # the url; with no URL these feeders stay a no-op until one is set.
+    site_url = plan.get("website_url")
+    if site_url:
+        for goal_key in plan.get("goals", []):
+            feeder_kind = _URL_GOAL_FEEDER.get(goal_key)
+            if feeder_kind:
+                feeder.set_feeder_config(
+                    session, workspace_id, feeder_kind, {"url": site_url}, now,
+                )
 
     profile = {
         "industry": plan.get("industry"),
