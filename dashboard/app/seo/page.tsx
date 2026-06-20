@@ -599,8 +599,8 @@ export default function SeoPage() {
       {githubConnected === false && (
         <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
           Connect GitHub to publish pages.{" "}
-          <Link href="/integrations" className="underline font-medium">
-            Go to Integrations
+          <Link href="/github" className="underline font-medium">
+            Connect GitHub →
           </Link>{" "}
           — works with any git-deployed host (Vercel, Cloudflare Pages, Railway, Netlify).
         </div>
@@ -608,10 +608,10 @@ export default function SeoPage() {
       {githubConnected && repos.length === 0 && (
         <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
           GitHub is connected, but no repo is added yet.{" "}
-          <Link href="/integrations" className="underline font-medium">
-            Add the repo
+          <Link href="/github" className="underline font-medium">
+            Add your site&apos;s repo →
           </Link>{" "}
-          that hosts your site.
+          so Spica can open pull requests there.
         </div>
       )}
 
