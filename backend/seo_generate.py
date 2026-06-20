@@ -122,6 +122,39 @@ def configured_audit_url(session: Session, workspace_id: str) -> Optional[str]:
     )
 
 
+CRAWL_KIND = "seo.crawl"
+
+
+def enqueue_crawl(
+    session: Session, workspace_id: str, *, url: str, max_pages: int, now: datetime
+) -> str:
+    """Enqueue an on-demand seo.crawl (audit several pages). Returns the
+    command id. Does not commit. Caller validates the URL."""
+    cmd_id = str(uuid.uuid4())
+    payload = {"source": AUDIT_SOURCE, "url": (url or "").strip(),
+               "max_pages": max(1, min(int(max_pages), 15))}
+    session.execute(
+        text(
+            """
+            INSERT INTO commands (
+                id, workspace_id, agent_name, kind, payload, status,
+                approval_state, approved_at, created_at, expires_at,
+                dispatch_chain_id, dispatch_depth
+            ) VALUES (
+                :id, :ws, :agent, :kind, CAST(:payload AS JSONB), 'pending',
+                'auto_approved', :now, :now, :expires, :chain, 0
+            )
+            """
+        ),
+        {
+            "id": cmd_id, "ws": workspace_id, "agent": SEO_AGENT,
+            "kind": CRAWL_KIND, "payload": json.dumps(payload),
+            "now": now, "expires": now + _COMMAND_TTL, "chain": cmd_id,
+        },
+    )
+    return cmd_id
+
+
 def seo_deployed(session: Session, workspace_id: str) -> bool:
     """Whether the SEO assistant exists for this workspace (so the dashboard
     can prompt to add it before the generate command sits unhandled)."""

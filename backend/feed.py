@@ -24,6 +24,7 @@ _FEED_KINDS = {
     "marketing.created",
     "bi.summary",
     "seo.audit_complete",
+    "seo.crawl_complete",
     "seo.page_drafted",
 }
 _CRASH_KINDS = {
@@ -141,6 +142,12 @@ def _render(kind: str, p: dict[str, Any]) -> tuple[str, Optional[str]]:
         title = f"SEO audit: scored {score}/100"
         detail = f"{issues} issue(s) to fix on {p.get('url')}" if issues else _truncate(p.get("url"))
         return title, detail
+
+    if kind == "seo.crawl_complete":
+        n = p.get("pages_audited") or 0
+        avg = p.get("average_score")
+        return (f"SEO crawl: {n} page(s), avg {avg}/100",
+                _truncate(p.get("start_url")))
 
     if kind == "seo.page_drafted":
         page = p.get("page") or {}

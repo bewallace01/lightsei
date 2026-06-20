@@ -14,7 +14,8 @@ Part of the roster. Two jobs:
     publish to their CMS.
 
 Command kinds: `seo.audit`, `seo.generate_page`.
-Events: `seo.audit_complete`, `seo.page_drafted`, `seo.crash`.
+Events: `seo.audit_complete`, `seo.crawl_complete`, `seo.page_drafted`,
+`seo.crash`.
 Downstream: one `hermes.post` (audit found issues / a draft is ready).
 
 The audit half needs no API key (pure HTTP + parsing). The generate half is
@@ -400,6 +401,91 @@ def hermes_text_for_audit(report: dict[str, Any]) -> str:
             f"{i} issue{'s' if i != 1 else ''}, {w} improvement{'s' if w != 1 else ''} to make.")
 
 
+def _same_origin_links(html: str, base_url: str, *, limit: int) -> list[str]:
+    """Same-origin page links from the HTML, deduped, first-seen order,
+    skipping the base page + obvious non-pages (assets, anchors)."""
+    if limit <= 0:
+        return []
+    base = base_url.rstrip("/")
+    host = urlparse(base_url).netloc
+    out: list[str] = []
+    seen = {base}
+    _ASSET = (".jpg", ".jpeg", ".png", ".gif", ".svg", ".webp", ".css", ".js",
+              ".pdf", ".zip", ".ico", ".xml", ".json")
+    for raw in _HREF_RE.findall(html or ""):
+        raw = raw.strip()
+        if not raw or raw.startswith(("mailto:", "tel:", "javascript:")):
+            continue
+        absolute = urljoin(base_url, raw).split("#")[0].rstrip("/")
+        p = urlparse(absolute)
+        if p.scheme not in ("http", "https") or p.netloc != host:
+            continue
+        if absolute.lower().endswith(_ASSET):
+            continue
+        if absolute in seen:
+            continue
+        seen.add(absolute)
+        out.append(absolute)
+        if len(out) >= limit:
+            break
+    return out
+
+
+def crawl_site(url: str, fetch: Callable[..., dict[str, Any]], *,
+               max_pages: int = 5) -> dict[str, Any]:
+    """Audit up to `max_pages` pages: the start URL plus the same-origin
+    pages it links to. Pure given `fetch`. Returns a site rollup:
+    {start_url, pages_audited, average_score, lowest_score, pages: [...],
+     top_findings}. Each page entry is {url, score, issues, warnings}.
+    """
+    start = audit_site(url, fetch)
+    pages = [start]
+    if start.get("reachable"):
+        # Discover links from the start page's HTML (re-fetch is cheap; the
+        # start audit didn't keep the raw HTML).
+        page = fetch(url, method="GET")
+        links = _same_origin_links(page.get("text") or "", url,
+                                   limit=max(0, max_pages - 1))
+        for link in links:
+            pages.append(audit_site(link, fetch))
+
+    reachable = [p for p in pages if p.get("reachable")]
+    scores = [p["score"] for p in reachable]
+    avg = round(sum(scores) / len(scores)) if scores else 0
+
+    # Roll up which checks fail most across the crawl.
+    from collections import Counter
+    counter: Counter = Counter()
+    for p in reachable:
+        for f in p.get("findings", []):
+            if f["status"] != "good":
+                counter[f["check"]] += 1
+    top = [{"check": c, "pages": n} for c, n in counter.most_common(5)]
+
+    return {
+        "start_url": url,
+        "pages_audited": len(reachable),
+        "average_score": avg,
+        "lowest_score": min(scores) if scores else 0,
+        "pages": [
+            {"url": p["url"], "score": p.get("score", 0),
+             "issues": p.get("issues", 0), "warnings": p.get("warnings", 0),
+             "reachable": p.get("reachable", False)}
+            for p in pages
+        ],
+        "top_findings": top,
+        "severity": "error" if any(p.get("issues") for p in reachable) else (
+            "warning" if any(p.get("warnings") for p in reachable) else "info"),
+    }
+
+
+def hermes_text_for_crawl(report: dict[str, Any]) -> str:
+    n = report["pages_audited"]
+    return (f"\U0001f50d SEO: audited {n} page{'s' if n != 1 else ''} — "
+            f"average score {report['average_score']}/100 "
+            f"(lowest {report['lowest_score']}).")
+
+
 # ---------- Page generation (LLM) ---------- #
 
 ClientFactory = Callable[[str], Any]
@@ -560,6 +646,29 @@ def _handle_audit(cmd_id, payload, fetch, run_id, hermes_channel):
     lightsei.complete_command(cmd_id, result=report)
 
 
+def _handle_crawl(cmd_id, payload, fetch, run_id, hermes_channel):
+    url = str(payload.get("url") or "").strip()
+    if not url:
+        lightsei.complete_command(cmd_id, error="seo.crawl requires a url")
+        return
+    try:
+        max_pages = int(payload.get("max_pages") or 5)
+    except (TypeError, ValueError):
+        max_pages = 5
+    max_pages = max(1, min(max_pages, 15))
+    report = crawl_site(url, fetch, max_pages=max_pages)
+    report["command_id"] = cmd_id
+    lightsei.emit("seo.crawl_complete", report, run_id=run_id)
+    if report["pages_audited"] and report.get("severity") == "error":
+        try:
+            _send_with_source("hermes", "hermes.post",
+                              {"channel": hermes_channel, "text": hermes_text_for_crawl(report),
+                               "severity": "error"}, source_agent="seo")
+        except Exception as e:
+            print(f"seo: hermes dispatch failed: {e}", flush=True)
+    lightsei.complete_command(cmd_id, result=report)
+
+
 def _handle_generate(cmd_id, payload, run_id, hermes_channel, factory, model, max_tokens):
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
@@ -623,6 +732,8 @@ def tick(
     try:
         if kind == "seo.audit":
             _handle_audit(cmd_id, payload, fetch, run_id, hermes_channel)
+        elif kind == "seo.crawl":
+            _handle_crawl(cmd_id, payload, fetch, run_id, hermes_channel)
         elif kind == "seo.generate_page":
             _handle_generate(cmd_id, payload, run_id, hermes_channel, factory, model, max_tokens)
         else:

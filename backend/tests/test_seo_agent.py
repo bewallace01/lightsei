@@ -357,3 +357,71 @@ def test_audit_server_rendered_runs_body_checks(fake_lightsei):
     checks = {f["check"] for f in findings}
     assert "javascript_rendered" not in checks
     assert "h1" in checks and "content_length" in checks
+
+
+# ---------- multi-page crawl ---------- #
+
+_PAGE_WITH_LINKS = (
+    '<html><head><title>Home Page of Acme Plumbing Co in Austin</title>'
+    '<meta name="description" content="Acme Plumbing serves Austin with fast, friendly, licensed service every day.">'
+    '<meta name="viewport" content="width=device-width, initial-scale=1">'
+    '<link rel="canonical" href="https://acme.com/"></head><body>'
+    '<h1>Acme Plumbing</h1>'
+    '<a href="/services">Services</a><a href="/about">About</a>'
+    '<a href="https://other.com/x">External</a><a href="/logo.png">img</a>'
+    '<p>' + ("word " * 320) + '</p></body></html>'
+)
+
+
+def test_same_origin_links_filters():
+    import importlib.util, sys, types, os as _os
+    sys.modules.setdefault("lightsei", types.ModuleType("lightsei"))
+    p = (Path(__file__).parent.parent.parent / "agents" / "seo" / "bot.py").resolve()
+    spec = importlib.util.spec_from_file_location("seo_b2", str(p))
+    bot = importlib.util.module_from_spec(spec); spec.loader.exec_module(bot)
+    links = bot._same_origin_links(_PAGE_WITH_LINKS, "https://acme.com/", limit=10)
+    assert "https://acme.com/services" in links
+    assert "https://acme.com/about" in links
+    assert "https://other.com/x" not in links     # external dropped
+    assert "https://acme.com/logo.png" not in links  # asset dropped
+    assert "https://acme.com" not in links         # base page excluded
+
+
+def test_crawl_site_audits_multiple_pages(fake_lightsei):
+    _, bot = fake_lightsei
+    # Home links to /services + /about; all reachable + clean-ish.
+    fetch = _fetcher(_PAGE_WITH_LINKS, site_files={
+        "/robots.txt": {"text": "Sitemap: https://acme.com/sitemap.xml"},
+        "/sitemap.xml": {"text": "<urlset/>"},
+    })
+    r = bot.crawl_site("https://acme.com/", fetch, max_pages=3)
+    assert r["pages_audited"] == 3  # home + 2 links
+    assert r["average_score"] > 0
+    assert len(r["pages"]) == 3
+    assert r["start_url"] == "https://acme.com/"
+    # top_findings rolls up failing checks across pages
+    assert isinstance(r["top_findings"], list)
+
+
+def test_crawl_respects_max_pages(fake_lightsei):
+    _, bot = fake_lightsei
+    fetch = _fetcher(_PAGE_WITH_LINKS)
+    r = bot.crawl_site("https://acme.com/", fetch, max_pages=1)
+    assert r["pages_audited"] == 1  # only the start page
+
+
+def test_crawl_unreachable_start(fake_lightsei):
+    _, bot = fake_lightsei
+    fetch = _fetcher(error="ConnectTimeout")
+    r = bot.crawl_site("https://down.com/", fetch, max_pages=5)
+    assert r["pages_audited"] == 0
+    assert r["average_score"] == 0
+
+
+def test_tick_crawl_emits_complete(fake_lightsei):
+    fake, bot = fake_lightsei
+    fake.claim_command.return_value = _cmd(kind="seo.crawl",
+                                           payload={"url": "https://acme.com/", "max_pages": 2})
+    bot.tick(fake, _fetcher(_PAGE_WITH_LINKS))
+    assert fake.emit.call_args.args[0] == "seo.crawl_complete"
+    assert fake.emit.call_args.args[1]["pages_audited"] >= 1

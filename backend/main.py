@@ -2679,6 +2679,74 @@ def seo_run_audit(
     }
 
 
+class SeoCrawlIn(BaseModel):
+    url: Optional[str] = None
+    max_pages: Optional[int] = None
+
+
+@app.post("/workspaces/me/seo/crawl")
+def seo_run_crawl(
+    body: SeoCrawlIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Audit the whole site now (the homepage + the pages it links to). Uses
+    the provided URL or the configured audit URL. Enqueues a seo.crawl; the
+    result surfaces via GET /workspaces/me/seo/crawl. Async by design."""
+    import feeder
+    import seo_generate
+
+    url = feeder.normalize_website_url(
+        body.url or seo_generate.configured_audit_url(session, workspace_id)
+    )
+    if not url:
+        raise HTTPException(
+            status_code=400,
+            detail="no site URL — pass one or set the SEO audit site in feeder settings",
+        )
+    cmd_id = seo_generate.enqueue_crawl(
+        session, workspace_id, url=url, max_pages=body.max_pages or 5, now=utcnow())
+    session.commit()
+    return {
+        "command_id": cmd_id,
+        "url": url,
+        "seo_assistant_deployed": seo_generate.seo_deployed(session, workspace_id),
+    }
+
+
+@app.get("/workspaces/me/seo/crawl")
+def get_seo_crawl(
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """The most recent site crawl (seo.crawl_complete) for this workspace."""
+    row = session.execute(
+        text(
+            """
+            SELECT payload, timestamp FROM events
+             WHERE workspace_id = :ws AND kind = 'seo.crawl_complete'
+             ORDER BY timestamp DESC LIMIT 1
+            """
+        ),
+        {"ws": workspace_id},
+    ).mappings().first()
+    if row is None:
+        return {"latest": None}
+    p = row["payload"] or {}
+    ts = row["timestamp"]
+    return {
+        "latest": {
+            "start_url": p.get("start_url"),
+            "pages_audited": p.get("pages_audited"),
+            "average_score": p.get("average_score"),
+            "lowest_score": p.get("lowest_score"),
+            "pages": p.get("pages") or [],
+            "top_findings": p.get("top_findings") or [],
+            "crawled_at": ts.isoformat() if hasattr(ts, "isoformat") else ts,
+        }
+    }
+
+
 class AskQuestion(BaseModel):
     question: str
 
