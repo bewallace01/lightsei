@@ -4857,10 +4857,15 @@ def _owned_github_repo(session: Session, repo_id: str, workspace_id: str) -> Git
 
 class PublishPageIn(BaseModel):
     repo_id: str
-    path: str               # repo-relative file path, e.g. content/blog/x.md
-    content: str            # the page file contents
     title: str              # used for the commit + PR title + branch name
-    body: Optional[str] = None        # PR body (defaults to a Lightsei note)
+    # Two ways to supply the file. Either pass a structured `page` + `format`
+    # and the backend renders the right file (html / markdown / mdx) at a
+    # sensible default path, OR pass pre-built `content` + `path` directly.
+    page: Optional[dict[str, Any]] = None
+    format: Optional[str] = None       # html | markdown | mdx (with `page`)
+    content: Optional[str] = None      # the page file contents (direct mode)
+    path: Optional[str] = None         # repo-relative file path (direct mode)
+    body: Optional[str] = None         # PR body (defaults to a Lightsei note)
     branch_name: Optional[str] = None  # override the derived branch name
 
 
@@ -4876,14 +4881,32 @@ def github_publish_page(
     when the PR is merged, so one mechanism covers all of them. The PR is
     the owner's review gate — nothing lands on the default branch
     automatically.
+
+    Supply the file one of two ways: a structured `page` + `format`
+    (html/markdown/mdx, rendered server-side to fit the site's framework),
+    or pre-built `content` + `path`.
     """
     import github_publish
+    import seo_render
 
     if not secrets_crypto.is_available():
         raise HTTPException(status_code=503, detail="secrets store unavailable: LIGHTSEI_SECRETS_KEY is not configured")
-    if not github_publish.is_safe_repo_path(body.path):
+
+    # Resolve content + path from whichever mode the caller used.
+    if body.page is not None:
+        try:
+            rendered = seo_render.render_page(body.page, body.format or "html")
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        content = rendered["content"]
+        path = body.path or rendered["path"]
+    else:
+        content = body.content or ""
+        path = body.path or ""
+
+    if not github_publish.is_safe_repo_path(path):
         raise HTTPException(status_code=400, detail="path must be a repo-relative file path (no leading slash or ..)")
-    if not str(body.content or "").strip():
+    if not str(content or "").strip():
         raise HTTPException(status_code=400, detail="content is required")
 
     repo = _owned_github_repo(session, body.repo_id, workspace_id)
@@ -4899,7 +4922,7 @@ def github_publish_page(
         result = github_publish.publish_page_to_repo(
             request=github_publish._httpx_request, token=token,
             owner=repo.repo_owner, repo=repo.repo_name, base_branch=repo.branch,
-            path=body.path, content=body.content, branch_name=branch,
+            path=path, content=content, branch_name=branch,
             commit_message=f"Add page: {body.title}",
             pr_title=f"Add SEO page: {body.title}",
             pr_body=body.body or (

@@ -6,6 +6,7 @@ import { useEffect, useState } from "react";
 
 import {
   GithubRepo,
+  PageFormat,
   SeoDraft,
   fetchGithubConnection,
   fetchSeoDrafts,
@@ -15,6 +16,14 @@ import {
 } from "../api";
 
 const PAGE_TYPES = ["landing", "service", "location", "blog"];
+
+// Format -> {label, default repo path} (the backend renders the file; the
+// path here mirrors its default so the owner sees + can tweak where it lands).
+const FORMATS: { value: PageFormat; label: string; path: (slug: string) => string }[] = [
+  { value: "html", label: "HTML (static site)", path: (s) => `public/pages/${s}.html` },
+  { value: "markdown", label: "Markdown (Hugo, Astro, Jekyll, Eleventy)", path: (s) => `content/${s}.md` },
+  { value: "mdx", label: "MDX (Next.js, Astro)", path: (s) => `src/content/${s}.mdx` },
+];
 
 /** "Ask Spica to write a page" — enqueues a generate command, then nudges a
  * refetch so the new draft appears below. */
@@ -86,32 +95,10 @@ function GeneratePanel({ onRequested }: { onRequested: () => void }) {
   );
 }
 
-/** A complete, deployable HTML page built from Spica's draft fields. The
- * owner can edit the path/format for their framework before publishing. */
-function pageHtml(d: SeoDraft): string {
-  const p = d.page;
-  const esc = (s: string) =>
-    (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
-  return [
-    "<!doctype html>",
-    '<html lang="en">',
-    "<head>",
-    '<meta charset="utf-8">',
-    '<meta name="viewport" content="width=device-width, initial-scale=1">',
-    `<title>${esc(p.title)}</title>`,
-    `<meta name="description" content="${esc(p.meta_description)}">`,
-    "</head>",
-    "<body>",
-    `<h1>${esc(p.h1)}</h1>`,
-    p.body_html || "",
-    "</body>",
-    "</html>",
-    "",
-  ].join("\n");
-}
-
 type PublishState = {
+  format: PageFormat;
   path: string;
+  pathEdited: boolean;
   repoId: string;
   busy: boolean;
   result?: { pr_url: string; branch: string };
@@ -125,13 +112,21 @@ function DraftCard({
   draft: SeoDraft;
   repos: GithubRepo[];
 }) {
-  const defaultPath = `lightsei-pages/${draft.page.slug || "page"}.html`;
+  const slug = draft.page.slug || "page";
   const [st, setSt] = useState<PublishState>({
-    path: defaultPath,
+    format: "html",
+    path: FORMATS[0].path(slug),
+    pathEdited: false,
     repoId: repos[0]?.id ?? "",
     busy: false,
   });
   const [open, setOpen] = useState(false);
+
+  function onFormat(format: PageFormat) {
+    const def = FORMATS.find((f) => f.value === format)!.path(slug);
+    // Re-default the path when the owner hasn't hand-edited it.
+    setSt((s) => ({ ...s, format, path: s.pathEdited ? s.path : def }));
+  }
 
   async function onPublish() {
     if (!st.repoId) return;
@@ -139,9 +134,12 @@ function DraftCard({
     try {
       const res = await publishPage({
         repo_id: st.repoId,
-        path: st.path.trim(),
-        content: pageHtml(draft),
         title: draft.page.title || draft.page.h1 || "New page",
+        page: draft.page,
+        format: st.format,
+        // Send the path only if the owner customized it; otherwise let the
+        // backend use the format's default.
+        ...(st.pathEdited ? { path: st.path.trim() } : {}),
       });
       setSt((s) => ({ ...s, busy: false, result: { pr_url: res.pr_url, branch: res.branch } }));
     } catch (e) {
@@ -196,15 +194,31 @@ function DraftCard({
             </select>
           </label>
           <label className="block text-xs text-gray-500">
+            Format
+            <select
+              value={st.format}
+              onChange={(e) => onFormat(e.target.value as PageFormat)}
+              className="mt-1 w-full text-sm rounded-md ring-1 ring-gray-300 px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-accent-600"
+            >
+              {FORMATS.map((f) => (
+                <option key={f.value} value={f.value}>
+                  {f.label}
+                </option>
+              ))}
+            </select>
+            <span className="text-[11px] text-gray-400">
+              Pick what your site uses. Spica renders the page in that format.
+            </span>
+          </label>
+          <label className="block text-xs text-gray-500">
             File path in repo
             <input
               value={st.path}
-              onChange={(e) => setSt((s) => ({ ...s, path: e.target.value }))}
+              onChange={(e) => setSt((s) => ({ ...s, path: e.target.value, pathEdited: true }))}
               className="mt-1 w-full text-sm font-mono rounded-md ring-1 ring-gray-300 px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-accent-600"
             />
             <span className="text-[11px] text-gray-400">
-              Where the page file goes. Adjust for your framework (e.g. a
-              markdown file under content/, or an HTML file in your public dir).
+              Defaulted for the format above; tweak it to match your repo layout.
             </span>
           </label>
           {st.error && <div className="text-xs text-red-600">{st.error}</div>}

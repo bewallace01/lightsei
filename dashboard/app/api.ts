@@ -1941,11 +1941,17 @@ export async function fetchSeoDrafts(): Promise<SeoDraft[]> {
   return body.drafts;
 }
 
+export type PageFormat = "html" | "markdown" | "mdx";
+
 export async function publishPage(input: {
   repo_id: string;
-  path: string;
-  content: string;
   title: string;
+  // structured mode: backend renders the format; path optional (defaulted)
+  page?: SeoPage;
+  format?: PageFormat;
+  // direct mode: pre-built file
+  content?: string;
+  path?: string;
   body?: string;
 }): Promise<{ pr_url: string; pr_number: number; branch: string }> {
   return (await authedJson("/workspaces/me/github/publish-page", {
