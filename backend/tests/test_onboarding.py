@@ -248,3 +248,49 @@ def test_apply_capability_grant_is_idempotent():
     with session_scope() as s:
         # Granted once, not duplicated on a re-apply.
         assert _agent_caps(s, ws, "inbox").count("connector:gmail") == 1
+
+
+# ---------- SEO goal (Spica via onboarding) ---------- #
+
+
+def test_seo_goal_provisions_spica_and_audit_feeder():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        plan = onboarding.build_provisioning_plan(
+            "professional", ["seo"], website_url="acme.com")
+        assert "seo" in plan["assistants"]
+        assert "seo_audit" in plan["feeders"]
+        assert plan["website_url"] == "https://acme.com"
+        onboarding.apply_provisioning_plan(s, ws, plan, now)
+    with session_scope() as s:
+        assert "seo" in _agent_names(s, ws)
+        assert feeder.is_feeder_enabled(s, ws, feeder.FEEDER_SEO_AUDIT)
+        cfg = feeder.get_feeder_config(s, ws, feeder.FEEDER_SEO_AUDIT)
+        assert cfg["url"] == "https://acme.com"
+
+
+def test_website_and_seo_share_one_url():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        plan = onboarding.build_provisioning_plan(
+            "home_services", ["website", "seo"], website_url="myshop.com")
+        onboarding.apply_provisioning_plan(s, ws, plan, now)
+    with session_scope() as s:
+        # Both url-target feeders get the same site.
+        assert feeder.get_feeder_config(s, ws, feeder.FEEDER_WEBSITE_HEALTH)["url"] == "https://myshop.com"
+        assert feeder.get_feeder_config(s, ws, feeder.FEEDER_SEO_AUDIT)["url"] == "https://myshop.com"
+
+
+def test_seo_url_carried_without_website_goal():
+    # The URL should carry for "seo" alone (not just when "website" is picked).
+    plan = onboarding.build_provisioning_plan("other", ["seo"], website_url="x.com")
+    assert plan["website_url"] == "https://x.com"
+
+
+def test_seo_in_catalog():
+    cat = onboarding.catalog()
+    seo = next(g for g in cat["goals"] if g["key"] == "seo")
+    assert seo["assistant"] == "seo"
+    assert seo["needs_url"] is True

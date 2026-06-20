@@ -212,10 +212,11 @@ export default function WelcomePage() {
     setSubmitting(true);
     setError(null);
     try {
-      // Send the site URL only when the website goal is selected; the
-      // backend ignores it otherwise (and won't clobber an existing target
-      // when left blank on a re-edit).
-      const sendUrl = goals.has("website") ? websiteUrl.trim() || null : null;
+      // Send the site URL when any URL-needing goal (website / seo) is
+      // selected; the backend applies it to each one's feeder and ignores it
+      // otherwise (won't clobber an existing target when left blank).
+      const needsUrl = goals.has("website") || goals.has("seo");
+      const sendUrl = needsUrl ? websiteUrl.trim() || null : null;
       const res = await submitOnboarding(industry, Array.from(goals), sendUrl);
       setPlan(res.plan);
       // Bring the provisioned assistants online (best-effort: if it
@@ -436,53 +437,60 @@ export default function WelcomePage() {
             freely.
           </div>
           <div className="space-y-2">
-            {catalog.goals.map((g) => {
-              const checked = goals.has(g.key);
-              return (
-                <div key={g.key}>
-                  <label
-                    className={
-                      "flex items-center gap-3 text-sm px-4 py-3 rounded-lg border cursor-pointer transition-colors " +
-                      (checked
-                        ? "border-accent-600 bg-accent-50"
-                        : "border-gray-200 hover:border-gray-300")
-                    }
-                  >
-                    <input
-                      type="checkbox"
-                      checked={checked}
-                      onChange={() => toggleGoal(g.key)}
-                      className="h-4 w-4 accent-accent-600"
-                    />
-                    <span className="flex-1">{g.label}</span>
-                    {g.connector && (
-                      <span className="text-[10px] uppercase tracking-wider text-gray-400">
-                        needs connect
-                      </span>
-                    )}
-                  </label>
-                  {g.needs_url && checked && (
-                    <div className="mt-2 ml-4 pl-3 border-l-2 border-accent-100">
-                      <label className="block text-xs text-gray-500 mb-1">
-                        What&apos;s your website address?
-                      </label>
+            {(() => {
+              // The site-URL field is shared across url-needing goals (website /
+              // seo). Render it once, under the first checked one, so picking
+              // both doesn't show two identical inputs.
+              const firstUrlGoal = catalog.goals.find(
+                (g) => g.needs_url && goals.has(g.key),
+              )?.key;
+              return catalog.goals.map((g) => {
+                const checked = goals.has(g.key);
+                return (
+                  <div key={g.key}>
+                    <label
+                      className={
+                        "flex items-center gap-3 text-sm px-4 py-3 rounded-lg border cursor-pointer transition-colors " +
+                        (checked
+                          ? "border-accent-600 bg-accent-50"
+                          : "border-gray-200 hover:border-gray-300")
+                      }
+                    >
                       <input
-                        type="url"
-                        inputMode="url"
-                        value={websiteUrl}
-                        onChange={(e) => setWebsiteUrl(e.target.value)}
-                        placeholder="yourbusiness.com"
-                        className="w-full text-sm rounded-md ring-1 ring-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-600"
+                        type="checkbox"
+                        checked={checked}
+                        onChange={() => toggleGoal(g.key)}
+                        className="h-4 w-4 accent-accent-600"
                       />
-                      <p className="mt-1 text-[11px] text-gray-400">
-                        We&apos;ll check it daily for downtime, broken links,
-                        and a missing contact form.
-                      </p>
-                    </div>
-                  )}
-                </div>
-              );
-            })}
+                      <span className="flex-1">{g.label}</span>
+                      {g.connector && (
+                        <span className="text-[10px] uppercase tracking-wider text-gray-400">
+                          needs connect
+                        </span>
+                      )}
+                    </label>
+                    {g.key === firstUrlGoal && (
+                      <div className="mt-2 ml-4 pl-3 border-l-2 border-accent-100">
+                        <label className="block text-xs text-gray-500 mb-1">
+                          What&apos;s your website address?
+                        </label>
+                        <input
+                          type="url"
+                          inputMode="url"
+                          value={websiteUrl}
+                          onChange={(e) => setWebsiteUrl(e.target.value)}
+                          placeholder="yourbusiness.com"
+                          className="w-full text-sm rounded-md ring-1 ring-gray-300 px-3 py-2 focus:outline-none focus:ring-2 focus:ring-accent-600"
+                        />
+                        <p className="mt-1 text-[11px] text-gray-400">
+                          Used for website monitoring and SEO checks.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                );
+              });
+            })()}
           </div>
 
           <div className="mt-6 flex items-center gap-3">
