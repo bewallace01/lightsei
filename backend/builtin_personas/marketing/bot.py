@@ -57,6 +57,18 @@ MAX_TOKENS = int(os.environ.get("MARKETING_MAX_TOKENS", "800"))
 
 _TASKS = ("ad_copy", "social_post", "campaign_idea", "email_copy")
 
+# Map a marketing task to the Design assistant's content type, so Capella
+# formats an email as an email, a post as a social post, etc.
+_DESIGN_TYPE_BY_TASK = {
+    "email_copy": "email",
+    "social_post": "social",
+}
+
+
+def design_content_type_for(task: str) -> str:
+    """The design content_type Capella should use for a marketing task."""
+    return _DESIGN_TYPE_BY_TASK.get(task, "generic")
+
 _SYSTEM = (
     "You are the marketing coordinator on a small business's team. Write in "
     "the business's voice: clear, friendly, concrete, no corporate fluff, no "
@@ -241,6 +253,18 @@ def tick(
                            "severity": "info"}, source_agent="marketing")
     except Exception as e:
         print(f"marketing: hermes dispatch failed: {e}", flush=True)
+
+    # Hand the draft to the Design assistant (Capella) to polish its
+    # formatting. Best-effort: if Capella isn't deployed the command just
+    # expires; never blocks marketing. Email/social map to their formats,
+    # everything else gets a generic tidy-up.
+    try:
+        design_type = design_content_type_for(task)
+        _send_with_source("design", "design.format",
+                          {"content": result["content"], "content_type": design_type,
+                           "source_task": task}, source_agent="marketing")
+    except Exception as e:
+        print(f"marketing: design dispatch failed: {e}", flush=True)
 
     lightsei.complete_command(cmd_id, result=outcome)
     return cmd
