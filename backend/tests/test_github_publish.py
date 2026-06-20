@@ -142,6 +142,41 @@ def test_publish_endpoint_opens_pr(client, alice, monkeypatch):
     assert body["branch"] == "lightsei-seo/plumber-in-austin"
 
 
+def test_publish_endpoint_structured_page_markdown(client, alice, monkeypatch):
+    """The structured page + format mode renders the file server-side and
+    commits it at the format's default path."""
+    rid = _connect_repo(alice["workspace"]["id"])
+    captured = {}
+
+    def _fake(**k):
+        captured.update(k)
+        return {"pr_url": "https://github.com/acme/site/pull/9", "pr_number": 9,
+                "branch": k["branch_name"]}
+
+    monkeypatch.setattr(github_publish, "publish_page_to_repo", _fake)
+    h = auth_headers(alice["session_token"])
+    r = client.post("/workspaces/me/github/publish-page", headers=h, json={
+        "repo_id": rid, "title": "Inventory Tips", "format": "markdown",
+        "page": {"title": "Inventory Tips", "meta_description": "Cut costs.",
+                 "slug": "inventory-tips", "h1": "Inventory Tips",
+                 "body_html": "<p>hi</p>"}})
+    assert r.status_code == 200, r.text
+    # Rendered to a markdown file at the markdown default path, with front matter.
+    assert captured["path"] == "content/inventory-tips.md"
+    assert captured["content"].startswith("---\n")
+    assert 'title: "Inventory Tips"' in captured["content"]
+
+
+def test_publish_endpoint_unknown_format_400(client, alice):
+    rid = _connect_repo(alice["workspace"]["id"])
+    h = auth_headers(alice["session_token"])
+    r = client.post("/workspaces/me/github/publish-page", headers=h, json={
+        "repo_id": rid, "title": "x", "format": "pdf",
+        "page": {"title": "x", "meta_description": "d", "slug": "s",
+                 "h1": "H", "body_html": "b"}})
+    assert r.status_code == 400
+
+
 def test_publish_endpoint_unsafe_path_400(client, alice):
     rid = _connect_repo(alice["workspace"]["id"])
     h = auth_headers(alice["session_token"])
