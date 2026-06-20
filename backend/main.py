@@ -2801,6 +2801,54 @@ def get_seo_suggestions(
     }
 
 
+# ---------- Design assistant (Capella): format/polish content ---------- #
+
+
+class DesignFormatIn(BaseModel):
+    content: str
+    content_type: Optional[str] = None  # page | email | social | generic
+    accent_color: Optional[str] = None
+    instructions: Optional[str] = None
+
+
+@app.post("/workspaces/me/design/format")
+def design_format(
+    body: DesignFormatIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Send content to Capella to polish its design/formatting. Enqueues a
+    design.format command; poll the result via
+    GET /workspaces/me/design/format/{command_id}. Async by design."""
+    import design as _design
+
+    if not str(body.content or "").strip():
+        raise HTTPException(status_code=400, detail="content is required")
+
+    cmd_id = _design.enqueue_format(
+        session, workspace_id, content=body.content,
+        content_type=body.content_type or "generic",
+        accent_color=body.accent_color, instructions=body.instructions,
+        now=utcnow())
+    session.commit()
+    return {
+        "command_id": cmd_id,
+        "design_assistant_deployed": _design.design_deployed(session, workspace_id),
+    }
+
+
+@app.get("/workspaces/me/design/format/{command_id}")
+def design_format_result(
+    command_id: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Poll for a Capella format result (formatted / failed / pending)."""
+    import design as _design
+
+    return _design.get_result(session, workspace_id, command_id)
+
+
 class AskQuestion(BaseModel):
     question: str
 
