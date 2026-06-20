@@ -171,3 +171,12 @@ def test_feed_item_seo_page_drafted():
                     "page": {"h1": "Plumber in Austin", "meta_description": "Fast help"}},
     })
     assert "Plumber in Austin" in item["title"]
+
+
+def test_feed_item_design_formatted():
+    from feed import build_feed_item
+    item = build_feed_item({
+        "kind": "design.formatted", "agent_name": "design",
+        "payload": {"content_type": "email", "output": "<html>..."},
+    })
+    assert "email" in item["title"].lower()

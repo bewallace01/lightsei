@@ -102,11 +102,49 @@ def test_tick_generates_and_notifies(fake_lightsei, monkeypatch):
     out = fake.emit.call_args.args[1]
     assert fake.emit.call_args.args[0] == "marketing.created"
     assert out["content"] == "Buy now!" and out["task"] == "ad_copy"
-    fake.send_command.assert_called_once()
-    target, kind, hp = fake.send_command.call_args.args[:3]
-    assert target == "hermes" and "draft is ready" in hp["text"]
-    assert fake.send_command.call_args.kwargs["source_agent"] == "marketing"
+    # Two dispatches now: hermes notify + design polish.
+    targets = [c.args[0] for c in fake.send_command.call_args_list]
+    assert targets == ["hermes", "design"]
+    hp = fake.send_command.call_args_list[0].args[2]
+    assert "draft is ready" in hp["text"]
+    assert fake.send_command.call_args_list[0].kwargs["source_agent"] == "marketing"
     fake.complete_command.assert_called_once()
+
+
+def test_design_content_type_for_maps_tasks(fake_lightsei):
+    _, bot = fake_lightsei
+    assert bot.design_content_type_for("email_copy") == "email"
+    assert bot.design_content_type_for("social_post") == "social"
+    assert bot.design_content_type_for("ad_copy") == "generic"
+    assert bot.design_content_type_for("campaign_idea") == "generic"
+
+
+def test_tick_dispatches_draft_to_capella(fake_lightsei, monkeypatch):
+    fake, bot = fake_lightsei
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    fake.claim_command.return_value = _cmd(payload={"task": "email_copy", "topic": "newsletter"})
+    bot.tick(fake, factory=_factory("Subject: Hi\nBody."))
+    design = next(c for c in fake.send_command.call_args_list if c.args[0] == "design")
+    target, kind, payload = design.args[:3]
+    assert kind == "design.format"
+    assert payload["content_type"] == "email"      # email_copy -> email
+    assert payload["content"] == "Subject: Hi\nBody."
+    assert design.kwargs["source_agent"] == "marketing"
+
+
+def test_tick_design_dispatch_failure_does_not_break(fake_lightsei, monkeypatch):
+    fake, bot = fake_lightsei
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    # design dispatch raises; marketing still completes the command.
+    def _send(target, *a, **k):
+        if target == "design":
+            raise RuntimeError("design down")
+        return {"id": "x"}
+    fake.send_command.side_effect = _send
+    fake.claim_command.return_value = _cmd(payload={"task": "ad_copy", "topic": "x"})
+    bot.tick(fake, factory=_factory("copy"))
+    fake.complete_command.assert_called_once()
+    assert fake.emit.call_args.args[0] == "marketing.created"
     assert "result" in fake.complete_command.call_args.kwargs
 
 

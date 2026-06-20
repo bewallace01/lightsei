@@ -27,10 +27,12 @@ _FEED_KINDS = {
     "seo.crawl_complete",
     "seo.page_drafted",
     "seo.suggestions",
+    "design.formatted",
 }
 _CRASH_KINDS = {
     "reputation.crash", "lead.crash", "inbox.crash",
     "website.crash", "marketing.crash", "bi.crash", "seo.crash",
+    "design.crash",
 }
 
 # All kinds this module knows how to render (for the endpoint's WHERE).
@@ -159,5 +161,9 @@ def _render(kind: str, p: dict[str, Any]) -> tuple[str, Optional[str]]:
         n = len(sugg)
         first = sugg[0].get("keyword") if sugg else None
         return f"{n} SEO page idea(s)", _truncate(first)
+
+    if kind == "design.formatted":
+        ct = str(p.get("content_type") or "content").replace("_", " ")
+        return f"Polished a {ct}", None
 
     return kind, None
