@@ -36,10 +36,28 @@ def fake_lightsei(monkeypatch):
     return fake, bot
 
 
-def _fetcher(text="", *, status_code=200, error=None):
+def _fetcher(text="", *, status_code=200, error=None, site_files=None):
+    """A fetch stub. Serves `text` for the page URL; robots.txt / sitemap.xml
+    return 404 unless `site_files` maps a path suffix (e.g. "/robots.txt") to
+    a response dict."""
+    site_files = site_files or {}
+
     def fetch(url, *, method="GET"):
+        for suffix, resp in site_files.items():
+            if url.endswith(suffix):
+                return {"status_code": 200, "error": None, "text": "", **resp}
+        if url.endswith("/robots.txt") or url.endswith("/sitemap.xml"):
+            return {"status_code": 404, "error": None, "text": ""}
         return {"status_code": status_code, "error": error, "text": text}
     return fetch
+
+
+def _fetcher_with_site_files(text):
+    """Page + a healthy robots.txt (referencing the sitemap) + sitemap.xml."""
+    return _fetcher(text, site_files={
+        "/robots.txt": {"text": "User-agent: *\nSitemap: https://s.com/sitemap.xml"},
+        "/sitemap.xml": {"text": "<urlset></urlset>"},
+    })
 
 
 def _fake_factory(json_text):
@@ -136,11 +154,34 @@ def test_score_penalizes_issues_more_than_warns(fake_lightsei):
 
 def test_audit_site_reachable(fake_lightsei):
     _, bot = fake_lightsei
-    r = bot.audit_site("https://acme.com/", _fetcher(_CLEAN_PAGE))
+    # Healthy page + healthy robots/sitemap = a genuinely clean site.
+    r = bot.audit_site("https://acme.com/", _fetcher_with_site_files(_CLEAN_PAGE))
     assert r["reachable"] is True
     assert r["score"] >= 90
     assert r["issues"] == 0
     assert r["severity"] in ("info", "warning")
+    checks = {f["check"] for f in r["findings"]}
+    assert "robots_txt" in checks and "sitemap" in checks
+
+
+def test_audit_site_missing_robots_and_sitemap(fake_lightsei):
+    _, bot = fake_lightsei
+    # Default fetcher 404s robots/sitemap -> a real issue (no sitemap) + warn.
+    r = bot.audit_site("https://acme.com/", _fetcher(_CLEAN_PAGE))
+    by = {f["check"]: f for f in r["findings"]}
+    assert by["robots_txt"]["status"] == "warn"
+    assert by["sitemap"]["status"] == "issue"  # no sitemap anywhere
+
+
+def test_audit_site_files_sitemap_via_robots(fake_lightsei):
+    _, bot = fake_lightsei
+    # Sitemap only discoverable through robots.txt (no /sitemap.xml 200).
+    fetch = _fetcher(_CLEAN_PAGE, site_files={
+        "/robots.txt": {"text": "Sitemap: https://acme.com/sm.xml"}})
+    findings = bot.audit_site_files("https://acme.com/", fetch)
+    by = {f["check"]: f for f in findings}
+    assert by["robots_txt"]["status"] == "good"
+    assert by["sitemap"]["status"] == "good"  # referenced in robots
 
 
 def test_audit_site_unreachable(fake_lightsei):

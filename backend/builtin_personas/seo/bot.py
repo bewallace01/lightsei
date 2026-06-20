@@ -310,9 +310,53 @@ def score_findings(findings: list[dict[str, Any]]) -> int:
     return max(0, 100 - penalty)
 
 
+def _origin(url: str) -> str:
+    """scheme://host[:port] for a URL (where robots.txt / sitemap.xml live)."""
+    p = urlparse(url)
+    return f"{p.scheme}://{p.netloc}"
+
+
+def _ok(resp: dict[str, Any]) -> bool:
+    code = resp.get("status_code")
+    return (not resp.get("error")) and code is not None and 200 <= code < 400
+
+
+def audit_site_files(url: str, fetch: Callable[..., dict[str, Any]]) -> list[dict[str, Any]]:
+    """Site-level crawlability checks: robots.txt + sitemap.xml. These govern
+    whether search engines can crawl + discover the site, so a missing one is
+    a real ranking problem distinct from on-page issues. Pure given `fetch`.
+
+    Looks for the sitemap either at /sitemap.xml or referenced in robots.txt.
+    """
+    origin = _origin(url)
+    out: list[dict[str, Any]] = []
+
+    robots = fetch(f"{origin}/robots.txt", method="GET")
+    robots_text = (robots.get("text") or "") if _ok(robots) else ""
+    if not _ok(robots):
+        out.append(_finding("robots_txt", "warn", "No robots.txt found.",
+                            "Add a robots.txt so you can guide crawlers and point them to your sitemap."))
+    else:
+        out.append(_finding("robots_txt", "good", "robots.txt present.", ""))
+
+    sitemap_in_robots = "sitemap:" in robots_text.lower()
+    sm = fetch(f"{origin}/sitemap.xml", method="GET")
+    has_sitemap = _ok(sm) or sitemap_in_robots
+    if not has_sitemap:
+        out.append(_finding("sitemap", "issue", "No sitemap.xml found.",
+                            "Add a sitemap.xml (and reference it in robots.txt) so search engines discover all your pages."))
+    elif not sitemap_in_robots:
+        out.append(_finding("sitemap", "warn", "Sitemap exists but isn't referenced in robots.txt.",
+                            "Add a 'Sitemap:' line to robots.txt so crawlers find it reliably."))
+    else:
+        out.append(_finding("sitemap", "good", "Sitemap present and referenced in robots.txt.", ""))
+
+    return out
+
+
 def audit_site(url: str, fetch: Callable[..., dict[str, Any]]) -> dict[str, Any]:
-    """Fetch a page and audit it. Pure given an injected `fetch` (same seam
-    the website assistant uses). Returns the report dict."""
+    """Fetch a page and audit it (on-page + site-level crawlability). Pure
+    given an injected `fetch` (same seam the website assistant uses)."""
     page = fetch(url, method="GET")
     err = page.get("error")
     code = page.get("status_code")
@@ -332,6 +376,12 @@ def audit_site(url: str, fetch: Callable[..., dict[str, Any]]) -> dict[str, Any]
         return report
 
     findings = audit_html(page.get("text") or "", url)
+    # Site-level crawlability (robots.txt + sitemap.xml) — best-effort; a
+    # fetch failure on these never sinks the whole audit.
+    try:
+        findings = findings + audit_site_files(url, fetch)
+    except Exception:
+        pass
     issues = sum(1 for f in findings if f["status"] == "issue")
     warns = sum(1 for f in findings if f["status"] == "warn")
     report["findings"] = findings
