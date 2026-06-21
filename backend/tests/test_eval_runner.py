@@ -448,7 +448,9 @@ def test_enqueue_eval_job_for_workspace_drops_pending_row(client, alice):
         )
         s.commit()
 
-    # Verify the row landed with kind='eval_runs' and status='pending'.
+    # Verify the row landed with kind='eval_runs' for this workspace. The
+    # in-process jobs runner may have already claimed it (pending -> running/
+    # terminal), so don't pin the status — the point is enqueue created the row.
     with session_scope() as s:
         row = s.execute(
             text(
@@ -459,22 +461,24 @@ def test_enqueue_eval_job_for_workspace_drops_pending_row(client, alice):
         ).mappings().first()
     assert row is not None
     assert row["kind"] == "eval_runs"
-    assert row["status"] == "pending"
     assert row["workspace_id"] == workspace_id
 
 
 def test_cron_enqueues_one_job_per_workspace(client, alice, bob):
     """The cron sweeps all workspaces; assert it drops exactly one
-    pending eval_runs row per workspace it sees."""
+    eval_runs row per workspace it sees."""
     n = eval_runner._enqueue_eval_jobs_for_all_workspaces()
     # Both alice and bob exist as workspaces; cron picks them up.
     assert n >= 2
 
+    # Count rows regardless of status: the in-process jobs runner may have
+    # already claimed the freshly enqueued pending rows (pending -> running/
+    # terminal). What matters is exactly one eval_runs row landed per workspace.
     with session_scope() as s:
         per_ws = s.execute(
             text(
                 "SELECT workspace_id, count(*) AS n FROM generation_jobs "
-                "WHERE kind = 'eval_runs' AND status = 'pending' "
+                "WHERE kind = 'eval_runs' "
                 "GROUP BY workspace_id"
             )
         ).mappings().all()

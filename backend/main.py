@@ -735,9 +735,19 @@ def on_startup() -> None:
     # Phase 12C.6.2: in-process runner for /agents/generate and
     # /teams/plan. Picks pending generation_jobs rows and runs them
     # off the request path so long Anthropic calls don't race the
-    # edge timeout. See backend/jobs.py.
+    # edge timeout. See backend/jobs.py. (Tests rely on this to process
+    # jobs they enqueue, so it always starts.)
     import jobs
     jobs.start_runner()
+
+    # The two PERIODIC auto-enqueuers below poll on their own threads and
+    # drop new jobs/runs on a timer. Under the test client they race tests
+    # that assert on job/trigger state (e.g. the eval cron enqueuing extra
+    # eval_runs rows mid-count). Gate them off when LIGHTSEI_DISABLE_BACKGROUND
+    # is set (conftest sets it); prod is unaffected. The jobs runner above
+    # stays on either way.
+    if os.environ.get("LIGHTSEI_DISABLE_BACKGROUND") == "1":
+        return
 
     # Phase 14.3: periodic eval cron. Drops one eval_runs job per
     # workspace per LIGHTSEI_EVAL_INTERVAL_S (default 3600s); the
