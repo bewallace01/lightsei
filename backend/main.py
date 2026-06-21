@@ -2809,6 +2809,21 @@ class DesignFormatIn(BaseModel):
     content_type: Optional[str] = None  # page | email | social | generic
     accent_color: Optional[str] = None
     instructions: Optional[str] = None
+    match_url: Optional[str] = None     # a live page to match the look of
+
+
+def _fetch_page_html(url: str) -> Optional[str]:
+    """GET a page's HTML for style extraction. Best-effort: returns None on
+    any failure so 'match my site' degrades to generic styling, never errors."""
+    try:
+        import httpx
+        resp = httpx.get(url, timeout=10.0, follow_redirects=True,
+                         headers={"User-Agent": "Lightsei-Design/1.0"})
+        if resp.status_code < 400:
+            return resp.text
+    except Exception:
+        pass
+    return None
 
 
 @app.post("/workspaces/me/design/format")
@@ -2819,21 +2834,43 @@ def design_format(
 ) -> dict[str, Any]:
     """Send content to Capella to polish its design/formatting. Enqueues a
     design.format command; poll the result via
-    GET /workspaces/me/design/format/{command_id}. Async by design."""
+    GET /workspaces/me/design/format/{command_id}. Async by design.
+
+    `match_url`: a live page on the owner's site. When given, we fetch it and
+    extract a style profile (fonts, brand colors, CSS framework, a CSS
+    sample) so Capella matches the existing site's look instead of inventing
+    its own."""
     import design as _design
 
     if not str(body.content or "").strip():
         raise HTTPException(status_code=400, detail="content is required")
 
+    accent = body.accent_color
+    instructions = body.instructions
+    matched_from = None
+    if body.match_url and str(body.match_url).strip():
+        import feeder
+        url = feeder.normalize_website_url(body.match_url)
+        if url:
+            ref_html = _fetch_page_html(url)
+            if ref_html:
+                profile = _design.extract_style_profile(ref_html)
+                if profile:
+                    instructions = (instructions + "\n\n" + profile) if instructions else profile
+                    matched_from = url
+                if not accent:
+                    accent = _design.primary_color(ref_html)
+
     cmd_id = _design.enqueue_format(
         session, workspace_id, content=body.content,
         content_type=body.content_type or "generic",
-        accent_color=body.accent_color, instructions=body.instructions,
+        accent_color=accent, instructions=instructions,
         now=utcnow())
     session.commit()
     return {
         "command_id": cmd_id,
         "design_assistant_deployed": _design.design_deployed(session, workspace_id),
+        "matched_site": matched_from,
     }
 
 

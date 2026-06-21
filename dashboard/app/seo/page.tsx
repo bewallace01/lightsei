@@ -405,9 +405,11 @@ function openPreview(html: string) {
 function DraftCard({
   draft,
   repos,
+  matchSite,
 }: {
   draft: SeoDraft;
   repos: GithubRepo[];
+  matchSite?: string;
 }) {
   const slug = draft.page.slug || "page";
   const [st, setSt] = useState<PublishState>({
@@ -422,6 +424,8 @@ function DraftCard({
   const [polished, setPolished] = useState<string | null>(null);
   const [polishBusy, setPolishBusy] = useState(false);
   const [polishNote, setPolishNote] = useState<string | null>(null);
+  // A live page on the owner's site for Capella to match the look of.
+  const [matchUrl, setMatchUrl] = useState(matchSite ?? "");
 
   function onFormat(format: PageFormat) {
     const def = FORMATS.find((f) => f.value === format)!.path(slug);
@@ -436,6 +440,7 @@ function DraftCard({
       const { command_id, design_assistant_deployed } = await designFormat({
         content: basicPageHtml(draft),
         content_type: "page",
+        ...(matchUrl.trim() ? { match_url: matchUrl.trim() } : {}),
       });
       if (!design_assistant_deployed) {
         setPolishNote("Add the Design assistant (Capella) to your team to polish pages.");
@@ -454,7 +459,11 @@ function DraftCard({
             format: "html",
             path: s.pathEdited ? s.path : FORMATS[0].path(slug),
           }));
-          setPolishNote("Polished. Publishing will use the styled version.");
+          setPolishNote(
+            matchUrl.trim()
+              ? `Polished to match ${matchUrl.trim()}. Publishing uses the styled version.`
+              : "Polished. Publishing will use the styled version.",
+          );
           setPolishBusy(false);
           return;
         }
@@ -514,6 +523,21 @@ function DraftCard({
         <div className="mt-3 text-xs text-emerald-700 flex items-center gap-1">
           🎨 Polished by Capella — publishing uses the styled version.
         </div>
+      )}
+      {!open && (
+        <label className="mt-3 block text-xs text-gray-500">
+          Match my site&apos;s design (optional)
+          <input
+            type="url"
+            value={matchUrl}
+            onChange={(e) => setMatchUrl(e.target.value)}
+            placeholder="https://yoursite.com"
+            className="mt-1 w-full text-sm rounded-md ring-1 ring-gray-300 px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-accent-600"
+          />
+          <span className="text-[11px] text-gray-400">
+            Capella reads this page&apos;s fonts &amp; colors so the new page matches your site.
+          </span>
+        </label>
       )}
       {!open ? (
         <div className="mt-4 flex items-center gap-2 flex-wrap">
@@ -729,7 +753,14 @@ export default function SeoPage() {
             target keyword and it&apos;ll show up here, ready to publish.
           </div>
         ) : (
-          drafts.map((d) => <DraftCard key={d.id} draft={d} repos={repos} />)
+          drafts.map((d) => (
+            <DraftCard
+              key={d.id}
+              draft={d}
+              repos={repos}
+              matchSite={audit?.configured_url ?? undefined}
+            />
+          ))
         )}
       </div>
     </main>
