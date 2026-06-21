@@ -53,6 +53,22 @@ def _call(request: GithubRequest, token: str, method: str, url: str,
     return int(res.get("status", 0)), (res.get("body") or {})
 
 
+def _commit_file(request: GithubRequest, token: str, api: str, *, path: str,
+                 content: str, branch: str, message: str) -> None:
+    """Create or update one file on `branch` via the Contents API. Updating an
+    existing file requires its current blob sha, so look it up first (404 =
+    new file, no sha needed)."""
+    encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
+    payload: dict[str, Any] = {"message": message, "content": encoded, "branch": branch}
+    st, body = _call(request, token, "GET", f"{api}/contents/{path}?ref={branch}")
+    if st == 200 and isinstance(body, dict) and body.get("sha"):
+        payload["sha"] = body["sha"]  # update in place
+    st, body = _call(request, token, "PUT", f"{api}/contents/{path}", payload)
+    if st not in (200, 201):
+        raise GithubPublishError(
+            f"couldn't commit {path!r} (HTTP {st}): {body.get('message')}")
+
+
 def publish_page_to_repo(
     *,
     request: GithubRequest,
@@ -66,13 +82,21 @@ def publish_page_to_repo(
     commit_message: str,
     pr_title: str,
     pr_body: str,
+    extra_files: Optional[list[tuple[str, str]]] = None,
 ) -> dict[str, Any]:
     """Create `branch_name` off `base_branch`, commit `content` to `path`,
-    and open a PR. Returns {pr_url, pr_number, branch}. Raises
-    GithubPublishError with a clear message on any failed step.
+    commit any `extra_files` [(path, content), ...] on the same branch, and
+    open a PR. Returns {pr_url, pr_number, branch}. Raises GithubPublishError
+    with a clear message on any failed step.
+
+    `extra_files` lets a publish carry companion edits (e.g. registering the
+    page's route in App.tsx) so the page goes fully live on merge.
     """
     if not is_safe_repo_path(path):
         raise GithubPublishError(f"unsafe repo path: {path!r}")
+    for ep, _ in (extra_files or []):
+        if not is_safe_repo_path(ep):
+            raise GithubPublishError(f"unsafe repo path: {ep!r}")
     api = f"{GITHUB_API}/repos/{owner}/{repo}"
 
     # 1. Resolve the base branch's head commit sha.
@@ -95,14 +119,13 @@ def publish_page_to_repo(
         raise GithubPublishError(
             f"couldn't create branch {branch_name!r} (HTTP {st}): {body.get('message')}")
 
-    # 3. Commit the page file (Contents API; base64-encoded body).
-    encoded = base64.b64encode(content.encode("utf-8")).decode("ascii")
-    st, body = _call(request, token, "PUT", f"{api}/contents/{path}",
-                     {"message": commit_message, "content": encoded,
-                      "branch": branch_name})
-    if st not in (200, 201):
-        raise GithubPublishError(
-            f"couldn't commit {path!r} (HTTP {st}): {body.get('message')}")
+    # 3. Commit the page file, then any companion files (e.g. App.tsx route
+    #    registration) on the same branch.
+    _commit_file(request, token, api, path=path, content=content,
+                 branch=branch_name, message=commit_message)
+    for ep, ec in (extra_files or []):
+        _commit_file(request, token, api, path=ep, content=ec,
+                     branch=branch_name, message=f"{commit_message} (wire up {ep})")
 
     # 4. Open the PR.
     st, body = _call(request, token, "POST", f"{api}/pulls",

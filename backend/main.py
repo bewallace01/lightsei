@@ -5364,7 +5364,39 @@ def github_publish_page(
     owner, repo_name, base_branch, token = _resolve_publish_target(
         session, workspace_id, body.repo_id)
 
+    # If we're dropping a React page into a repo whose pages are registered in a
+    # central App.tsx (Vite + React Router), wire the lazy import + <Route> into
+    # the same PR so the page actually goes live on merge, not just exists in
+    # the repo. Best-effort: any failure leaves extra_files empty and we publish
+    # the page file alone (prior behavior).
+    extra_files: list[tuple[str, str]] = []
+    routed_path = None
+    if path.startswith("src/pages/") and path.endswith((".tsx", ".jsx")):
+        try:
+            import react_router_wiring
+            for app_path in ("src/App.tsx", "src/App.jsx"):
+                app_src = github_publish.fetch_file(
+                    request=github_publish._httpx_request, token=token,
+                    owner=owner, repo=repo_name, path=app_path, ref=base_branch)
+                if not app_src:
+                    continue
+                plan = react_router_wiring.plan_route_wiring(
+                    app_source=app_src, page_content=content, file_path=path)
+                if plan:
+                    extra_files.append((app_path, plan["app_source"]))
+                    routed_path = plan["route_path"]
+                break
+        except Exception:
+            logger.exception("publish: route wiring skipped")
+
     branch = body.branch_name or github_publish.branch_name_for(body.title)
+    pr_body = body.body or (
+        "New SEO page drafted by Spica (Lightsei). Review the page, "
+        "then merge to publish it on your site.")
+    if routed_path:
+        pr_body += (
+            f"\n\nThis PR also registers the page's route ({routed_path}) in "
+            "App.tsx, so it goes live as soon as you merge.")
     try:
         result = github_publish.publish_page_to_repo(
             request=github_publish._httpx_request, token=token,
@@ -5372,12 +5404,13 @@ def github_publish_page(
             path=path, content=content, branch_name=branch,
             commit_message=f"Add page: {body.title}",
             pr_title=f"Add SEO page: {body.title}",
-            pr_body=body.body or (
-                "New SEO page drafted by Spica (Lightsei). Review the page, "
-                "then merge to publish it on your site."),
+            pr_body=pr_body,
+            extra_files=extra_files,
         )
     except github_publish.GithubPublishError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    if routed_path:
+        result["routed_path"] = routed_path
     return result
 
 
