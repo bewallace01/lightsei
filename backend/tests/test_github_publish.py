@@ -70,12 +70,49 @@ def test_publish_page_happy_path():
         commit_message="Add page", pr_title="Add SEO page", pr_body="body")
     assert out["pr_url"].endswith("/pull/7")
     assert out["pr_number"] == 7 and out["branch"] == "lightsei-seo/x"
-    # The four steps fired in order.
+    # Steps in order: read base ref, create branch, look up the file's sha
+    # (new file -> none), commit it, open PR.
     methods = [c[0] for c in fake.calls]
-    assert methods == ["GET", "POST", "PUT", "POST"]
+    assert methods == ["GET", "POST", "GET", "PUT", "POST"]
     # The file body was base64-encoded.
     put = next(c for c in fake.calls if c[0] == "PUT")
     assert "content" in put[2] and put[2]["content"] != "# hi"
+
+
+def test_publish_commits_extra_files_then_opens_pr():
+    # extra_files (e.g. an App.tsx route registration) are committed on the same
+    # branch before the PR. An existing file's sha is fetched so the update
+    # isn't rejected.
+    # The App.tsx contents call returns an existing blob sha; everything else is
+    # new. The specific key must precede the generic "/contents/" so the fake's
+    # substring match resolves App.tsx to the sha response.
+    resp = {"/contents/src/App.tsx": {"status": 200, "body": {"sha": "appsha9"}}}
+    resp.update(_ok_responses())
+    fake = _FakeGithub(resp)
+    out = github_publish.publish_page_to_repo(
+        request=fake, token="t", owner="o", repo="r", base_branch="main",
+        path="src/pages/FooPage.tsx", content="export function FooPage(){}",
+        branch_name="lightsei-seo/foo", commit_message="Add page",
+        pr_title="Add SEO page", pr_body="body",
+        extra_files=[("src/App.tsx", "wired app source")])
+    assert out["pr_number"] == 7
+    puts = [c for c in fake.calls if c[0] == "PUT"]
+    # Two files committed: the page and App.tsx.
+    paths = [c[1] for c in puts]
+    assert any(p.endswith("/contents/src/pages/FooPage.tsx") for p in paths)
+    app_put = next(c for c in puts if c[1].endswith("/contents/src/App.tsx"))
+    # The App.tsx update carried the looked-up sha (in-place update).
+    assert app_put[2].get("sha") == "appsha9"
+
+
+def test_publish_rejects_unsafe_extra_file_path():
+    import pytest
+    with pytest.raises(github_publish.GithubPublishError):
+        github_publish.publish_page_to_repo(
+            request=_FakeGithub(_ok_responses()), token="t", owner="o", repo="r",
+            base_branch="main", path="src/pages/FooPage.tsx", content="x",
+            branch_name="b", commit_message="m", pr_title="t", pr_body="b",
+            extra_files=[("../../etc/passwd", "nope")])
 
 
 def test_publish_rejects_unsafe_path():
