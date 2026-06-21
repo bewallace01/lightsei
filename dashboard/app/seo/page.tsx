@@ -13,6 +13,7 @@ import {
   SeoSuggestion,
   designFormat,
   fetchDesignResult,
+  fetchRepoPageFiles,
   fetchGithubConnection,
   fetchSeoAudit,
   fetchSeoCrawl,
@@ -420,17 +421,41 @@ function DraftCard({
     busy: false,
   });
   const [open, setOpen] = useState(false);
-  // Capella polish: the styled full-HTML version, when produced.
+  // Capella's output (styled HTML, or a matching page component), when produced.
   const [polished, setPolished] = useState<string | null>(null);
+  const [isComponent, setIsComponent] = useState(false);
   const [polishBusy, setPolishBusy] = useState(false);
   const [polishNote, setPolishNote] = useState<string | null>(null);
   // A live page on the owner's site for Capella to match the look of.
   const [matchUrl, setMatchUrl] = useState(matchSite ?? "");
+  // Component mode: pick an existing page in the repo as a template.
+  const [templateFiles, setTemplateFiles] = useState<string[] | null>(null);
+  const [templatePath, setTemplatePath] = useState("");
 
   function onFormat(format: PageFormat) {
     const def = FORMATS.find((f) => f.value === format)!.path(slug);
     // Re-default the path when the owner hasn't hand-edited it.
     setSt((s) => ({ ...s, format, path: s.pathEdited ? s.path : def }));
+  }
+
+  // Poll Capella for a result; returns the output text or throws.
+  async function pollResult(commandId: string): Promise<string> {
+    for (let i = 0; i < 40; i++) {
+      await new Promise((r) => setTimeout(r, 2500));
+      const res = await fetchDesignResult(commandId);
+      if (res.status === "formatted" && res.output) return res.output;
+      if (res.status === "failed") throw new Error(res.error || "Capella failed");
+    }
+    throw new Error("still working — check back in a moment");
+  }
+
+  async function loadTemplates() {
+    if (!st.repoId || templateFiles) return;
+    try {
+      setTemplateFiles(await fetchRepoPageFiles(st.repoId));
+    } catch {
+      setTemplateFiles([]);
+    }
   }
 
   async function onPolish() {
@@ -447,36 +472,63 @@ function DraftCard({
         setPolishBusy(false);
         return;
       }
-      // Poll for the styled result (Capella runs on the worker).
-      for (let i = 0; i < 30; i++) {
-        await new Promise((r) => setTimeout(r, 2500));
-        const res = await fetchDesignResult(command_id);
-        if (res.status === "formatted" && res.output) {
-          setPolished(res.output);
-          // A polished page is a full HTML doc -> publish as HTML.
-          setSt((s) => ({
-            ...s,
-            format: "html",
-            path: s.pathEdited ? s.path : FORMATS[0].path(slug),
-          }));
-          setPolishNote(
-            matchUrl.trim()
-              ? `Polished to match ${matchUrl.trim()}. Publishing uses the styled version.`
-              : "Polished. Publishing will use the styled version.",
-          );
-          setPolishBusy(false);
-          return;
-        }
-        if (res.status === "failed") {
-          setPolishNote("Capella couldn't polish this page. Try again.");
-          setPolishBusy(false);
-          return;
-        }
-      }
-      setPolishNote("Still working — check back in a moment.");
-      setPolishBusy(false);
+      const output = await pollResult(command_id);
+      setPolished(output);
+      setIsComponent(false);
+      setSt((s) => ({
+        ...s,
+        format: "html",
+        path: s.pathEdited ? s.path : FORMATS[0].path(slug),
+      }));
+      setPolishNote(
+        matchUrl.trim()
+          ? `Polished to match ${matchUrl.trim()}. Publishing uses the styled version.`
+          : "Polished. Publishing will use the styled version.",
+      );
     } catch (e) {
       setPolishNote(String(e));
+    } finally {
+      setPolishBusy(false);
+    }
+  }
+
+  // Generate a new page COMPONENT that matches an existing page in the repo.
+  async function onGenerateComponent() {
+    if (!st.repoId || !templatePath) return;
+    setPolishBusy(true);
+    setPolishNote(null);
+    try {
+      const { command_id, design_assistant_deployed } = await designFormat({
+        content: basicPageHtml(draft),
+        content_type: "component",
+        template_repo_id: st.repoId,
+        template_path: templatePath,
+      });
+      if (!design_assistant_deployed) {
+        setPolishNote("Add the Design assistant (Capella) to your team first.");
+        setPolishBusy(false);
+        return;
+      }
+      const output = await pollResult(command_id);
+      setPolished(output);
+      setIsComponent(true);
+      // Publish the component next to the template it matched, with a name
+      // derived from the page slug.
+      const dir = templatePath.includes("/")
+        ? templatePath.slice(0, templatePath.lastIndexOf("/") + 1)
+        : "";
+      const ext = templatePath.slice(templatePath.lastIndexOf("."));
+      const name = slug
+        .split("-")
+        .map((p) => p.charAt(0).toUpperCase() + p.slice(1))
+        .join("");
+      setSt((s) => ({ ...s, pathEdited: true, path: `${dir}${name}Page${ext}` }));
+      setPolishNote(
+        `Generated a page matching ${templatePath}. Review it, then publish (you may need to add it to your router).`,
+      );
+    } catch (e) {
+      setPolishNote(String(e));
+    } finally {
       setPolishBusy(false);
     }
   }
@@ -521,7 +573,9 @@ function DraftCard({
 
       {polished && (
         <div className="mt-3 text-xs text-emerald-700 flex items-center gap-1">
-          🎨 Polished by Capella — publishing uses the styled version.
+          {isComponent
+            ? "🧩 Generated a page component matching your repo — publishing commits the code."
+            : "🎨 Polished by Capella — publishing uses the styled version."}
         </div>
       )}
       {!open && (
@@ -539,14 +593,63 @@ function DraftCard({
           </span>
         </label>
       )}
+      {!open && repos.length > 0 && (
+        <div className="mt-3 rounded-md border border-gray-200 bg-gray-50 p-3">
+          <div className="text-xs font-medium text-gray-700">
+            Match a page in my codebase (best for React / Vite / Next sites)
+          </div>
+          <div className="text-[11px] text-gray-500 mb-2">
+            Pick one of your existing pages; Capella writes a new page that uses
+            the same layout, components, and styling.
+          </div>
+          <div className="flex flex-col sm:flex-row gap-2">
+            <select
+              value={templatePath}
+              onFocus={loadTemplates}
+              onChange={(e) => setTemplatePath(e.target.value)}
+              className="flex-1 text-xs font-mono rounded-md ring-1 ring-gray-300 px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-accent-600"
+            >
+              <option value="">
+                {templateFiles === null
+                  ? "Pick a page to match…"
+                  : templateFiles.length === 0
+                  ? "No page files found in this repo"
+                  : "Pick a page to match…"}
+              </option>
+              {(templateFiles ?? []).map((f) => (
+                <option key={f} value={f}>
+                  {f}
+                </option>
+              ))}
+            </select>
+            <button
+              onClick={onGenerateComponent}
+              disabled={polishBusy || !templatePath}
+              className="text-xs px-3 py-1.5 rounded-md bg-accent-600 text-white hover:bg-accent-700 disabled:opacity-50"
+            >
+              {polishBusy ? "Generating…" : "Generate matching page"}
+            </button>
+          </div>
+        </div>
+      )}
       {!open ? (
         <div className="mt-4 flex items-center gap-2 flex-wrap">
           <button
-            onClick={() => openPreview(polished ?? basicPageHtml(draft))}
+            onClick={() => {
+              if (isComponent && polished) {
+                // A component is code, not a renderable page — show the source.
+                const blob = new Blob([polished], { type: "text/plain" });
+                const url = URL.createObjectURL(blob);
+                window.open(url, "_blank", "noopener");
+                setTimeout(() => URL.revokeObjectURL(url), 60000);
+              } else {
+                openPreview(polished ?? basicPageHtml(draft));
+              }
+            }}
             className="text-sm px-3 py-1.5 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50"
-            title="Open the full page in a new tab to see how it looks"
+            title="Open the page (or the generated code) in a new tab"
           >
-            👁 Preview{polished ? " (styled)" : ""}
+            {isComponent ? "👁 View code" : `👁 Preview${polished ? " (styled)" : ""}`}
           </button>
           <button
             onClick={onPolish}
