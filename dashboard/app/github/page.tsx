@@ -728,6 +728,38 @@ function GithubOAuthBlock() {
         </div>
       ) : (
         <div className="space-y-4">
+          {conn.auth_kind !== "oauth" ? (
+            // A pasted token (auth_kind 'pat') is usually read-only, which
+            // makes publishing fail with a 403 at the worst moment. Always
+            // offer the OAuth upgrade: the callback upserts this same
+            // connection, flipping it to a write-capable oauth token.
+            <div className="rounded-md border border-amber-300 bg-amber-50 px-3 py-3 text-sm text-amber-900 space-y-2">
+              <div>
+                This connection uses a pasted token. Pasted tokens are often
+                read-only, so <strong>publishing pages can fail</strong>.
+                Switch to OAuth to grant write access with one click. No token
+                to manage.
+              </div>
+              <button
+                onClick={connect}
+                className="px-4 py-2 text-sm font-medium rounded-md bg-gray-900 text-white hover:bg-gray-800"
+              >
+                Switch to OAuth
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center justify-between">
+              <p className="text-sm text-gray-600">
+                Connected via OAuth (write access for publishing).
+              </p>
+              <button
+                onClick={connect}
+                className="text-xs text-gray-500 hover:text-gray-700 underline"
+              >
+                Reconnect
+              </button>
+            </div>
+          )}
           <div>
             <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500 mb-2">Watched repos</h3>
             {state && state.repos.length > 0 ? (
