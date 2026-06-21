@@ -137,3 +137,52 @@ def _httpx_request(*, method: str, url: str, token: str,
     except Exception:
         body = {}
     return {"status": resp.status_code, "body": body if isinstance(body, dict) else {}}
+
+
+def fetch_file(*, request: GithubRequest, token: str, owner: str, repo: str,
+               path: str, ref: str = "HEAD") -> Optional[str]:
+    """Read a text file from a repo (the Contents API, base64-decoded). Returns
+    the file's text, or None if it isn't there / isn't readable. Used to pull
+    an existing page as a template. `request` is the injectable seam."""
+    import base64
+    if not is_safe_repo_path(path):
+        return None
+    api = f"{GITHUB_API}/repos/{owner}/{repo}"
+    st, body = _call(request, token, "GET", f"{api}/contents/{path}?ref={ref}")
+    if st != 200:
+        return None
+    if body.get("encoding") == "base64" and body.get("content"):
+        try:
+            return base64.b64decode(body["content"]).decode("utf-8", "ignore")
+        except Exception:
+            return None
+    # Some responses inline content without base64 for small files.
+    c = body.get("content")
+    return c if isinstance(c, str) else None
+
+
+def list_page_files(*, request: GithubRequest, token: str, owner: str, repo: str,
+                    ref: str = "HEAD", limit: int = 60) -> list[str]:
+    """List likely page-source files in the repo (for the template picker):
+    files under a pages/ or routes/ directory, or *Page.* files. Best-effort;
+    returns [] on any failure."""
+    api = f"{GITHUB_API}/repos/{owner}/{repo}"
+    st, body = _call(request, token, "GET", f"{api}/git/trees/{ref}?recursive=1")
+    if st != 200:
+        return []
+    out: list[str] = []
+    exts = (".tsx", ".jsx", ".vue", ".svelte", ".astro", ".html", ".js", ".ts")
+    for node in (body.get("tree") or []):
+        if node.get("type") != "blob":
+            continue
+        p = node.get("path") or ""
+        low = p.lower()
+        if not low.endswith(exts):
+            continue
+        if ("/pages/" in low or low.startswith("pages/") or "/routes/" in low
+                or low.startswith("routes/") or "page." in low
+                or low.endswith("page.tsx") or low.endswith("page.jsx")):
+            out.append(p)
+        if len(out) >= limit:
+            break
+    return out

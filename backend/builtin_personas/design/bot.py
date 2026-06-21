@@ -62,7 +62,9 @@ HERMES_CHANNEL = os.environ.get("DESIGN_HERMES_CHANNEL", "default")
 MODEL = os.environ.get("DESIGN_MODEL", "claude-sonnet-4-6")
 MAX_TOKENS = int(os.environ.get("DESIGN_MAX_TOKENS", "2000"))
 
-CONTENT_TYPES = ("page", "email", "social", "generic")
+CONTENT_TYPES = ("page", "email", "social", "generic", "component")
+# A full framework page component can be large; give it more room.
+COMPONENT_MAX_TOKENS = int(os.environ.get("DESIGN_COMPONENT_MAX_TOKENS", "6000"))
 
 _SYSTEM = (
     "You are the design specialist on a small business's team. You take "
@@ -71,6 +73,17 @@ _SYSTEM = (
     "spacing, a tasteful accent color, mobile-friendly. No corporate "
     "clutter, no lorem ipsum, no em dashes. Output ONLY the finished "
     "content, ready to use, with no commentary or code fences."
+)
+
+# For component mode: a careful front-end engineer who writes a new page that
+# fits an existing codebase exactly (imports, layout, framework, styling).
+_SYSTEM_COMPONENT = (
+    "You are a meticulous front-end engineer adding a page to an existing "
+    "codebase. You mirror the project's framework, imports, layout wrappers, "
+    "shared components, routing/meta patterns, and styling conventions exactly "
+    "so the new page is indistinguishable in structure from the others. You "
+    "change only the page's content. No em dashes. Output ONLY the new file's "
+    "raw source code, no commentary and no markdown code fences."
 )
 
 
@@ -90,6 +103,29 @@ def build_prompt(payload: dict[str, Any]) -> tuple[str, str]:
         ctype = "generic"
     extra = _instructions(payload)
     accent = _accent(payload)
+
+    if ctype == "component":
+        # Match an existing page from the owner's codebase. The template is an
+        # actual page file from their repo; produce a NEW page in the exact
+        # same framework, imports, layout, and conventions, with new content.
+        template = str(payload.get("template") or "").strip()
+        ask = (
+            "Below is an existing page from a website's codebase (TEMPLATE) and "
+            "the content for a new page (NEW CONTENT). Write a NEW page file in "
+            "the EXACT same framework, language, and conventions as the "
+            "template: the same import statements, the same layout/wrapper and "
+            "shared components, the same routing/meta/SEO patterns, the same "
+            "styling approach (CSS classes, Tailwind, etc.). Only the page's "
+            "actual content (headings, paragraphs, sections) should change to "
+            "the NEW CONTENT. Keep it production-ready and self-consistent. "
+            "Return ONLY the new file's source code, no commentary, no code "
+            "fences."
+        )
+        parts = [ask, "TEMPLATE (an existing page from this site):\n" + template,
+                 "NEW CONTENT for the new page:\n" + content]
+        if extra:
+            parts.append("Extra direction: " + extra)
+        return _SYSTEM_COMPONENT, "\n\n".join(parts)
 
     if ctype == "page":
         ask = (
@@ -217,8 +253,10 @@ def tick(
         lightsei.complete_command(cmd_id, error="ANTHROPIC_API_KEY not set on this workspace; add it in account settings")
         return cmd
 
+    # A full page component needs more output room than a styled snippet.
+    eff_max_tokens = COMPONENT_MAX_TOKENS if ctype == "component" else max_tokens
     try:
-        result = generate_design(payload, factory=factory, api_key=api_key, model=model, max_tokens=max_tokens)
+        result = generate_design(payload, factory=factory, api_key=api_key, model=model, max_tokens=eff_max_tokens)
     except Exception as e:
         lightsei.emit("design.crash", {"command_id": cmd_id, "error": repr(e),
                                        "traceback": traceback.format_exc()}, run_id=run_id)

@@ -2806,10 +2806,13 @@ def get_seo_suggestions(
 
 class DesignFormatIn(BaseModel):
     content: str
-    content_type: Optional[str] = None  # page | email | social | generic
+    content_type: Optional[str] = None  # page | email | social | generic | component
     accent_color: Optional[str] = None
     instructions: Optional[str] = None
     match_url: Optional[str] = None     # a live page to match the look of
+    # Component mode: an existing page in the owner's repo to use as a template.
+    template_repo_id: Optional[str] = None
+    template_path: Optional[str] = None
 
 
 def _fetch_page_html(url: str) -> Optional[str]:
@@ -2847,7 +2850,25 @@ def design_format(
 
     accent = body.accent_color
     instructions = body.instructions
+    content_type = body.content_type or "generic"
     matched_from = None
+    template = None
+
+    # Component mode: fetch an existing page from the repo as the template.
+    if body.template_repo_id and body.template_path:
+        import github_publish
+        owner, repo_name, _branch, token = _resolve_publish_target(
+            session, workspace_id, body.template_repo_id)
+        template = github_publish.fetch_file(
+            request=github_publish._httpx_request, token=token,
+            owner=owner, repo=repo_name, path=body.template_path)
+        if not template:
+            raise HTTPException(
+                status_code=400,
+                detail=f"couldn't read {body.template_path} from the repo")
+        content_type = "component"
+        matched_from = body.template_path
+
     if body.match_url and str(body.match_url).strip():
         import feeder
         url = feeder.normalize_website_url(body.match_url)
@@ -2857,14 +2878,14 @@ def design_format(
                 profile = _design.extract_style_profile(ref_html)
                 if profile:
                     instructions = (instructions + "\n\n" + profile) if instructions else profile
-                    matched_from = url
+                    matched_from = matched_from or url
                 if not accent:
                     accent = _design.primary_color(ref_html)
 
     cmd_id = _design.enqueue_format(
         session, workspace_id, content=body.content,
-        content_type=body.content_type or "generic",
-        accent_color=accent, instructions=instructions,
+        content_type=content_type,
+        accent_color=accent, instructions=instructions, template=template,
         now=utcnow())
     session.commit()
     return {
@@ -2884,6 +2905,24 @@ def design_format_result(
     import design as _design
 
     return _design.get_result(session, workspace_id, command_id)
+
+
+@app.get("/workspaces/me/github/repos/{repo_id}/page-files")
+def github_repo_page_files(
+    repo_id: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """List likely page-source files in a connected repo, so the owner can
+    pick one as a template for a matching new page (component mode)."""
+    import github_publish
+
+    owner, repo_name, _branch, token = _resolve_publish_target(
+        session, workspace_id, repo_id)
+    files = github_publish.list_page_files(
+        request=github_publish._httpx_request, token=token,
+        owner=owner, repo=repo_name)
+    return {"files": files}
 
 
 class AskQuestion(BaseModel):
