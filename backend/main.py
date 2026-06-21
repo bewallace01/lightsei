@@ -4981,7 +4981,13 @@ def get_github_connection(
     session: Session = Depends(get_session),
     workspace_id: str = Depends(get_workspace_id),
 ) -> dict[str, Any]:
-    """Connection state + the repos under it (no secrets)."""
+    """Connection state + the repos under it (no secrets).
+
+    Surfaces repos from BOTH systems so a publish-capable repo always shows
+    up: the new GithubRepo rows (under a workspace GithubConnection) AND any
+    classic GitHubIntegration (the /github page's per-repo PAT flow). Either
+    is a valid publish target.
+    """
     conn = session.execute(
         select(GithubConnection).where(GithubConnection.workspace_id == workspace_id)
     ).scalar_one_or_none()
@@ -4989,10 +4995,39 @@ def get_github_connection(
         select(GithubRepo).where(GithubRepo.workspace_id == workspace_id)
         .order_by(GithubRepo.created_at)
     ).scalars().all()
-    return {
-        "connection": _serialize_github_connection(conn) if conn else None,
-        "repos": [_serialize_github_repo(r) for r in repos],
-    }
+    repo_dicts = [_serialize_github_repo(r) for r in repos]
+
+    # Classic per-repo PAT integrations, mapped to the same minimal shape the
+    # /seo repo dropdown consumes (id + owner/name/branch). De-dup by
+    # (owner, name) so a repo connected both ways shows once.
+    seen = {(r["repo_owner"], r["repo_name"]) for r in repo_dicts}
+    integrations = session.execute(
+        select(GitHubIntegration).where(
+            GitHubIntegration.workspace_id == workspace_id,
+            GitHubIntegration.is_active.is_(True),
+        ).order_by(GitHubIntegration.created_at)
+    ).scalars().all()
+    for g in integrations:
+        if (g.repo_owner, g.repo_name) in seen:
+            continue
+        repo_dicts.append({
+            "id": g.id,
+            "repo_owner": g.repo_owner,
+            "repo_name": g.repo_name,
+            "branch": g.branch,
+            "is_active": g.is_active,
+            "created_at": g.created_at.isoformat(),
+        })
+
+    # A classic integration is itself a connection, so report "connected"
+    # even when there's no GithubConnection row (so /seo doesn't nag).
+    connection = _serialize_github_connection(conn) if conn else None
+    if connection is None and integrations:
+        connection = {"id": integrations[0].id, "auth_kind": "pat",
+                      "github_login": None,
+                      "created_at": integrations[0].created_at.isoformat(),
+                      "updated_at": integrations[0].updated_at.isoformat()}
+    return {"connection": connection, "repos": repo_dicts}
 
 
 @app.post("/workspaces/me/github/repos")
@@ -5112,6 +5147,40 @@ class PublishPageIn(BaseModel):
     branch_name: Optional[str] = None  # override the derived branch name
 
 
+def _resolve_publish_target(
+    session: Session, workspace_id: str, repo_id: str,
+) -> tuple[str, str, str, str]:
+    """Resolve (owner, repo, base_branch, token) for a publish, supporting
+    BOTH GitHub connection systems:
+
+      - Phase 10B: a GithubRepo (repo_id) under a workspace GithubConnection
+        (OAuth or pasted token).
+      - Phase 10.1: a GitHubIntegration (repo_id) — the per-repo PAT flow the
+        /github page's classic form uses.
+
+    The owner connected via one or the other; the publish flow shouldn't care
+    which. Raises a clean 4xx if the repo can't be found or has no token."""
+    if not secrets_crypto.is_available():
+        raise HTTPException(status_code=503, detail="secrets store unavailable: LIGHTSEI_SECRETS_KEY is not configured")
+
+    # 1. New multi-repo system: GithubRepo + workspace GithubConnection.
+    repo = session.get(GithubRepo, repo_id)
+    if repo is not None and repo.workspace_id == workspace_id:
+        conn = session.execute(
+            select(GithubConnection).where(GithubConnection.workspace_id == workspace_id)
+        ).scalar_one_or_none()
+        if conn is None:
+            raise HTTPException(status_code=400, detail="connect GitHub first (no token on this workspace)")
+        return repo.repo_owner, repo.repo_name, repo.branch, secrets_crypto.decrypt(conn.encrypted_token)
+
+    # 2. Classic per-repo PAT: GitHubIntegration carries its own token.
+    integ = session.get(GitHubIntegration, repo_id)
+    if integ is not None and integ.workspace_id == workspace_id:
+        return integ.repo_owner, integ.repo_name, integ.branch, secrets_crypto.decrypt(integ.encrypted_pat)
+
+    raise HTTPException(status_code=404, detail="repo not found")
+
+
 @app.post("/workspaces/me/github/publish-page")
 def github_publish_page(
     body: PublishPageIn,
@@ -5152,19 +5221,14 @@ def github_publish_page(
     if not str(content or "").strip():
         raise HTTPException(status_code=400, detail="content is required")
 
-    repo = _owned_github_repo(session, body.repo_id, workspace_id)
-    conn = session.execute(
-        select(GithubConnection).where(GithubConnection.workspace_id == workspace_id)
-    ).scalar_one_or_none()
-    if conn is None:
-        raise HTTPException(status_code=400, detail="connect GitHub first (no token on this workspace)")
+    owner, repo_name, base_branch, token = _resolve_publish_target(
+        session, workspace_id, body.repo_id)
 
-    token = secrets_crypto.decrypt(conn.encrypted_token)
     branch = body.branch_name or github_publish.branch_name_for(body.title)
     try:
         result = github_publish.publish_page_to_repo(
             request=github_publish._httpx_request, token=token,
-            owner=repo.repo_owner, repo=repo.repo_name, base_branch=repo.branch,
+            owner=owner, repo=repo_name, base_branch=base_branch,
             path=path, content=content, branch_name=branch,
             commit_message=f"Add page: {body.title}",
             pr_title=f"Add SEO page: {body.title}",

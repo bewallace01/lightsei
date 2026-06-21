@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 import github_publish
 import secrets_crypto
 from db import session_scope
-from models import GithubConnection, GithubRepo
+from models import GitHubIntegration, GithubConnection, GithubRepo
 from tests.conftest import auth_headers
 
 
@@ -199,3 +199,50 @@ def test_publish_endpoint_no_connection_400(client, bob):
         "repo_id": str(uuid.uuid4()), "path": "x.md", "content": "x", "title": "x"})
     # Unknown repo resolves first (404); the point is it never 500s.
     assert r.status_code in (400, 404)
+
+
+# ---------- classic GitHubIntegration (PAT) publish support ---------- #
+
+
+def _connect_integration(workspace_id: str) -> str:
+    """Add a classic GitHubIntegration (the /github PAT flow). Returns its id."""
+    iid = str(uuid.uuid4())
+    with session_scope() as s:
+        s.add(GitHubIntegration(
+            id=iid, workspace_id=workspace_id, repo_owner="acme", repo_name="site",
+            branch="main", encrypted_pat=secrets_crypto.encrypt("ghp-classic"),
+            encrypted_webhook_secret=secrets_crypto.encrypt("wh"),
+            is_active=True, created_at=_now(), updated_at=_now()))
+    return iid
+
+
+def test_publish_via_classic_integration(client, alice, monkeypatch):
+    """A workspace connected via the classic PAT form (GitHubIntegration,
+    no GithubConnection) can still publish."""
+    iid = _connect_integration(alice["workspace"]["id"])
+    captured = {}
+    monkeypatch.setattr(github_publish, "publish_page_to_repo",
+                        lambda **k: captured.update(k) or {
+                            "pr_url": "https://github.com/acme/site/pull/5",
+                            "pr_number": 5, "branch": k["branch_name"]})
+    h = auth_headers(alice["session_token"])
+    r = client.post("/workspaces/me/github/publish-page", headers=h, json={
+        "repo_id": iid, "title": "Hi", "content": "<h1>x</h1>", "path": "p/x.html"})
+    assert r.status_code == 200, r.text
+    assert r.json()["pr_number"] == 5
+    # Used the integration's repo + its own PAT.
+    assert captured["owner"] == "acme" and captured["repo"] == "site"
+
+
+def test_connection_get_surfaces_integration_repo(client, alice):
+    """The /github/connection response (which feeds the /seo repo dropdown)
+    includes a classic integration repo so it's selectable for publishing."""
+    _connect_integration(alice["workspace"]["id"])
+    h = auth_headers(alice["session_token"])
+    r = client.get("/workspaces/me/github/connection", headers=h)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    names = [(x["repo_owner"], x["repo_name"]) for x in body["repos"]]
+    assert ("acme", "site") in names
+    # Reports connected (so /seo doesn't show "connect GitHub").
+    assert body["connection"] is not None
