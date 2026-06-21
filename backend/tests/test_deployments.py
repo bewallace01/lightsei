@@ -4,8 +4,17 @@ Worker-facing endpoints land in 5.2; this file only covers the user-facing
 upload surface.
 """
 import io
+from datetime import datetime, timezone
 
+from sqlalchemy import text
+
+from db import session_scope
+from models import Agent
 from tests.conftest import auth_headers
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 def _upload(client, headers, agent_name="my-bot", payload=b"PK\x03\x04fake-zip"):
@@ -263,6 +272,42 @@ def test_redeploy_creates_new_pointing_at_same_blob(client, alice):
         f"/workspaces/me/deployments/{old['id']}", headers=h,
     ).json()
     assert refetch["desired_state"] == "stopped"
+
+
+def test_redeploy_builtin_persona_rebuilds_fresh_blob(client, alice):
+    """A built-in persona redeploy must REBUILD the bundle from the current
+    vendored source (not reuse the frozen snapshot), so shipped bot
+    improvements actually reach a running bot. Asserts the new deployment
+    points at a different blob whose bytes are a freshly built bundle."""
+    ws_id = alice["workspace"]["id"]
+    h = auth_headers(alice["session_token"])
+    # Provision + deploy a real built-in persona (source='builtin').
+    with session_scope() as s:
+        s.add(Agent(workspace_id=ws_id, name="design", role="executor",
+                    created_at=utcnow(), updated_at=utcnow()))
+    client.post("/workspaces/me/team/deploy", headers=h)
+    with session_scope() as s:
+        old_id, old_blob = s.execute(
+            text("SELECT id, source_blob_id FROM deployments WHERE "
+                 "workspace_id=:w AND agent_name='design' AND source='builtin'"),
+            {"w": ws_id}).first()
+
+    r = client.post(f"/workspaces/me/deployments/{old_id}/redeploy", headers=h)
+    assert r.status_code == 200, r.text
+    new = r.json()
+    assert new["source"] == "builtin"
+    # A brand-new blob was built, not the old one reused.
+    assert new["source_blob_id"] != old_blob
+    # And it really is a freshly built design bundle (the current code, with
+    # component support — the thing the stale blob lacked).
+    import builtin_personas, zipfile, io
+    with session_scope() as s:
+        data = s.execute(
+            text("SELECT data FROM deployment_blobs WHERE id=:b"),
+            {"b": new["source_blob_id"]}).scalar_one()
+    with zipfile.ZipFile(io.BytesIO(bytes(data))) as z:
+        bot_src = z.read(next(n for n in z.namelist() if n.endswith("bot.py"))).decode()
+    assert "component" in bot_src and "_SYSTEM_COMPONENT" in bot_src
 
 
 def test_unauthenticated_blocked(client):
