@@ -71,25 +71,13 @@ def _read_job(job_id: str) -> dict:
 
 
 def _wait_for_terminal(job_id: str, timeout_s: float = 5.0) -> dict:
-    """Drive the runner directly (the background runner is disabled in tests,
-    so we pump run_one_job() ourselves) until this job reaches a terminal
-    state. Deterministic — no dependence on a polling thread."""
-    import asyncio
-
     deadline = time.monotonic() + timeout_s
     last: dict = {}
     while time.monotonic() < deadline:
         last = _read_job(job_id)
         if last.get("status") in ("success", "failed"):
             return last
-        # Process one pending job (this one, or another queued); stop pumping
-        # when there's no work left and we still haven't hit terminal.
-        did = asyncio.run(jobs.run_one_job())
-        if not did and _read_job(job_id).get("status") not in ("success", "failed"):
-            time.sleep(0.02)
-    last = _read_job(job_id)
-    if last.get("status") in ("success", "failed"):
-        return last
+        time.sleep(0.02)
     raise AssertionError(
         f"job {job_id} did not reach terminal state within {timeout_s}s; last={last}"
     )

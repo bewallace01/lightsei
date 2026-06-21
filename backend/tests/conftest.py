@@ -96,10 +96,11 @@ os.environ.setdefault(
 # Same idea for the worker shared secret.
 os.environ.setdefault("LIGHTSEI_WORKER_TOKEN", "test-worker-token")
 
-# Keep the app's startup from spawning the background workers (jobs runner,
-# eval cron, trigger scheduler). Those poll the same test DB on their own
-# threads and race tests that assert on job/trigger state — the source of the
-# intermittent test_eval_runner flake. Tests drive that logic directly.
+# Keep the app's startup from spawning the PERIODIC background workers (eval
+# cron + trigger scheduler). Those poll the same test DB on a timer and drop
+# new jobs/runs that race tests asserting on job/trigger state — the source of
+# the intermittent test_eval_runner flake. The jobs RUNNER stays on (many tests
+# enqueue a row and wait for it to be processed); see main.on_startup.
 os.environ.setdefault("LIGHTSEI_DISABLE_BACKGROUND", "1")
 
 
