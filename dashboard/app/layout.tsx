@@ -42,8 +42,11 @@ const mono = Space_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Lightsei",
-  description: "Drop-in observability and guardrails for AI agents",
+  title: "Lightsei — Your AI Business Team",
+  description:
+    "Your AI Business Team: assistants that run your small business — " +
+    "monitoring your website and SEO, answering reviews and email, " +
+    "capturing leads, and writing marketing. Set up in minutes, no code.",
 };
 
 // Operator dashboard is light-mode only. Without this, Chrome /
