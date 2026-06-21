@@ -6172,21 +6172,56 @@ def stop_deployment(
     return _serialize_deployment(dep)
 
 
+def _rebuild_builtin_blob(
+    session: Session, workspace_id: str, agent_name: str, now: datetime
+) -> Optional[str]:
+    """Build a fresh bundle from the CURRENT vendored persona source and store
+    it as a blob. Returns the new blob id, or None if the agent isn't a known
+    built-in (or the build fails). Does not commit."""
+    import builtin_personas
+    try:
+        data = builtin_personas.build_bundle_zip(agent_name)
+    except Exception:
+        logger.exception("redeploy: rebuild of builtin %s failed", agent_name)
+        return None
+    blob = DeploymentBlob(
+        id=str(uuid.uuid4()),
+        workspace_id=workspace_id,
+        size_bytes=len(data),
+        sha256=hashlib.sha256(data).hexdigest(),
+        data=data,
+        created_at=now,
+    )
+    session.add(blob)
+    session.flush()
+    return blob.id
+
+
 def _redeploy_from(session: Session, old: Deployment, now: datetime) -> Deployment:
-    """Stop `old` and queue a fresh deployment from the same source blob.
-    The worker claims the new one and re-spawns the bot, which re-fetches
-    workspace secrets — so this is how a bot picks up a newly-added secret
-    (env is injected at spawn, not hot-reloaded). Does not commit."""
+    """Stop `old` and queue a fresh deployment. The worker claims the new one
+    and re-spawns the bot, which re-fetches workspace secrets — so this is how a
+    bot picks up a newly-added secret (env is injected at spawn, not
+    hot-reloaded). Does not commit.
+
+    For built-in personas the bundle is REBUILT from the current vendored
+    source, so a redeploy also picks up shipped bot improvements rather than
+    re-running the frozen snapshot. Uploaded/GitHub-sourced bots (which we
+    can't regenerate server-side) reuse their existing blob."""
     old.desired_state = "stopped"
     old.updated_at = now
+    blob_id = old.source_blob_id
+    if old.source == "builtin":
+        fresh = _rebuild_builtin_blob(
+            session, old.workspace_id, old.agent_name, now)
+        if fresh is not None:
+            blob_id = fresh
     new = Deployment(
         id=str(uuid.uuid4()),
         workspace_id=old.workspace_id,
         agent_name=old.agent_name,
         status="queued",
         desired_state="running",
-        source_blob_id=old.source_blob_id,
-        # Carry provenance forward — a redeploy reuses the same blob.
+        source_blob_id=blob_id,
         source=old.source,
         source_commit_sha=old.source_commit_sha,
         created_at=now,
@@ -6227,9 +6262,11 @@ def redeploy_deployment(
     session: Session = Depends(get_session),
     workspace_id: str = Depends(get_workspace_id),
 ) -> dict[str, Any]:
-    """Create a new deployment pointing at the same source blob. The old
-    deployment is stopped (desired_state=stopped) so the worker swaps over
-    cleanly. Useful for restarting a wedged bot without re-uploading."""
+    """Queue a fresh deployment and stop the old one (desired_state=stopped) so
+    the worker swaps over cleanly. For built-in personas the bundle is rebuilt
+    from the current vendored source, so this also pulls in shipped bot
+    improvements; uploaded/GitHub bots reuse their existing blob. Useful for
+    restarting a wedged bot or updating one to the latest code."""
     old = session.get(Deployment, deployment_id)
     if old is None or old.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail="deployment not found")
