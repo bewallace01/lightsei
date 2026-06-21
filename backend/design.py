@@ -9,7 +9,9 @@ it.
 from __future__ import annotations
 
 import json
+import re
 import uuid
+from collections import Counter
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -23,6 +25,63 @@ SOURCE = "dashboard"
 _COMMAND_TTL = timedelta(hours=24)
 _MAX_CONTENT_LEN = 60_000
 CONTENT_TYPES = ("page", "email", "social", "generic")
+
+
+# ---------- "Match my site" style extraction ---------- #
+
+_FONT_RE = re.compile(r"font-family\s*:\s*([^;}\"']+)", re.IGNORECASE)
+_HEX_RE = re.compile(r"#[0-9a-fA-F]{6}\b")
+_STYLE_BLOCK_RE = re.compile(r"<style\b[^>]*>(.*?)</style>", re.IGNORECASE | re.DOTALL)
+_TAILWIND_RE = re.compile(r'class="[^"]*\b(?:flex|grid|px-\d|py-\d|text-(?:sm|lg|xl)|bg-\w+-\d{2,3}|rounded-\w+)\b', re.IGNORECASE)
+_BOOTSTRAP_RE = re.compile(r'class="[^"]*\b(?:container|row|col-\w+|btn-(?:primary|secondary)|navbar)\b', re.IGNORECASE)
+
+
+def extract_style_profile(html: str, *, max_chars: int = 1800) -> Optional[str]:
+    """Read a page's HTML and return a compact, plain-text style guide Capella
+    can use to MATCH the site's look (fonts, colors, framework, a CSS sample).
+    Pure + testable. Returns None if nothing useful was found.
+    """
+    html = html or ""
+    parts: list[str] = []
+
+    # Fonts (dedup, keep order, cap).
+    fonts: list[str] = []
+    for m in _FONT_RE.findall(html):
+        f = " ".join(m.split()).strip().strip("'\"")
+        if f and f.lower() not in [x.lower() for x in fonts]:
+            fonts.append(f)
+    if fonts:
+        parts.append("Fonts used: " + "; ".join(fonts[:4]) + ".")
+
+    # Colors: most common hex values that aren't pure black/white.
+    skip = {"#ffffff", "#000000", "#fff", "#000"}
+    counts = Counter(c.lower() for c in _HEX_RE.findall(html) if c.lower() not in skip)
+    colors = [c for c, _ in counts.most_common(6)]
+    if colors:
+        parts.append("Brand colors: " + ", ".join(colors) + ".")
+
+    # CSS framework hint.
+    if _TAILWIND_RE.search(html):
+        parts.append("The site uses Tailwind CSS utility classes; prefer matching that style.")
+    elif _BOOTSTRAP_RE.search(html):
+        parts.append("The site uses Bootstrap; prefer matching that style.")
+
+    # A sample of the site's own CSS for the model to mimic.
+    css = " ".join(" ".join(_STYLE_BLOCK_RE.findall(html)).split())
+    if css:
+        parts.append("Sample of the site's CSS to mirror:\n" + css[:max_chars])
+
+    if not parts:
+        return None
+    return ("Match this existing website's visual design as closely as you "
+            "can:\n" + "\n".join(parts))
+
+
+def primary_color(html: str) -> Optional[str]:
+    """The most common non-black/white hex color (a good accent guess)."""
+    skip = {"#ffffff", "#000000"}
+    counts = Counter(c.lower() for c in _HEX_RE.findall(html or "") if c.lower() not in skip)
+    return counts.most_common(1)[0][0] if counts else None
 
 
 def enqueue_format(

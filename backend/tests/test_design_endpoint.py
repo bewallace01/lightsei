@@ -97,3 +97,61 @@ def test_design_result_isolated_per_workspace(client, alice, bob):
     r = client.get(f"/workspaces/me/design/format/{cid}",
                    headers=auth_headers(bob["session_token"]))
     assert r.json()["status"] == "pending"
+
+
+# ---------- match-my-site style extraction ---------- #
+import design as _design_mod  # noqa: E402
+
+_SITE_HTML = """
+<html><head><style>
+  body { font-family: 'Poppins', sans-serif; color: #2b2d42; }
+  .btn { background: #ef233c; border-radius: 6px; }
+  a { color: #ef233c; }
+</style></head>
+<body class="container"><div class="row"><a class="btn-primary">x</a></div></body></html>
+"""
+
+
+def test_extract_style_profile_pulls_fonts_colors_framework():
+    p = _design_mod.extract_style_profile(_SITE_HTML)
+    assert p is not None
+    assert "Poppins" in p
+    assert "#ef233c" in p          # brand color
+    assert "Bootstrap" in p        # container/row/btn-primary
+    assert "CSS to mirror" in p
+
+
+def test_extract_style_profile_none_when_empty():
+    assert _design_mod.extract_style_profile("<p>hi</p>") is None
+
+
+def test_primary_color_picks_frequent_nonbw():
+    assert _design_mod.primary_color(_SITE_HTML) == "#ef233c"
+
+
+def test_design_format_match_url_folds_style_into_instructions(client, alice, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "_fetch_page_html", lambda url: _SITE_HTML)
+    h = auth_headers(alice["session_token"])
+    r = client.post("/workspaces/me/design/format", headers=h, json={
+        "content": "<h1>Hi</h1>", "content_type": "page",
+        "match_url": "mysite.com"})
+    assert r.status_code == 200, r.text
+    assert r.json()["matched_site"] == "https://mysite.com"
+    cid = r.json()["command_id"]
+    with session_scope() as s:
+        row = s.execute(text("SELECT payload FROM commands WHERE id=:id"),
+                        {"id": cid}).mappings().first()
+        # The fetched site's style guide is in the command instructions.
+        assert "Poppins" in row["payload"]["instructions"]
+        assert row["payload"]["accent_color"] == "#ef233c"
+
+
+def test_design_format_match_url_unreachable_degrades(client, alice, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "_fetch_page_html", lambda url: None)  # fetch fails
+    h = auth_headers(alice["session_token"])
+    r = client.post("/workspaces/me/design/format", headers=h, json={
+        "content": "<h1>Hi</h1>", "match_url": "down.com"})
+    assert r.status_code == 200  # still works, just no match
+    assert r.json()["matched_site"] is None
