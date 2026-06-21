@@ -246,3 +246,23 @@ def test_connection_get_surfaces_integration_repo(client, alice):
     assert ("acme", "site") in names
     # Reports connected (so /seo doesn't show "connect GitHub").
     assert body["connection"] is not None
+
+
+def test_integration_repo_prefers_oauth_token_when_present(client, alice, monkeypatch):
+    """After connecting via OAuth, an existing classic-integration repo
+    publishes with the OAuth (write) token, not the old read-only PAT."""
+    iid = _connect_integration(alice["workspace"]["id"])  # integration w/ "ghp-classic"
+    # Add an OAuth connection (no GithubRepo) — its token should win.
+    with session_scope() as s:
+        s.add(GithubConnection(id=str(uuid.uuid4()), workspace_id=alice["workspace"]["id"],
+                               encrypted_token=secrets_crypto.encrypt("ghu-oauth-write"),
+                               auth_kind="oauth", created_at=_now(), updated_at=_now()))
+    captured = {}
+    monkeypatch.setattr(github_publish, "publish_page_to_repo",
+                        lambda **k: captured.update(k) or {
+                            "pr_url": "u", "pr_number": 1, "branch": k["branch_name"]})
+    h = auth_headers(alice["session_token"])
+    r = client.post("/workspaces/me/github/publish-page", headers=h, json={
+        "repo_id": iid, "title": "x", "content": "<h1>x</h1>", "path": "p/x.html"})
+    assert r.status_code == 200, r.text
+    assert captured["token"] == "ghu-oauth-write"  # OAuth token used, not the PAT

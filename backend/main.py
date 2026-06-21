@@ -5173,10 +5173,19 @@ def _resolve_publish_target(
             raise HTTPException(status_code=400, detail="connect GitHub first (no token on this workspace)")
         return repo.repo_owner, repo.repo_name, repo.branch, secrets_crypto.decrypt(conn.encrypted_token)
 
-    # 2. Classic per-repo PAT: GitHubIntegration carries its own token.
+    # 2. Classic per-repo PAT: GitHubIntegration carries its own token. But if
+    # the workspace has since connected via OAuth (a GithubConnection, which
+    # always has the `repo` write scope), prefer that token — it spares the
+    # owner from re-pasting a write PAT just to publish to a repo they already
+    # connected read-only.
     integ = session.get(GitHubIntegration, repo_id)
     if integ is not None and integ.workspace_id == workspace_id:
-        return integ.repo_owner, integ.repo_name, integ.branch, secrets_crypto.decrypt(integ.encrypted_pat)
+        conn = session.execute(
+            select(GithubConnection).where(GithubConnection.workspace_id == workspace_id)
+        ).scalar_one_or_none()
+        token = secrets_crypto.decrypt(
+            conn.encrypted_token if conn is not None else integ.encrypted_pat)
+        return integ.repo_owner, integ.repo_name, integ.branch, token
 
     raise HTTPException(status_code=404, detail="repo not found")
 
