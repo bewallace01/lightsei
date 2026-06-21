@@ -2839,6 +2839,50 @@ def _fetch_page_html(url: str) -> Optional[str]:
     return None
 
 
+def _augment_html_with_linked_css(page_url: str, html: str, *, max_sheets: int = 2,
+                                   max_bytes: int = 200_000) -> str:
+    """Many sites (especially site builders) keep their real colors in external
+    stylesheets, so the inline HTML alone has no `body {}` rule to read. Fetch a
+    couple of same-origin <link rel=stylesheet> hrefs and fold them into a
+    <style> block so the style extractor can see the actual theme. Best-effort:
+    any failure just returns the original html. Capped to keep it cheap."""
+    try:
+        import re as _re
+        from urllib.parse import urljoin, urlparse
+        import httpx
+        origin = urlparse(page_url).netloc
+        hrefs = _re.findall(
+            r'<link\b[^>]*\brel=["\']?stylesheet["\']?[^>]*\bhref=["\']([^"\']+)["\']',
+            html, _re.IGNORECASE)
+        # Also catch rel after href.
+        hrefs += _re.findall(
+            r'<link\b[^>]*\bhref=["\']([^"\']+)["\'][^>]*\brel=["\']?stylesheet',
+            html, _re.IGNORECASE)
+        collected: list[str] = []
+        seen: set[str] = set()
+        for href in hrefs:
+            if len(collected) >= max_sheets:
+                break
+            full = urljoin(page_url, href)
+            if full in seen:
+                continue
+            seen.add(full)
+            if urlparse(full).netloc != origin:
+                continue  # same-origin only
+            try:
+                r = httpx.get(full, timeout=8.0, follow_redirects=True,
+                              headers={"User-Agent": "Lightsei-Design/1.0"})
+                if r.status_code < 400 and r.text:
+                    collected.append(r.text[:max_bytes])
+            except Exception:
+                continue
+        if collected:
+            return html + "\n<style>\n" + "\n".join(collected) + "\n</style>"
+    except Exception:
+        pass
+    return html
+
+
 @app.post("/workspaces/me/design/format")
 def design_format(
     body: DesignFormatIn,
@@ -2885,6 +2929,7 @@ def design_format(
         if url:
             ref_html = _fetch_page_html(url)
             if ref_html:
+                ref_html = _augment_html_with_linked_css(url, ref_html)
                 profile = _design.extract_style_profile(ref_html)
                 if profile:
                     instructions = (instructions + "\n\n" + profile) if instructions else profile
