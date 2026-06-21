@@ -2043,7 +2043,12 @@ export async function generateSeoPage(input: {
 
 // ---------- Design assistant (Capella) ---------- //
 
-export type DesignContentType = "page" | "email" | "social" | "generic";
+export type DesignContentType =
+  | "page"
+  | "email"
+  | "social"
+  | "generic"
+  | "component";
 
 export interface DesignResult {
   status: "pending" | "formatted" | "failed";
@@ -2057,18 +2062,37 @@ export async function designFormat(input: {
   content_type?: DesignContentType;
   accent_color?: string;
   instructions?: string;
-}): Promise<{ command_id: string; design_assistant_deployed: boolean }> {
+  match_url?: string;
+  // Component mode: match an existing page in the owner's repo.
+  template_repo_id?: string;
+  template_path?: string;
+}): Promise<{
+  command_id: string;
+  design_assistant_deployed: boolean;
+  matched_site?: string | null;
+}> {
   return (await authedJson("/workspaces/me/design/format", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
-  })) as { command_id: string; design_assistant_deployed: boolean };
+  })) as {
+    command_id: string;
+    design_assistant_deployed: boolean;
+    matched_site?: string | null;
+  };
 }
 
 export async function fetchDesignResult(commandId: string): Promise<DesignResult> {
   return (await authedJson(
     `/workspaces/me/design/format/${encodeURIComponent(commandId)}`,
   )) as DesignResult;
+}
+
+export async function fetchRepoPageFiles(repoId: string): Promise<string[]> {
+  const body = (await authedJson(
+    `/workspaces/me/github/repos/${encodeURIComponent(repoId)}/page-files`,
+  )) as { files: string[] };
+  return body.files;
 }
 
 export interface SeoSuggestion {
