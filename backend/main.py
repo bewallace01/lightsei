@@ -732,6 +732,15 @@ def on_startup() -> None:
                 "model_pricing seed failed: %s", e
             )
 
+    # The background workers (jobs runner, eval cron, trigger scheduler) all
+    # poll the same DB on their own threads. Under the test client they would
+    # race the tests' own assertions about job/trigger state (a pending
+    # eval_runs row gets claimed -> 'running' mid-assertion). Gate them off
+    # when LIGHTSEI_DISABLE_BACKGROUND is set (conftest sets it); prod is
+    # unaffected.
+    if os.environ.get("LIGHTSEI_DISABLE_BACKGROUND") == "1":
+        return
+
     # Phase 12C.6.2: in-process runner for /agents/generate and
     # /teams/plan. Picks pending generation_jobs rows and runs them
     # off the request path so long Anthropic calls don't race the

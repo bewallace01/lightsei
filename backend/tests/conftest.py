@@ -96,6 +96,12 @@ os.environ.setdefault(
 # Same idea for the worker shared secret.
 os.environ.setdefault("LIGHTSEI_WORKER_TOKEN", "test-worker-token")
 
+# Keep the app's startup from spawning the background workers (jobs runner,
+# eval cron, trigger scheduler). Those poll the same test DB on their own
+# threads and race tests that assert on job/trigger state — the source of the
+# intermittent test_eval_runner flake. Tests drive that logic directly.
+os.environ.setdefault("LIGHTSEI_DISABLE_BACKGROUND", "1")
+
 
 # Now safe to import backend modules.
 from fastapi.testclient import TestClient  # noqa: E402
