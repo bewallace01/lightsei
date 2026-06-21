@@ -392,6 +392,16 @@ function basicPageHtml(d: SeoDraft): string {
   ].join("\n");
 }
 
+/** Open a full HTML page in a new browser tab so the owner sees exactly what
+ * will publish (the styled version once polished). Uses a blob URL so the
+ * complete document — including Capella's embedded CSS — renders for real. */
+function openPreview(html: string) {
+  const blob = new Blob([html], { type: "text/html" });
+  const url = URL.createObjectURL(blob);
+  window.open(url, "_blank", "noopener");
+  setTimeout(() => URL.revokeObjectURL(url), 60000);
+}
+
 function DraftCard({
   draft,
   repos,
@@ -506,12 +516,13 @@ function DraftCard({
         </div>
       )}
       {!open ? (
-        <div className="mt-4 flex items-center gap-2">
+        <div className="mt-4 flex items-center gap-2 flex-wrap">
           <button
-            onClick={() => setOpen(true)}
-            className="text-sm px-3 py-1.5 rounded-md bg-accent-600 text-white hover:bg-accent-700"
+            onClick={() => openPreview(polished ?? basicPageHtml(draft))}
+            className="text-sm px-3 py-1.5 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50"
+            title="Open the full page in a new tab to see how it looks"
           >
-            Publish to my site →
+            👁 Preview{polished ? " (styled)" : ""}
           </button>
           <button
             onClick={onPolish}
@@ -520,6 +531,12 @@ function DraftCard({
             title="Have Capella restyle this page so it looks good"
           >
             {polishBusy ? "Polishing…" : polished ? "Re-polish" : "🎨 Polish design"}
+          </button>
+          <button
+            onClick={() => setOpen(true)}
+            className="text-sm px-3 py-1.5 rounded-md bg-accent-600 text-white hover:bg-accent-700"
+          >
+            Publish to my site →
           </button>
           {polishNote && <span className="text-xs text-gray-500">{polishNote}</span>}
         </div>
