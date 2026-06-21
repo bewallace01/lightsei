@@ -9,6 +9,8 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
+from sqlalchemy import text
+
 import github_publish
 import secrets_crypto
 from db import session_scope
@@ -266,3 +268,77 @@ def test_integration_repo_prefers_oauth_token_when_present(client, alice, monkey
         "repo_id": iid, "title": "x", "content": "<h1>x</h1>", "path": "p/x.html"})
     assert r.status_code == 200, r.text
     assert captured["token"] == "ghu-oauth-write"  # OAuth token used, not the PAT
+
+
+# ---------- template fetch for component mode ---------- #
+
+
+def test_fetch_file_decodes_base64():
+    import base64
+    fake = _FakeGithub({
+        "/contents/src/pages/Foo.tsx": {"status": 200, "body": {
+            "encoding": "base64",
+            "content": base64.b64encode(b"export default function Foo(){}").decode()}}})
+    out = github_publish.fetch_file(request=fake, token="t", owner="o", repo="r",
+                                    path="src/pages/Foo.tsx")
+    assert out == "export default function Foo(){}"
+
+
+def test_fetch_file_unsafe_path_none():
+    assert github_publish.fetch_file(request=_FakeGithub({}), token="t", owner="o",
+                                     repo="r", path="../secret") is None
+
+
+def test_list_page_files_filters_to_pages():
+    fake = _FakeGithub({"/git/trees/HEAD?recursive=1": {"status": 200, "body": {"tree": [
+        {"type": "blob", "path": "src/pages/FaqPage.tsx"},
+        {"type": "blob", "path": "src/components/Button.tsx"},
+        {"type": "blob", "path": "src/data/blog.ts"},
+        {"type": "blob", "path": "routes/about.jsx"},
+        {"type": "blob", "path": "README.md"},
+    ]}}})
+    files = github_publish.list_page_files(request=fake, token="t", owner="o", repo="r")
+    assert "src/pages/FaqPage.tsx" in files
+    assert "routes/about.jsx" in files
+    assert "src/components/Button.tsx" not in files  # not a page
+    assert "README.md" not in files
+
+
+def test_design_format_component_mode_fetches_template(client, alice, monkeypatch):
+    rid = _connect_integration(alice["workspace"]["id"])  # repo "acme/site"
+    import github_publish
+    monkeypatch.setattr(github_publish, "fetch_file",
+                        lambda **k: "import Layout from './Layout'; export default function Old(){}")
+    h = auth_headers(alice["session_token"])
+    r = client.post("/workspaces/me/design/format", headers=h, json={
+        "content": "<h1>New page</h1>", "template_repo_id": rid,
+        "template_path": "src/pages/Old.tsx"})
+    assert r.status_code == 200, r.text
+    assert r.json()["matched_site"] == "src/pages/Old.tsx"
+    cid = r.json()["command_id"]
+    with session_scope() as s:
+        row = s.execute(text("SELECT payload FROM commands WHERE id=:id"),
+                        {"id": cid}).mappings().first()
+        assert row["payload"]["content_type"] == "component"
+        assert "import Layout" in row["payload"]["template"]
+
+
+def test_design_format_component_template_unreadable_400(client, alice, monkeypatch):
+    rid = _connect_integration(alice["workspace"]["id"])
+    import github_publish
+    monkeypatch.setattr(github_publish, "fetch_file", lambda **k: None)
+    h = auth_headers(alice["session_token"])
+    r = client.post("/workspaces/me/design/format", headers=h, json={
+        "content": "x", "template_repo_id": rid, "template_path": "nope.tsx"})
+    assert r.status_code == 400
+
+
+def test_page_files_endpoint(client, alice, monkeypatch):
+    rid = _connect_integration(alice["workspace"]["id"])
+    import github_publish
+    monkeypatch.setattr(github_publish, "list_page_files",
+                        lambda **k: ["src/pages/A.tsx", "src/pages/B.tsx"])
+    h = auth_headers(alice["session_token"])
+    r = client.get(f"/workspaces/me/github/repos/{rid}/page-files", headers=h)
+    assert r.status_code == 200, r.text
+    assert r.json()["files"] == ["src/pages/A.tsx", "src/pages/B.tsx"]

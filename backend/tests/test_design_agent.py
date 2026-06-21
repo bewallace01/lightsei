@@ -143,3 +143,40 @@ def test_design_in_roster_and_identity():
     assert "design" in builtin_personas.BUILTIN_PERSONAS
     assert "design" in builtin_personas.LLM_PERSONAS
     assert assistant_identity.display_label("design") == "Capella · Design"
+
+
+# ---------- component mode (match a repo page template) ---------- #
+
+
+def test_build_prompt_component_uses_template(fake_lightsei):
+    _, bot = fake_lightsei
+    system, user = bot.build_prompt({
+        "content_type": "component",
+        "template": "import Layout from './Layout';\nexport default function X(){return <Layout><h1>Old</h1></Layout>}",
+        "content": "<h1>New page</h1><p>body</p>"})
+    assert "TEMPLATE" in user and "NEW CONTENT" in user
+    assert "import Layout" in user           # the template source is included
+    assert "New page" in user                # the new content is included
+    assert "front-end engineer" in system    # uses the component system prompt
+
+
+def test_generate_design_component(fake_lightsei):
+    _, bot = fake_lightsei
+    out = bot.generate_design(
+        {"content_type": "component", "template": "export default function A(){}",
+         "content": "<h1>Hi</h1>"},
+        factory=_factory("export default function NewPage(){ return null }"),
+        api_key="sk")
+    assert "NewPage" in out["output"]
+
+
+def test_tick_component_emits_with_more_tokens(fake_lightsei, monkeypatch):
+    fake, bot = fake_lightsei
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk")
+    fake.claim_command.return_value = _cmd(payload={
+        "content_type": "component", "template": "export default function A(){}",
+        "content": "<h1>Hi</h1>"})
+    bot.tick(fake, factory=_factory("export default function NewPage(){}"))
+    out = fake.emit.call_args.args[1]
+    assert out["content_type"] == "component"
+    assert "NewPage" in out["output"]

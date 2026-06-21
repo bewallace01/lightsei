@@ -24,7 +24,7 @@ SOURCE = "dashboard"
 
 _COMMAND_TTL = timedelta(hours=24)
 _MAX_CONTENT_LEN = 60_000
-CONTENT_TYPES = ("page", "email", "social", "generic")
+CONTENT_TYPES = ("page", "email", "social", "generic", "component")
 
 
 # ---------- "Match my site" style extraction ---------- #
@@ -92,10 +92,15 @@ def enqueue_format(
     content_type: str,
     accent_color: Optional[str] = None,
     instructions: Optional[str] = None,
+    template: Optional[str] = None,
     now: datetime,
 ) -> str:
     """Enqueue a design.format command for Capella. Returns the command id.
-    Does not commit. Caller validates content is non-empty."""
+    Does not commit. Caller validates content is non-empty.
+
+    `template`: an existing page's source from the owner's repo. When given
+    with content_type 'component', Capella writes a new page that matches it.
+    """
     ct = (content_type or "generic").strip().lower()
     if ct not in CONTENT_TYPES:
         ct = "generic"
@@ -108,6 +113,8 @@ def enqueue_format(
         payload["accent_color"] = accent_color.strip()[:32]
     if instructions and instructions.strip():
         payload["instructions"] = instructions.strip()[:500]
+    if template and template.strip():
+        payload["template"] = template[:_MAX_CONTENT_LEN]
 
     cmd_id = str(uuid.uuid4())
     session.execute(
