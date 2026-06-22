@@ -3,7 +3,8 @@ import shell_preview as sp
 
 
 _SHELL = """<!doctype html><html><head><meta charset="utf-8">
-<link rel="stylesheet" href="/assets/site.css">
+<link rel="stylesheet" crossorigin href="/assets/site.css">
+<img src="//cdn.example.com/logo.png">
 </head><body>
 <header><nav>Home | Working Capital</nav></header>
 <main class="page-main">
@@ -48,12 +49,28 @@ def test_build_preview_swaps_main_keeps_shell():
     assert "Count inventory weekly." in html
     assert "When You Need Restaurant Working Capital" not in html
     assert "Old content here." not in html
-    # Shell preserved: nav, footer, stylesheet link.
+    # Shell preserved: nav, footer.
     assert "<nav>" in html and "<footer>" in html
-    assert 'href="/assets/site.css"' in html
-    # Scripts stripped, base added for off-site asset loading.
+    # Stylesheet: crossorigin stripped + root-relative made absolute so it loads
+    # cross-origin and applies.
+    assert "crossorigin" not in html.lower()
+    assert 'href="https://therestaurantownersguide.com/assets/site.css"' in html
+    assert 'href="/assets/site.css"' not in html
+    # Protocol-relative URLs left alone.
+    assert 'src="//cdn.example.com/logo.png"' in html
+    # Scripts stripped, base added as a fallback for any remaining relative URLs.
     assert "<script" not in html.lower()
     assert '<base href="https://therestaurantownersguide.com/">' in html
+
+
+def test_strip_crossorigin_and_absolutize():
+    h = '<link rel="stylesheet" crossorigin href="/a.css"><img src="/b.png"><a href="//x/y">'
+    h = sp.strip_crossorigin(h)
+    assert "crossorigin" not in h
+    h = sp.absolutize_root_relative(h, "https://site.com")
+    assert 'href="https://site.com/a.css"' in h
+    assert 'src="https://site.com/b.png"' in h
+    assert 'href="//x/y"' in h  # protocol-relative untouched
 
 
 def test_build_preview_no_main_reports_not_swapped():

@@ -28,6 +28,14 @@ _SCRIPT_SELFCLOSE_RE = re.compile(r"<script\b[^>]*/>", re.IGNORECASE)
 _MAIN_RE = re.compile(r"(<main\b[^>]*>)(.*?)(</main>)", re.IGNORECASE | re.DOTALL)
 _HEAD_OPEN_RE = re.compile(r"<head\b[^>]*>", re.IGNORECASE)
 _BASE_RE = re.compile(r"<base\b[^>]*>", re.IGNORECASE)
+# A `crossorigin` attribute makes the browser CORS-gate the resource. The
+# shell's stylesheet uses it; loaded cross-origin from the preview, the CSS
+# would be blocked (the site doesn't send CORS headers for it). Strip it so the
+# CSS loads as a normal no-CORS resource (which still applies).
+_CROSSORIGIN_RE = re.compile(r"\s+crossorigin(=([\"'])[^\"']*\2|=\S+)?", re.IGNORECASE)
+# Root-relative href/src ( /foo, not //cdn ) -> absolute against the origin, so
+# assets resolve to the owner's site rather than the preview's blob origin.
+_ROOT_REL_ATTR_RE = re.compile(r'\b(href|src)=([\"\'])(/(?!/)[^\"\']*)\2', re.IGNORECASE)
 
 
 def origin_of(url: str) -> str:
@@ -63,6 +71,23 @@ def strip_scripts(html: str) -> str:
     return html
 
 
+def strip_crossorigin(html: str) -> str:
+    """Remove `crossorigin` attributes so cross-origin stylesheets (and other
+    assets) load without CORS enforcement and actually apply in the preview."""
+    return _CROSSORIGIN_RE.sub("", html or "")
+
+
+def absolutize_root_relative(html: str, origin: str) -> str:
+    """Rewrite root-relative href/src (/assets/x.css) to absolute against the
+    origin, so assets load from the owner's site rather than the preview's
+    blob: origin. Leaves protocol-relative (//cdn) and absolute URLs alone."""
+    if not origin:
+        return html or ""
+    return _ROOT_REL_ATTR_RE.sub(
+        lambda m: f'{m.group(1)}={m.group(2)}{origin}{m.group(3)}{m.group(2)}',
+        html or "")
+
+
 def inject_base(html: str, origin: str) -> str:
     """Ensure a <base href="origin/"> right after <head> so the shell's
     relative asset URLs resolve off-site. No-op if a <base> already exists or
@@ -93,7 +118,10 @@ def build_preview(shell_html: str, *, page: dict[str, Any], shell_url: str) -> d
     """Produce {html, swapped}: the shell with scripts stripped, a <base> added,
     and <main> swapped for the new page's content. `swapped` is False if no
     <main> was found (the html is still returned, shell unchanged otherwise)."""
+    origin = origin_of(shell_url)
     html = strip_scripts(shell_html or "")
-    html = inject_base(html, origin_of(shell_url))
+    html = strip_crossorigin(html)
+    html = absolutize_root_relative(html, origin)
+    html = inject_base(html, origin)
     html, swapped = swap_main(html, content_fragment(page))
     return {"html": html, "swapped": swapped}
