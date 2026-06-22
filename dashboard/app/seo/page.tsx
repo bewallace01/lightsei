@@ -19,6 +19,7 @@ import {
   fetchSeoAudit,
   fetchSeoCrawl,
   fetchSeoDrafts,
+  deleteSeoDraft,
   fetchSeoSuggestions,
   generateSeoPage,
   handleAuthError,
@@ -408,11 +409,26 @@ function DraftCard({
   draft,
   repos,
   matchSite,
+  onDeleted,
 }: {
   draft: SeoDraft;
   repos: GithubRepo[];
   matchSite?: string;
+  onDeleted: () => void;
 }) {
+  const [deleting, setDeleting] = useState(false);
+
+  async function onDelete() {
+    if (!confirm(`Delete the draft "${draft.page.h1 || draft.page.title || "this page"}"? This can't be undone.`)) return;
+    setDeleting(true);
+    try {
+      await deleteSeoDraft(draft.id);
+      onDeleted();
+    } catch (e) {
+      alert(`Couldn't delete the draft: ${String(e)}`);
+      setDeleting(false);
+    }
+  }
   const slug = draft.page.slug || "page";
   const [st, setSt] = useState<PublishState>({
     format: "html",
@@ -587,8 +603,18 @@ function DraftCard({
 
   return (
     <div className="rounded-lg border border-gray-200 p-5">
-      <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
-        {draft.keyword ? `Target: ${draft.keyword}` : "Drafted page"}
+      <div className="flex items-start justify-between gap-2">
+        <div className="text-[11px] font-semibold text-gray-400 uppercase tracking-wider">
+          {draft.keyword ? `Target: ${draft.keyword}` : "Drafted page"}
+        </div>
+        <button
+          onClick={onDelete}
+          disabled={deleting}
+          className="text-xs text-gray-400 hover:text-red-600 disabled:opacity-50 shrink-0"
+          title="Delete this draft"
+        >
+          {deleting ? "Deleting…" : "🗑 Delete"}
+        </button>
       </div>
       <h3 className="text-base font-semibold text-gray-900 mt-1">{draft.page.h1}</h3>
       <div className="text-xs text-gray-500 mt-1">
@@ -902,6 +928,9 @@ export default function SeoPage() {
               draft={d}
               repos={repos}
               matchSite={audit?.configured_url ?? undefined}
+              onDeleted={() =>
+                setDrafts((ds) => (ds ? ds.filter((x) => x.id !== d.id) : ds))
+              }
             />
           ))
         )}

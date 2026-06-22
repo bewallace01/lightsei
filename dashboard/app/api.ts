@@ -2009,6 +2009,12 @@ export async function fetchSeoDrafts(): Promise<SeoDraft[]> {
   return body.drafts;
 }
 
+export async function deleteSeoDraft(draftId: string): Promise<void> {
+  await authedJson(`/workspaces/me/seo/drafts/${encodeURIComponent(draftId)}`, {
+    method: "DELETE",
+  });
+}
+
 export type PageFormat = "html" | "markdown" | "mdx";
 
 export async function publishPage(input: {

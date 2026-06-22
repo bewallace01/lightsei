@@ -63,6 +63,38 @@ def test_seo_drafts_isolated_per_workspace(client, alice, bob):
     assert r.json()["drafts"] == []
 
 
+def test_delete_seo_draft_removes_it(client, alice):
+    ws = alice["workspace"]["id"]
+    _add_draft(ws, keyword="k1", slug="s1", h1="Keep me")
+    _add_draft(ws, keyword="k2", slug="s2", h1="Delete me")
+    h = auth_headers(alice["session_token"])
+    drafts = client.get("/workspaces/me/seo/drafts", headers=h).json()["drafts"]
+    target = next(d for d in drafts if d["page"]["h1"] == "Delete me")
+
+    r = client.delete(f"/workspaces/me/seo/drafts/{target['id']}", headers=h)
+    assert r.status_code == 200, r.text
+
+    remaining = client.get("/workspaces/me/seo/drafts", headers=h).json()["drafts"]
+    assert [d["page"]["h1"] for d in remaining] == ["Keep me"]
+    # Deleting again is a 404 (already gone).
+    assert client.delete(
+        f"/workspaces/me/seo/drafts/{target['id']}", headers=h).status_code == 404
+
+
+def test_delete_seo_draft_cross_workspace_404(client, alice, bob):
+    ws = alice["workspace"]["id"]
+    _add_draft(ws, keyword="k", slug="s", h1="Alice's")
+    aid = client.get("/workspaces/me/seo/drafts",
+                     headers=auth_headers(alice["session_token"])).json()["drafts"][0]["id"]
+    # Bob can't delete Alice's draft.
+    r = client.delete(f"/workspaces/me/seo/drafts/{aid}",
+                      headers=auth_headers(bob["session_token"]))
+    assert r.status_code == 404
+    # Alice's draft is untouched.
+    assert len(client.get("/workspaces/me/seo/drafts",
+                          headers=auth_headers(alice["session_token"])).json()["drafts"]) == 1
+
+
 # ---------- generate trigger (POST /workspaces/me/seo/generate) ---------- #
 
 import seo_generate  # noqa: E402

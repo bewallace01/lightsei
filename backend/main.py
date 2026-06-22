@@ -2584,6 +2584,30 @@ def get_seo_drafts(
     return {"drafts": drafts}
 
 
+@app.delete("/workspaces/me/seo/drafts/{draft_id}")
+def delete_seo_draft(
+    draft_id: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, str]:
+    """Remove a drafted SEO page from the list. A draft is the
+    seo.page_drafted event, so this deletes that event (scoped to the
+    workspace + kind, so nothing else can be removed through here).
+    Dependent rows clean up via FK (event_validations cascade,
+    notification_deliveries set null). Idempotent-ish: 404 if already gone."""
+    res = session.execute(
+        text(
+            "DELETE FROM events WHERE id::text = :id "
+            "AND workspace_id = :ws AND kind = 'seo.page_drafted'"
+        ),
+        {"id": draft_id, "ws": workspace_id},
+    )
+    session.commit()
+    if res.rowcount == 0:
+        raise HTTPException(status_code=404, detail="draft not found")
+    return {"status": "ok"}
+
+
 class SeoGenerateIn(BaseModel):
     keyword: str
     page_type: Optional[str] = None
