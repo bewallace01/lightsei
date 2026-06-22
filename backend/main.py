@@ -2962,6 +2962,42 @@ def design_format_result(
     return _design.get_result(session, workspace_id, command_id)
 
 
+class ShellPreviewIn(BaseModel):
+    site_url: str          # any live page on the owner's site (the shell)
+    page: dict[str, Any]   # the draft page ({h1, body_html, title, ...})
+
+
+@app.post("/workspaces/me/design/preview-in-shell")
+def design_preview_in_shell(
+    body: ShellPreviewIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Build a near-exact visual preview of a repo-matched (component) page.
+
+    A component page can't render standalone, so we borrow the shell from a
+    live page on the owner's own (pre-rendered) site: fetch it, strip scripts,
+    and swap its <main> for the new page's content. The result renders with the
+    site's real header/nav/footer, fonts, and CSS."""
+    import shell_preview
+
+    import feeder
+    url = feeder.normalize_website_url(body.site_url)
+    if not url:
+        raise HTTPException(status_code=400, detail="enter a valid page URL from your live site")
+    shell = _fetch_page_html(url)
+    if not shell:
+        raise HTTPException(
+            status_code=502,
+            detail="couldn't load that page from your site to build the preview; check the URL is public")
+    result = shell_preview.build_preview(shell, page=body.page or {}, shell_url=url)
+    return {
+        "html": result["html"],
+        "matched_shell": result["swapped"],
+        "shell_url": url,
+    }
+
+
 @app.get("/workspaces/me/github/repos/{repo_id}/page-files")
 def github_repo_page_files(
     repo_id: str,

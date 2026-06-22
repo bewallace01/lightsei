@@ -14,6 +14,7 @@ import {
   designFormat,
   fetchDesignResult,
   fetchRepoPageFiles,
+  previewInShell,
   fetchGithubConnection,
   fetchSeoAudit,
   fetchSeoCrawl,
@@ -431,6 +432,34 @@ function DraftCard({
   // Component mode: pick an existing page in the repo as a template.
   const [templateFiles, setTemplateFiles] = useState<string[] | null>(null);
   const [templatePath, setTemplatePath] = useState("");
+  const [previewBusy, setPreviewBusy] = useState(false);
+
+  // A repo-matched page is a React component (can't render standalone). Build a
+  // visual preview by borrowing the shell from a live page on the owner's site
+  // and swapping in this page's content. Needs the live site URL (matchUrl).
+  async function onPreviewInShell() {
+    const siteUrl = matchUrl.trim();
+    if (!siteUrl) {
+      setPolishNote("Enter a page URL from your live site (in the field above) to preview.");
+      return;
+    }
+    setPreviewBusy(true);
+    setPolishNote(null);
+    try {
+      const { html, matched_shell } = await previewInShell({
+        site_url: siteUrl,
+        page: draft.page as unknown as Record<string, unknown>,
+      });
+      openPreview(html);
+      if (!matched_shell) {
+        setPolishNote("Showing your site's shell, but couldn't find its main content area to swap — preview may look off.");
+      }
+    } catch (e) {
+      setPolishNote(`Preview failed: ${String(e)}`);
+    } finally {
+      setPreviewBusy(false);
+    }
+  }
 
   function onFormat(format: PageFormat) {
     const def = FORMATS.find((f) => f.value === format)!.path(slug);
@@ -580,16 +609,17 @@ function DraftCard({
       )}
       {!open && (
         <label className="mt-3 block text-xs text-gray-500">
-          Match my site&apos;s design (optional)
+          Your live site page URL (for matching &amp; preview)
           <input
             type="url"
             value={matchUrl}
             onChange={(e) => setMatchUrl(e.target.value)}
-            placeholder="https://yoursite.com"
+            placeholder="https://yoursite.com/an-existing-page"
             className="mt-1 w-full text-sm rounded-md ring-1 ring-gray-300 px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-accent-600"
           />
           <span className="text-[11px] text-gray-400">
-            Capella reads this page&apos;s fonts &amp; colors so the new page matches your site.
+            Used to match your fonts &amp; colors, and to preview a repo-matched
+            page inside your real site shell (nav, hero, footer).
           </span>
         </label>
       )}
@@ -634,6 +664,16 @@ function DraftCard({
       )}
       {!open ? (
         <div className="mt-4 flex items-center gap-2 flex-wrap">
+          {isComponent && polished && (
+            <button
+              onClick={onPreviewInShell}
+              disabled={previewBusy}
+              className="text-sm px-3 py-1.5 rounded-md border border-gray-300 text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+              title="See the page rendered inside your live site's header, nav, and footer"
+            >
+              {previewBusy ? "Building preview…" : "👁 Preview on my site"}
+            </button>
+          )}
           <button
             onClick={() => {
               if (isComponent && polished) {
