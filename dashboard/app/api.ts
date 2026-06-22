@@ -2104,6 +2104,7 @@ export async function previewInShell(input: {
 }): Promise<{ html: string; matched_shell: boolean; shell_url: string }> {
   return (await authedJson("/workspaces/me/design/preview-in-shell", {
     method: "POST",
+    headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
   })) as { html: string; matched_shell: boolean; shell_url: string };
 }
