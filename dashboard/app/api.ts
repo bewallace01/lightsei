@@ -2095,6 +2095,19 @@ export async function fetchRepoPageFiles(repoId: string): Promise<string[]> {
   return body.files;
 }
 
+// Build a near-exact visual preview of a repo-matched page by borrowing the
+// shell (nav, hero, footer, CSS) from a live page on the owner's site and
+// swapping in the new page's content. Returns the preview HTML.
+export async function previewInShell(input: {
+  site_url: string;
+  page: Record<string, unknown>;
+}): Promise<{ html: string; matched_shell: boolean; shell_url: string }> {
+  return (await authedJson("/workspaces/me/design/preview-in-shell", {
+    method: "POST",
+    body: JSON.stringify(input),
+  })) as { html: string; matched_shell: boolean; shell_url: string };
+}
+
 export interface SeoSuggestion {
   keyword: string;
   page_type: string;

@@ -223,3 +223,45 @@ def test_design_format_match_url_unreachable_degrades(client, alice, monkeypatch
         "content": "<h1>Hi</h1>", "match_url": "down.com"})
     assert r.status_code == 200  # still works, just no match
     assert r.json()["matched_site"] is None
+
+
+# ---------- shell preview (repo-matched page) ---------- #
+
+_PREVIEW_SHELL = """<!doctype html><html><head><link rel="stylesheet" href="/s.css">
+</head><body><header><nav>Home</nav></header>
+<main class="page-main"><h1>Old Title</h1><p>old body</p></main>
+<footer>Footer</footer><script src="/app.js"></script></body></html>"""
+
+
+def test_design_preview_in_shell_swaps_content(client, alice, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "_fetch_page_html", lambda url: _PREVIEW_SHELL)
+    h = auth_headers(alice["session_token"])
+    r = client.post("/workspaces/me/design/preview-in-shell", headers=h, json={
+        "site_url": "https://mysite.com/some-page",
+        "page": {"h1": "New Page", "body_html": "<p>new body</p>"}})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["matched_shell"] is True
+    html = body["html"]
+    assert "New Page" in html and "new body" in html       # new content in
+    assert "Old Title" not in html                          # old content out
+    assert "<nav>" in html and "<footer>" in html           # shell kept
+    assert "<script" not in html.lower()                    # scripts stripped
+    assert '<base href="https://mysite.com/">' in html      # base for assets
+
+
+def test_design_preview_in_shell_unreachable_502(client, alice, monkeypatch):
+    import main
+    monkeypatch.setattr(main, "_fetch_page_html", lambda url: None)
+    h = auth_headers(alice["session_token"])
+    r = client.post("/workspaces/me/design/preview-in-shell", headers=h, json={
+        "site_url": "https://down.com/p", "page": {"h1": "x"}})
+    assert r.status_code == 502
+
+
+def test_design_preview_in_shell_bad_url_400(client, alice):
+    h = auth_headers(alice["session_token"])
+    r = client.post("/workspaces/me/design/preview-in-shell", headers=h, json={
+        "site_url": "   ", "page": {"h1": "x"}})
+    assert r.status_code == 400
