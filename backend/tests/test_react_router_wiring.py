@@ -91,6 +91,20 @@ def test_plan_route_wiring_none_when_not_router_shape():
         file_path="src/pages/RestaurantInventoryTipsPage.tsx") is None
 
 
+def test_route_for_component_reads_actual_route():
+    # The real route can diverge from the component's kebab-case (custom slugs),
+    # so we read it from App.tsx, not derive it.
+    app = (
+        '<Route path="/restaurant-working-capital" element={<RestaurantWorkingCapitalPage />} />\n'
+        '<Route path="/restaurant-slow-season-cash-flow" element={<RestaurantSlowSeasonPage />} />\n'
+        '<Route path="*" element={<NotFoundPage />} />'
+    )
+    assert rw.route_for_component(app, "RestaurantWorkingCapitalPage") == "/restaurant-working-capital"
+    # Non-convention slug still resolved correctly.
+    assert rw.route_for_component(app, "RestaurantSlowSeasonPage") == "/restaurant-slow-season-cash-flow"
+    assert rw.route_for_component(app, "NopePage") is None
+
+
 def test_plan_route_wiring_none_when_no_component_export():
     assert rw.plan_route_wiring(
         app_source=_APP, page_content="const x = 1;  // no export",

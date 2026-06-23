@@ -79,6 +79,28 @@ def _indent_of(line: str) -> str:
     return line[: len(line) - len(line.lstrip(" \t"))]
 
 
+def route_for_component(app_source: str, component: str) -> Optional[str]:
+    """The route path actually registered for `component` in App.tsx, e.g.
+    `<Route path="/restaurant-slow-season-cash-flow" element={<RestaurantSlowSeasonPage />} />`
+    -> "/restaurant-slow-season-cash-flow". Returns None if not found. Use this
+    rather than deriving from the name: real routes often diverge from the
+    component's kebab-case (custom SEO slugs)."""
+    if not component:
+        return None
+    m = re.search(
+        r'<Route\b[^>]*\bpath="([^"]+)"[^>]*element=\{<\s*'
+        + re.escape(component) + r'\s*/>\}',
+        app_source or "")
+    if m:
+        return m.group(1)
+    # element can also precede path on the tag.
+    m = re.search(
+        r'<Route\b[^>]*element=\{<\s*' + re.escape(component)
+        + r'\s*/>\}[^>]*\bpath="([^"]+)"',
+        app_source or "")
+    return m.group(1) if m else None
+
+
 def wire_route_into_app(
     app_source: str,
     *,

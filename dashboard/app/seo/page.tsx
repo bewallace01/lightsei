@@ -455,7 +455,10 @@ function DraftCard({
   // and swapping in this page's content. Needs the live site URL (matchUrl).
   async function onPreviewInShell() {
     const siteUrl = matchUrl.trim();
-    if (!siteUrl) {
+    // With a template selected we derive the shell from that page's live URL,
+    // so we only need the site origin (any URL on the site works). Without a
+    // template, we need an explicit page URL.
+    if (!siteUrl && !templatePath) {
       setPolishNote("Enter a page URL from your live site (in the field above) to preview.");
       return;
     }
@@ -465,6 +468,9 @@ function DraftCard({
       const { html, matched_shell } = await previewInShell({
         site_url: siteUrl,
         page: draft.page as unknown as Record<string, unknown>,
+        ...(templatePath && st.repoId
+          ? { template_repo_id: st.repoId, template_path: templatePath }
+          : {}),
       });
       openPreview(html);
       if (!matched_shell) {
