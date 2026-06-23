@@ -2989,6 +2989,45 @@ def design_format_result(
 class ShellPreviewIn(BaseModel):
     site_url: str          # any live page on the owner's site (the shell)
     page: dict[str, Any]   # the draft page ({h1, body_html, title, ...})
+    # When matching a repo page, pass the template so we borrow the RIGHT shell
+    # (that template page's live URL) instead of whatever site_url points at.
+    template_repo_id: Optional[str] = None
+    template_path: Optional[str] = None
+
+
+def _shell_url_for_template(
+    session: Session, workspace_id: str, site_url: str,
+    repo_id: str, template_path: str,
+) -> Optional[str]:
+    """The live URL of the template page on the owner's site: its registered
+    route in App.tsx joined to site_url's origin. None if anything can't be
+    resolved (caller falls back to site_url)."""
+    import github_publish
+    import react_router_wiring
+    import shell_preview
+    try:
+        owner, repo_name, base_branch, token = _resolve_publish_target(
+            session, workspace_id, repo_id)
+        tmpl = github_publish.fetch_file(
+            request=github_publish._httpx_request, token=token,
+            owner=owner, repo=repo_name, path=template_path, ref=base_branch)
+        component = react_router_wiring.parse_component_name(tmpl or "")
+        if not component:
+            return None
+        for app_path in ("src/App.tsx", "src/App.jsx"):
+            app_src = github_publish.fetch_file(
+                request=github_publish._httpx_request, token=token,
+                owner=owner, repo=repo_name, path=app_path, ref=base_branch)
+            if not app_src:
+                continue
+            route = react_router_wiring.route_for_component(app_src, component)
+            if route:
+                origin = shell_preview.origin_of(site_url)
+                return origin + route if origin else None
+            break
+    except Exception:
+        logger.exception("preview: template shell-url resolution failed")
+    return None
 
 
 @app.post("/workspaces/me/design/preview-in-shell")
@@ -3002,13 +3041,22 @@ def design_preview_in_shell(
     A component page can't render standalone, so we borrow the shell from a
     live page on the owner's own (pre-rendered) site: fetch it, strip scripts,
     and swap its <main> for the new page's content. The result renders with the
-    site's real header/nav/footer, fonts, and CSS."""
+    site's real header/nav/footer, fonts, and CSS.
+
+    When a template is given, we borrow the shell from THAT page's live URL (its
+    route in App.tsx + the site origin), so the preview always uses an article
+    page's layout rather than, say, the homepage the field happened to hold."""
     import shell_preview
 
     import feeder
     url = feeder.normalize_website_url(body.site_url)
     if not url:
         raise HTTPException(status_code=400, detail="enter a valid page URL from your live site")
+    if body.template_repo_id and body.template_path:
+        derived = _shell_url_for_template(
+            session, workspace_id, url, body.template_repo_id, body.template_path)
+        if derived:
+            url = derived
     shell = _fetch_page_html(url)
     if not shell:
         raise HTTPException(

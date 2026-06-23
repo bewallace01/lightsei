@@ -2107,6 +2107,8 @@ export async function fetchRepoPageFiles(repoId: string): Promise<string[]> {
 export async function previewInShell(input: {
   site_url: string;
   page: Record<string, unknown>;
+  template_repo_id?: string;
+  template_path?: string;
 }): Promise<{ html: string; matched_shell: boolean; shell_url: string }> {
   return (await authedJson("/workspaces/me/design/preview-in-shell", {
     method: "POST",
