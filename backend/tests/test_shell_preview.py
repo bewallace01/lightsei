@@ -82,6 +82,45 @@ def test_build_preview_no_main_reports_not_swapped():
     assert "<body>" in res["html"]
 
 
+_STRUCTURED_SHELL = """<!doctype html><html><head></head><body>
+<header><nav>Nav</nav></header>
+<main class="page-main">
+  <div class="page-content">
+    <h1 class="page-title">Old Working Capital</h1>
+    <p class="page-lead">Old lead.</p>
+    <section class="prose-block"><h2>Old H2</h2><p>old para</p></section>
+  </div>
+</main>
+<footer>F</footer></body></html>"""
+
+_STRUCTURED_PAGE = {
+    "h1": "Inventory Tips",
+    "body_html": "<p>Intro paragraph.</p><h2>Count Regularly</h2><p>Do it.</p>"
+                 "<h2>Organize Storage</h2><p>Group items.</p>",
+}
+
+
+def test_mirror_structure_reuses_wrapper_and_classes():
+    res = sp.build_preview(
+        _STRUCTURED_SHELL, page=_STRUCTURED_PAGE,
+        shell_url="https://site.com/wc")
+    html = res["html"]
+    main = html[html.index("<main"):html.index("</main>")]
+    # New content adopts the site's wrapper + heading/section classes.
+    assert 'class="page-content"' in main
+    assert 'class="page-title">Inventory Tips' in main
+    assert 'class="page-lead"' in main          # intro got the lead class
+    assert main.count('class="prose-block"') == 2  # one per H2 section
+    # Old content gone.
+    assert "Old Working Capital" not in main and "Old H2" not in main
+
+
+def test_mirror_structure_falls_back_without_wrapper():
+    # A <main> with bare headings (no wrapper element) -> plain fragment.
+    out = sp.mirror_structure("<h1>x</h1><p>y</p>", {"h1": "New", "body_html": "<p>b</p>"})
+    assert out is None
+
+
 def test_content_fragment_uses_h1_then_body():
     frag = sp.content_fragment({"h1": "Title", "body_html": "<p>Body</p>"})
     assert frag.index("Title") < frag.index("Body")

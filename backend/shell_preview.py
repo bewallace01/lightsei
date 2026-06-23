@@ -101,6 +101,58 @@ def inject_base(html: str, origin: str) -> str:
     return html[: m.end()] + tag + html[m.end():]
 
 
+def mirror_structure(main_inner: str, page: dict[str, Any]) -> Optional[str]:
+    """Rebuild the new page's content using the SAME wrapper element and
+    heading/section classes the shell's <main> uses, so it inherits the site's
+    column width and typography (a bare <h1>/<h2> would miss those classes and
+    render full-width in the wrong font). Returns the structured inner HTML, or
+    None if the shell's <main> doesn't have a recognizable content wrapper (the
+    caller then falls back to a plain fragment)."""
+    if not main_inner:
+        return None
+    wm = re.search(r"<(div|section|article)\b[^>]*>", main_inner, re.IGNORECASE)
+    if not wm:
+        return None
+    wrapper_open, wrapper_tag = wm.group(0), wm.group(1).lower()
+
+    h1m = re.search(r'<h1\b[^>]*\bclass="([^"]*)"', main_inner, re.IGNORECASE)
+    h1_open = f'<h1 class="{h1m.group(1)}">' if h1m else "<h1>"
+
+    head = re.split(r"<h2\b", main_inner, 1)[0]
+    leadm = re.search(r'<p\b[^>]*\bclass="([^"]*)"', head, re.IGNORECASE)
+    lead_cls = leadm.group(1) if leadm else None
+
+    secm = re.search(r'<(section|div)\b[^>]*\bclass="([^"]*)"[^>]*>\s*<h2',
+                     main_inner, re.IGNORECASE)
+    sec_tag = secm.group(1).lower() if secm else None
+    sec_cls = secm.group(2) if secm else None
+
+    h1 = _html_escape(str(page.get("h1") or page.get("title") or ""))
+    body = str(page.get("body_html") or "")
+
+    out = [wrapper_open, f"{h1_open}{h1}</h1>"]
+    parts = re.split(r"(?=<h2\b)", body)
+    if parts and not parts[0].lstrip().lower().startswith("<h2"):
+        lead = parts.pop(0)
+        if lead.strip():
+            if lead_cls:
+                lead = re.sub(r"<p\b", f'<p class="{lead_cls}"', lead, count=1,
+                              flags=re.IGNORECASE)
+            out.append(lead)
+    for sec in parts:
+        if sec_tag and sec_cls:
+            out.append(f'<{sec_tag} class="{sec_cls}">{sec}</{sec_tag}>')
+        else:
+            out.append(sec)
+    out.append(f"</{wrapper_tag}>")
+    return "\n".join(out)
+
+
+def _main_inner(html: str) -> Optional[str]:
+    m = _MAIN_RE.search(html or "")
+    return m.group(2) if m else None
+
+
 def swap_main(html: str, fragment: str) -> tuple[str, bool]:
     """Replace the inner HTML of the first <main>. Returns (html, swapped)."""
     swapped = False
@@ -119,9 +171,14 @@ def build_preview(shell_html: str, *, page: dict[str, Any], shell_url: str) -> d
     and <main> swapped for the new page's content. `swapped` is False if no
     <main> was found (the html is still returned, shell unchanged otherwise)."""
     origin = origin_of(shell_url)
+    # Learn the shell's content structure (wrapper + heading/section classes)
+    # from the ORIGINAL <main> before we rewrite anything, so the new content
+    # inherits the site's column width and typography.
+    fragment = mirror_structure(_main_inner(shell_html or ""), page) \
+        or content_fragment(page)
     html = strip_scripts(shell_html or "")
     html = strip_crossorigin(html)
     html = absolutize_root_relative(html, origin)
     html = inject_base(html, origin)
-    html, swapped = swap_main(html, content_fragment(page))
+    html, swapped = swap_main(html, fragment)
     return {"html": html, "swapped": swapped}
