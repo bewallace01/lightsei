@@ -2015,6 +2015,26 @@ export async function deleteSeoDraft(draftId: string): Promise<void> {
   });
 }
 
+export interface SeoAutopublish {
+  enabled: boolean;
+  repo_id: string | null;
+}
+
+export async function fetchSeoAutopublish(): Promise<SeoAutopublish> {
+  return (await authedJson("/workspaces/me/seo/autopublish")) as SeoAutopublish;
+}
+
+export async function setSeoAutopublish(input: {
+  enabled?: boolean;
+  repo_id?: string | null;
+}): Promise<SeoAutopublish> {
+  return (await authedJson("/workspaces/me/seo/autopublish", {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  })) as SeoAutopublish;
+}
+
 export type PageFormat = "html" | "markdown" | "mdx";
 
 export async function publishPage(input: {

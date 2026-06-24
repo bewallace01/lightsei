@@ -259,6 +259,15 @@ class Workspace(Base):
     widget_hide_branding: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false"),
     )
+    # Phase 37.10: Spica auto-opens the publish PR. Opt-in (default off); when
+    # enabled with a chosen target repo, a new SEO page draft auto-opens a
+    # publish PR. The PR/merge stays the owner's review gate.
+    seo_autopublish_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("false"),
+    )
+    seo_autopublish_repo_id: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True,
+    )
     # Phase 26.1: human-readable URL handle for the consumer chat
     # surface at /c/{vendor_slug}. Operator-claimed via
     # POST /workspaces/me/vendor-slug. Validated against
