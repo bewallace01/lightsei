@@ -2101,6 +2101,14 @@ export async function fetchRepoPageFiles(repoId: string): Promise<string[]> {
   return body.files;
 }
 
+export async function fetchRepoFramework(
+  repoId: string,
+): Promise<{ framework: string; suggested_format: PageFormat | null }> {
+  return (await authedJson(
+    `/workspaces/me/github/repos/${encodeURIComponent(repoId)}/framework`,
+  )) as { framework: string; suggested_format: PageFormat | null };
+}
+
 // Build a near-exact visual preview of a repo-matched page by borrowing the
 // shell (nav, hero, footer, CSS) from a live page on the owner's site and
 // swapping in the new page's content. Returns the preview HTML.
