@@ -837,6 +837,17 @@ def _rate_limited_workspace_id(
     return auth.workspace_id
 
 
+def _default_rate_limited_workspace_id(
+    auth: AuthResult = Depends(get_authenticated),
+) -> str:
+    """Rate-limit authenticated owner/API actions per credential."""
+    cred_id = auth.api_key.id if auth.api_key else (
+        auth.session.id if auth.session else auth.workspace_id
+    )
+    limits.limit_authed_default(cred_id)
+    return auth.workspace_id
+
+
 def _record_run_behavior(
     session: Session, workspace_id: str, run_id: str, agent_name: str
 ) -> list[RunBehavioralViolation]:
@@ -3096,7 +3107,7 @@ class AskQuestion(BaseModel):
 def ask_business_team(
     body: AskQuestion,
     session: Session = Depends(get_session),
-    workspace_id: str = Depends(get_workspace_id),
+    workspace_id: str = Depends(_default_rate_limited_workspace_id),
 ) -> dict[str, Any]:
     """Ask the AI business team a plain-English question.
 

@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from sqlalchemy import text
 
 import ask
+import limits
 from db import session_scope
 from models import Agent, Event, Workspace
 from tests.conftest import auth_headers
@@ -143,6 +144,21 @@ def test_ask_empty_question_400(client, alice):
     h = auth_headers(alice["session_token"])
     r = client.post("/workspaces/me/ask", headers=h, json={"question": "   "})
     assert r.status_code == 400
+
+
+def test_ask_endpoint_rate_limited_per_credential(client, alice, monkeypatch):
+    monkeypatch.setattr(limits, "DEFAULT_AUTHED_LIMIT_PER_MIN", 3)
+    h = auth_headers(alice["session_token"])
+
+    for i in range(3):
+        r = client.post("/workspaces/me/ask", headers=h,
+                        json={"question": f"question {i}"})
+        assert r.status_code == 200
+
+    r = client.post("/workspaces/me/ask", headers=h,
+                    json={"question": "one too many"})
+    assert r.status_code == 429
+    assert r.headers.get("retry-after")
 
 
 def test_ask_unknown_command_404(client, alice):
