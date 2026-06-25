@@ -5,8 +5,10 @@ instead of a real HTTP server, so each test exercises the full
 claim → setup → spawn → log → status flow without mocks.
 """
 import io
+from pathlib import Path
 import threading
 import time
+from types import SimpleNamespace
 import zipfile
 
 import pytest
@@ -147,6 +149,69 @@ def test_supervisor_fails_on_missing_bot_py(client, alice, worker_client):
     ).json()
     assert final["status"] == "failed"
     assert "no bot.py" in (final["error"] or "")
+
+
+def test_supervisor_heartbeats_during_slow_build(monkeypatch, tmp_path):
+    bundle = _make_zip_bytes(
+        {"bot.py": "print('ok')\n", "requirements.txt": "slow-package\n"}
+    )
+
+    class FakeBuildClient:
+        def __init__(self):
+            self.heartbeats: list[float] = []
+            self.statuses: list[str] = []
+            self.logs: list[dict] = []
+
+        def status(self, deployment_id, status, error=None):
+            self.statuses.append(status)
+
+        def heartbeat(self, deployment_id):
+            self.heartbeats.append(time.monotonic())
+            return {"desired_state": "running"}
+
+        def append_logs(self, deployment_id, lines):
+            self.logs.extend(lines)
+
+        def get_blob(self, blob_id):
+            return bundle
+
+        def get_workspace_secrets(self, workspace_id):
+            return {}
+
+    def fake_venv_create(path, with_pip=True):
+        bin_dir = Path(path) / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        (bin_dir / "python").write_text("")
+
+    def slow_pip_install(*args, **kwargs):
+        time.sleep(0.08)
+        return SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(runner, "SCRATCH_BASE", tmp_path / "worker-scratch")
+    monkeypatch.setattr(runner, "HEARTBEAT_INTERVAL_S", 0.02)
+    monkeypatch.setattr(runner, "LOG_FLUSH_INTERVAL_S", 0.02)
+    monkeypatch.setattr(runner.venv, "create", fake_venv_create)
+    monkeypatch.setattr(runner.subprocess, "run", slow_pip_install)
+    monkeypatch.setattr(
+        runner.DeploymentSupervisor, "_spawn", lambda self, p, b: None
+    )
+    monkeypatch.setattr(runner.DeploymentSupervisor, "_supervise", lambda self: None)
+
+    client = FakeBuildClient()
+    supervisor = runner.DeploymentSupervisor(
+        client,
+        {
+            "id": "dep-build-heartbeat",
+            "agent_name": "slow-build",
+            "source_blob_id": "blob-build-heartbeat",
+        },
+        "workspace-test",
+    )
+
+    supervisor.run()
+
+    assert "building" in client.statuses
+    assert len(client.heartbeats) >= 2
 
 
 def test_supervisor_user_stop_terminates_running_bot(

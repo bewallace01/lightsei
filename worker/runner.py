@@ -175,12 +175,20 @@ class DeploymentSupervisor:
         self.stop_event = threading.Event()
         self.user_wants_stop = threading.Event()
         self.threads: list[threading.Thread] = []
+        self._lifecycle_threads_started = False
 
     def run(self) -> None:
         """Top-level entry. Build, spawn, supervise, clean up — never
         raises (all errors get reported to the backend as a failed status)."""
         try:
+            self._start_lifecycle_threads()
             python, bot_dir = self._build()
+            if self.user_wants_stop.is_set():
+                self._log_system(
+                    "desired_state=stopped during build; not spawning bot"
+                )
+                self._safe_status("stopped")
+                return
             self._spawn(python, bot_dir)
             self._supervise()
         except _SetupError as e:
@@ -284,24 +292,24 @@ class DeploymentSupervisor:
             raise _SetupError(f"failed to spawn bot: {e}") from e
         self._log_system(f"pid={self.proc.pid}")
 
-        # Background threads: log tail (stdout, stderr), log flusher, heartbeat.
-        self.threads.append(threading.Thread(
-            target=self._tail, args=(self.proc.stdout, "stdout"),
-            name=f"tail-out-{self.id[:8]}", daemon=True,
-        ))
-        self.threads.append(threading.Thread(
-            target=self._tail, args=(self.proc.stderr, "stderr"),
-            name=f"tail-err-{self.id[:8]}", daemon=True,
-        ))
-        self.threads.append(threading.Thread(
-            target=self._log_flusher,
-            name=f"flush-{self.id[:8]}", daemon=True,
-        ))
-        self.threads.append(threading.Thread(
-            target=self._heartbeater,
-            name=f"hb-{self.id[:8]}", daemon=True,
-        ))
-        for t in self.threads:
+        # Background threads: stdout/stderr tails. The log flusher and
+        # heartbeat start before build so long pip installs keep the claim fresh.
+        tail_threads = [
+            threading.Thread(
+                target=self._tail,
+                args=(self.proc.stdout, "stdout"),
+                name=f"tail-out-{self.id[:8]}",
+                daemon=True,
+            ),
+            threading.Thread(
+                target=self._tail,
+                args=(self.proc.stderr, "stderr"),
+                name=f"tail-err-{self.id[:8]}",
+                daemon=True,
+            ),
+        ]
+        self.threads.extend(tail_threads)
+        for t in tail_threads:
             t.start()
 
         self._safe_status("running")
@@ -387,6 +395,26 @@ class DeploymentSupervisor:
             self.stop_event.wait(HEARTBEAT_INTERVAL_S)
 
     # --- helpers ---
+
+    def _start_lifecycle_threads(self) -> None:
+        if self._lifecycle_threads_started:
+            return
+        lifecycle_threads = [
+            threading.Thread(
+                target=self._log_flusher,
+                name=f"flush-{self.id[:8]}",
+                daemon=True,
+            ),
+            threading.Thread(
+                target=self._heartbeater,
+                name=f"hb-{self.id[:8]}",
+                daemon=True,
+            ),
+        ]
+        self.threads.extend(lifecycle_threads)
+        for t in lifecycle_threads:
+            t.start()
+        self._lifecycle_threads_started = True
 
     def _terminate_proc(self) -> None:
         if self.proc and self.proc.poll() is None:

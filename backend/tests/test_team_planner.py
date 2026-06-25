@@ -8,9 +8,12 @@ Two surfaces under test:
    Mirrors `test_agent_generator.py`'s _FakeClient pattern so CI
    doesn't need a real API key.
 """
+from datetime import datetime, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from team_planner import (
     MAX_DISPATCHES_PER_BOT,
@@ -19,8 +22,11 @@ from team_planner import (
     SUBMIT_TEAM_TOOL,
     build_system_prompt,
     build_user_message,
+    run_team_plan_job,
     validate_team_plan,
 )
+from db import SessionLocal
+from models import Run
 from tests.conftest import (
     GenerationJobFailed,
     auth_headers,
@@ -531,6 +537,30 @@ def _set_anthropic_secret(client, api_key: str, value: str = "sk-ant-fake"):
     assert r.status_code == 200, r.text
 
 
+def _set_budget_and_spend(client, api_key: str, workspace_id: str) -> None:
+    r = client.patch(
+        "/workspaces/me",
+        headers=auth_headers(api_key),
+        json={"budget_usd_monthly": 0.01},
+    )
+    assert r.status_code == 200, r.text
+    s = SessionLocal()
+    try:
+        s.add(
+            Run(
+                id="budget-spend-team-plan",
+                workspace_id=workspace_id,
+                agent_name="polaris",
+                started_at=datetime.now(timezone.utc),
+                ended_at=None,
+                cost_usd=Decimal("0.01"),
+            )
+        )
+        s.commit()
+    finally:
+        s.close()
+
+
 def _good_plan() -> dict:
     return {
         "rationale": "Three-bot team for a small backend project.",
@@ -599,6 +629,51 @@ def test_plan_400_when_anthropic_secret_missing(client, alice):
     )
     assert r.status_code == 400
     assert "ANTHROPIC_API_KEY" in r.json()["detail"]
+
+
+def test_plan_429_when_workspace_budget_already_spent(client, alice, monkeypatch):
+    api_key = alice["api_key"]["plaintext"]
+    workspace_id = alice["workspace"]["id"]
+    _set_anthropic_secret(client, api_key)
+    _set_budget_and_spend(client, api_key, workspace_id)
+
+    fake = _FakeClient()
+    fake.messages.create = lambda **kw: pytest.fail("Anthropic should not be called")
+    monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
+
+    r = client.post(
+        "/workspaces/me/teams/plan",
+        headers=auth_headers(api_key),
+        json={"readme_text": "anything"},
+    )
+    assert r.status_code == 429
+    assert "budget" in r.json()["detail"].lower()
+
+
+def test_team_plan_job_rechecks_budget_before_anthropic_call(
+    client, alice, monkeypatch,
+):
+    api_key = alice["api_key"]["plaintext"]
+    workspace_id = alice["workspace"]["id"]
+    _set_anthropic_secret(client, api_key)
+    _set_budget_and_spend(client, api_key, workspace_id)
+
+    fake = _FakeClient()
+    fake.messages.create = lambda **kw: pytest.fail("Anthropic should not be called")
+    monkeypatch.setattr("anthropic.Anthropic", lambda **kw: fake)
+
+    s = SessionLocal()
+    try:
+        with pytest.raises(HTTPException) as exc:
+            run_team_plan_job(
+                s,
+                workspace_id,
+                {"readme_text": "anything"},
+            )
+    finally:
+        s.close()
+    assert exc.value.status_code == 429
+    assert "budget" in exc.value.detail.lower()
 
 
 def test_plan_retries_on_invalid_first_attempt(client, alice, monkeypatch):
