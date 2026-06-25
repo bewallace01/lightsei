@@ -35,6 +35,7 @@ Public surface (for tests):
   main()
 """
 import os
+import ipaddress
 import uuid
 import re
 import sys
@@ -60,6 +61,7 @@ POLL_S = float(os.environ.get("WEBSITE_POLL_S", "5"))
 HERMES_CHANNEL = os.environ.get("WEBSITE_HERMES_CHANNEL", "default")
 MAX_LINKS = int(os.environ.get("WEBSITE_MAX_LINKS", "25"))
 TIMEOUT_S = float(os.environ.get("WEBSITE_TIMEOUT_S", "10"))
+MAX_REDIRECTS = int(os.environ.get("WEBSITE_MAX_REDIRECTS", "5"))
 # Warn the owner this many days before the TLS certificate expires (so they
 # renew before visitors ever see a "not secure" warning), and escalate to a
 # red alert inside the urgent window.
@@ -107,6 +109,7 @@ def extract_forms(html: str) -> list[dict[str, Any]]:
 # as ConnectError wrapping an ssl error, so we match on the message text.
 _TLS_HINTS = ("ssl", "certificate", "cert_", "tls", "cert verify",
               "certificate_verify", "wrong_version", "sslcertverification")
+_REDIRECT_STATUSES = {301, 302, 303, 307, 308}
 
 
 def _classify_error(error: Optional[str]) -> str:
@@ -117,6 +120,8 @@ def _classify_error(error: Optional[str]) -> str:
     warning), which is a different message + fix than "the server is down".
     """
     e = (error or "").lower()
+    if "unsafeurl" in e:
+        return "unsafe_url"
     if any(h in e for h in _TLS_HINTS):
         return "tls"
     return "unreachable"
@@ -269,6 +274,8 @@ def hermes_text_for(report: dict[str, Any]) -> str:
                     "is broken or expired. Visitors get a \"not secure\" warning.")
         if reason == "http_error":
             return f"\U0001f534 website: {url} is returning an error (status {report.get('status_code')})."
+        if reason == "unsafe_url":
+            return f"⚠️ website: {url} was not checked because it is not a public website address."
         # unreachable (connection refused / timeout / DNS) or unknown
         return f"\U0001f534 website: {url} appears DOWN (couldn't connect)."
     # Up, but something needs attention. Active customer harm (broken links)
@@ -284,17 +291,109 @@ def hermes_text_for(report: dict[str, Any]) -> str:
     return f"⚠️ website: {url} needs attention"
 
 
+def _public_ip(ip: Any) -> bool:
+    """True only for internet-routable addresses."""
+    return not (
+        ip.is_private
+        or ip.is_loopback
+        or ip.is_link_local
+        or ip.is_multicast
+        or ip.is_reserved
+        or ip.is_unspecified
+    )
+
+
+def _unsafe_url_reason(url: str, *, resolver: Optional[Callable[..., Any]] = None) -> Optional[str]:
+    """Return why a URL is unsafe for the website checker, or None.
+
+    The assistant monitors public websites. It must not let a configured
+    site, redirect, or extracted link make the worker reach localhost,
+    metadata services, or private network hosts.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return "only http and https URLs can be checked"
+    try:
+        port = parsed.port
+    except ValueError:
+        return "invalid port"
+    host = parsed.hostname
+    if port is not None and not (1 <= port <= 65535):
+        return "invalid port"
+    if not host:
+        return "missing host"
+    if parsed.username or parsed.password:
+        return "credentials in URLs are not allowed"
+    host_l = host.lower().rstrip(".")
+    if host_l == "localhost" or host_l.endswith((".localhost", ".local", ".internal")):
+        return "local hostnames are not allowed"
+
+    try:
+        ip = ipaddress.ip_address(host_l.strip("[]"))
+    except ValueError:
+        pass
+    else:
+        return None if _public_ip(ip) else f"private address {ip} is not allowed"
+
+    import socket
+    resolve = resolver or socket.getaddrinfo
+    try:
+        infos = resolve(
+            host,
+            port or (443 if parsed.scheme == "https" else 80),
+            type=socket.SOCK_STREAM,
+        )
+    except Exception:
+        # Let the real fetch report DNS failures in the usual way.
+        return None
+    for info in infos:
+        try:
+            addr = info[4][0].split("%", 1)[0]
+            ip = ipaddress.ip_address(addr)
+        except Exception:
+            continue
+        if not _public_ip(ip):
+            return f"host resolves to private address {ip}"
+    return None
+
+
 # ---------- Production fetcher ---------- #
 
 
 def _httpx_fetch(url: str, *, method: str = "GET") -> dict[str, Any]:
     import httpx
     started = time.monotonic()
+    current_url = url
+    current_method = method
     try:
-        resp = httpx.request(
-            method, url, timeout=TIMEOUT_S, follow_redirects=True,
-            headers={"User-Agent": "Lightsei-Website-Assistant/1.0"},
-        )
+        for _ in range(MAX_REDIRECTS + 1):
+            unsafe = _unsafe_url_reason(current_url)
+            if unsafe:
+                return {
+                    "status_code": None,
+                    "error": f"UnsafeURL: {unsafe}",
+                    "text": "",
+                    "latency_ms": int((time.monotonic() - started) * 1000),
+                }
+            resp = httpx.request(
+                current_method, current_url, timeout=TIMEOUT_S,
+                follow_redirects=False,
+                headers={"User-Agent": "Lightsei-Website-Assistant/1.0"},
+            )
+            location = resp.headers.get("location")
+            if resp.status_code in _REDIRECT_STATUSES and location:
+                current_url = urljoin(current_url, location)
+                if resp.status_code == 303:
+                    current_method = "GET"
+                continue
+            break
+        else:
+            return {
+                "status_code": None,
+                "error": f"TooManyRedirects: exceeded {MAX_REDIRECTS} redirects",
+                "text": "",
+                "latency_ms": int((time.monotonic() - started) * 1000),
+            }
         return {
             "status_code": resp.status_code,
             "error": None,
@@ -314,6 +413,9 @@ def _ssl_cert_fetch(url: str) -> dict[str, Any]:
     parsed = urlparse(url)
     if parsed.scheme != "https" or not parsed.hostname:
         return {"not_after": None, "error": None}
+    unsafe = _unsafe_url_reason(url)
+    if unsafe:
+        return {"not_after": None, "error": f"UnsafeURL: {unsafe}"}
     host = parsed.hostname
     port = parsed.port or 443
     import socket

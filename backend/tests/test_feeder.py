@@ -823,6 +823,11 @@ def test_normalize_website_url_adds_scheme_and_validates():
     assert n(None) is None
     assert n("homepage") is None
     assert n("ftp://example.com") is None
+    # Private or local targets would turn the worker into an SSRF probe.
+    assert n("http://169.254.169.254/latest/meta-data/") is None
+    assert n("http://127.0.0.1:8000") is None
+    assert n("http://service.railway.internal") is None
+    assert n("http://user:pass@example.com") is None
 
 
 def test_website_feeder_enqueues_check_for_configured_url():
