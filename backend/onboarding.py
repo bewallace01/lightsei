@@ -8,7 +8,7 @@ feeders.
 
 This module is the pure core: the catalog (industries + goals) and the
 mapping from answers to a provisioning plan. `apply_provisioning_plan`
-(the one DB-touching function) creates the assistant rows + enables the
+(the one DB-touching function) creates the assistant rows + syncs the
 feeders + stores the profile. No deployment happens here: an assistant
 row is its identity; the worker brings it online separately, and the
 existing surfaces already handle "provisioned but not deployed yet"
@@ -97,6 +97,14 @@ GOALS = [
 _URL_GOALS = {"website", "seo"}
 _URL_GOAL_FEEDER = {"website": "website_health", "seo": "seo_audit"}
 _GOAL_BY_KEY = {g["key"]: g for g in GOALS}
+
+# The feeders onboarding owns and should reconcile on every submit. Feeder
+# settings outside this set may be managed elsewhere and are left alone.
+_ONBOARDING_FEEDERS = []
+for _goal in GOALS:
+    for _feeder_kind in _goal["feeders"]:
+        if _feeder_kind not in _ONBOARDING_FEEDERS:
+            _ONBOARDING_FEEDERS.append(_feeder_kind)
 
 # Industry -> the goals we pre-check. A starting point the owner edits, not
 # a constraint: any goal is selectable regardless of industry.
@@ -241,9 +249,9 @@ def apply_provisioning_plan(
     now: datetime,
 ) -> None:
     """Provision the plan: create assistant rows, grant each assistant the
-    connector capability its goal needs, enable feeders, store the profile
-    on the workspace. Idempotent (ensure_agent + capability dedup + feeder
-    upsert + profile overwrite). Does not commit.
+    connector capability its goal needs, sync onboarding-owned feeders, and
+    store the profile on the workspace. Idempotent (ensure_agent + capability
+    dedup + feeder upsert + profile overwrite). Does not commit.
     """
     import feeder
     from db import ensure_agent
@@ -261,8 +269,12 @@ def apply_provisioning_plan(
                 session, workspace_id, g["agent"], g["connector"], now
             )
 
-    for feeder_kind in plan.get("feeders", []):
-        feeder.set_feeder_enabled(session, workspace_id, feeder_kind, True, now)
+    selected_feeders = set(plan.get("feeders", []))
+    for feeder_kind in _ONBOARDING_FEEDERS:
+        feeder.set_feeder_enabled(
+            session, workspace_id, feeder_kind,
+            feeder_kind in selected_feeders, now,
+        )
 
     # Store the site URL on each selected url-target feeder (website_health
     # and/or seo_audit). Done after enabling so the config upsert just touches

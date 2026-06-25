@@ -150,6 +150,36 @@ def test_apply_stores_website_url_as_feeder_config():
         assert cfg["url"] == "https://www.acme.com/home"
 
 
+def test_apply_disables_removed_goal_feeders_on_resubmit():
+    now = _now()
+    with session_scope() as s:
+        ws = _make_workspace(s)
+        initial = onboarding.build_provisioning_plan(
+            "restaurant", ["email", "reviews", "summary", "website"],
+            website_url="acme.com",
+        )
+        onboarding.apply_provisioning_plan(s, ws, initial, now)
+
+    with session_scope() as s:
+        assert feeder.is_feeder_enabled(s, ws, feeder.FEEDER_INBOX_GMAIL)
+        assert feeder.is_feeder_enabled(s, ws, feeder.FEEDER_REPUTATION_REVIEWS)
+        assert feeder.is_feeder_enabled(s, ws, feeder.FEEDER_WEEKLY_DIGEST)
+        assert feeder.is_feeder_enabled(s, ws, feeder.FEEDER_COST_SPIKE)
+        assert feeder.is_feeder_enabled(s, ws, feeder.FEEDER_WEBSITE_HEALTH)
+
+        revised = onboarding.build_provisioning_plan("restaurant", ["marketing"])
+        onboarding.apply_provisioning_plan(s, ws, revised, now)
+
+    with session_scope() as s:
+        assert not feeder.is_feeder_enabled(s, ws, feeder.FEEDER_INBOX_GMAIL)
+        assert not feeder.is_feeder_enabled(s, ws, feeder.FEEDER_REPUTATION_REVIEWS)
+        assert not feeder.is_feeder_enabled(s, ws, feeder.FEEDER_WEEKLY_DIGEST)
+        assert not feeder.is_feeder_enabled(s, ws, feeder.FEEDER_COST_SPIKE)
+        assert not feeder.is_feeder_enabled(s, ws, feeder.FEEDER_WEBSITE_HEALTH)
+        profile = onboarding.get_profile(s, ws)
+        assert profile["goals"] == ["marketing"]
+
+
 def test_apply_is_idempotent():
     now = _now()
     with session_scope() as s:
