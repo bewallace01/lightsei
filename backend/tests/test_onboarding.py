@@ -220,11 +220,14 @@ def test_apply_grants_connector_capability_to_assistant():
         onboarding.apply_provisioning_plan(s, ws, plan, now)
 
     with session_scope() as s:
+        assert "internet" in _agent_caps(s, ws, "inbox")
+        assert "send_command" in _agent_caps(s, ws, "inbox")
         assert "connector:gmail" in _agent_caps(s, ws, "inbox")
+        assert "send_command" in _agent_caps(s, ws, "reputation")
         assert "connector:google_business" in _agent_caps(s, ws, "reputation")
 
 
-def test_apply_no_capability_for_connectorless_goal():
+def test_apply_grants_builtin_capabilities_for_connectorless_goal():
     now = _now()
     with session_scope() as s:
         ws = _make_workspace(s)
@@ -233,8 +236,8 @@ def test_apply_no_capability_for_connectorless_goal():
         onboarding.apply_provisioning_plan(s, ws, plan, now)
 
     with session_scope() as s:
-        assert _agent_caps(s, ws, "bi") == []
-        assert _agent_caps(s, ws, "website") == []
+        assert _agent_caps(s, ws, "bi") == ["internet", "send_command"]
+        assert _agent_caps(s, ws, "website") == ["internet", "send_command"]
 
 
 def test_apply_capability_grant_is_idempotent():

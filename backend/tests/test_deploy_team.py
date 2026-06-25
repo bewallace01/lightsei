@@ -35,6 +35,16 @@ def _deployment_count(ws_id: str, agent_name: str) -> int:
         ).scalar_one()
 
 
+def _agent_caps(ws_id: str, agent_name: str) -> list[str]:
+    with session_scope() as s:
+        row = s.execute(
+            text("SELECT capabilities FROM agents WHERE workspace_id = :ws "
+                 "AND name = :a"),
+            {"ws": ws_id, "a": agent_name},
+        ).first()
+        return list(row[0] or []) if row else []
+
+
 def test_deploy_team_queues_provisioned_personas(client, alice):
     ws_id = alice["workspace"]["id"]
     _provision(ws_id, "bi", "lead")
@@ -46,6 +56,17 @@ def test_deploy_team_queues_provisioned_personas(client, alice):
     assert set(body["deployed"]) == {"bi", "lead"}
     assert _deployment_count(ws_id, "bi") == 1
     assert _deployment_count(ws_id, "lead") == 1
+
+
+def test_deploy_team_repairs_builtin_capabilities(client, alice):
+    ws_id = alice["workspace"]["id"]
+    _provision(ws_id, "website", "lead")
+    h = auth_headers(alice["session_token"])
+
+    client.post("/workspaces/me/team/deploy", headers=h)
+
+    assert _agent_caps(ws_id, "website") == ["internet", "send_command"]
+    assert _agent_caps(ws_id, "lead") == ["send_command"]
 
 
 def test_deploy_team_is_idempotent(client, alice):

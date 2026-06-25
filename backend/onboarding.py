@@ -246,10 +246,14 @@ def apply_provisioning_plan(
     upsert + profile overwrite). Does not commit.
     """
     import feeder
+    import builtin_personas
     from db import ensure_agent
 
     for agent_name in plan.get("assistants", []):
         ensure_agent(session, workspace_id, agent_name, now)
+        builtin_personas.grant_required_capabilities(
+            session, workspace_id, agent_name, now
+        )
 
     # Grant each goal's connector capability to its assistant (after the
     # rows exist). The "email" goal -> inbox needs connector:gmail, "reviews"
