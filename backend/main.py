@@ -10290,10 +10290,14 @@ def widget_post_message(
     # the iframe-anti-CSRF allowlist. The same eu_auth is reused
     # for the linkage gate below.
     eu_auth = resolve_end_user_optional(authorization, session)
+    can_write = (
+        eu_auth is not None
+        and eu_auth.can_write_workspace(workspace.id)
+    )
     _we.check_widget_origin(
         workspace,
         request.headers.get("origin"),
-        is_authenticated_end_user=eu_auth is not None,
+        is_authenticated_end_user=can_write,
     )
 
     if not workspace.customer_facing_agent_name:
@@ -10320,11 +10324,7 @@ def widget_post_message(
     # can_read_workspace, which includes soft-revoked links so an
     # unsubscribed end user keeps read access to past conversations.)
     # `eu_auth` was already resolved above for the Origin bypass.
-    linked = (
-        eu_auth is not None
-        and eu_auth.can_write_workspace(workspace.id)
-    )
-    current_end_user_id = eu_auth.end_user.id if linked else None
+    current_end_user_id = eu_auth.end_user.id if can_write else None
 
     # Apply rate limits BEFORE writing anything (Phase 11B-style
     # ordering: reject early, persist late).
@@ -10450,10 +10450,14 @@ def widget_get_conversation(
     # Phase 31.x: resolve end-user BEFORE the Origin check so an
     # authenticated bearer bypasses the iframe-anti-CSRF allowlist.
     eu_auth = resolve_end_user_optional(authorization, session)
+    can_read = (
+        eu_auth is not None
+        and eu_auth.can_read_workspace(workspace.id)
+    )
     _we.check_widget_origin(
         workspace,
         request.headers.get("origin"),
-        is_authenticated_end_user=eu_auth is not None,
+        is_authenticated_end_user=can_read,
     )
 
     # Phase 25.4 + Phase 27.6: identity gate. The GET path uses the
@@ -10461,10 +10465,6 @@ def widget_get_conversation(
     # user can still read past conversations per Phase 27 spec. The
     # POST path uses the write-gate (active link only) so they can't
     # send new messages.
-    can_read = (
-        eu_auth is not None
-        and eu_auth.can_read_workspace(workspace.id)
-    )
     current_end_user_id = eu_auth.end_user.id if can_read else None
 
     conv = session.get(WidgetConversation, conversation_id)

@@ -85,6 +85,14 @@ def _stub_router(picks: list[tuple[str, str]], summary: str = "routed."):
     return lambda api_key: client
 
 
+def _failing_router(error: Exception):
+    def _raise(**kw):
+        raise error
+
+    client = SimpleNamespace(messages=SimpleNamespace(create=_raise))
+    return lambda api_key: client
+
+
 # ---------- Create + list + get ---------- #
 
 
@@ -269,6 +277,46 @@ def test_router_error_writes_error_row_and_no_assistants(
     assert body["router_message"]["status"] == "error"
     assert "ANTHROPIC_API_KEY" in body["router_message"]["error"]
     assert body["pending_messages"] == []
+
+
+def test_router_llm_failure_writes_error_row_after_mid_request_commit(
+    client, alice, monkeypatch,
+):
+    """route_team_message commits before the provider call. If that
+    call fails, the endpoint must still write a router error row so
+    the already-committed user message is not left alone."""
+    h = auth_headers(alice["session_token"])
+    workspace_id = alice["workspace"]["id"]
+    _seed_agents(workspace_id, ["argus"])
+    _seed_anthropic_secret(workspace_id)
+    monkeypatch.setattr(
+        main, "_TEAM_ROUTER_ANTHROPIC_FACTORY",
+        _failing_router(RuntimeError("provider timed out")),
+    )
+    cid = client.post(
+        "/workspaces/me/team-conversations", headers=h, json={},
+    ).json()["id"]
+
+    r = client.post(
+        f"/team-conversations/{cid}/messages",
+        headers=h, json={"content": "please investigate prod"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["user_message"]["content"] == "please investigate prod"
+    assert body["router_message"]["role"] == "router"
+    assert body["router_message"]["status"] == "error"
+    assert "provider timed out" in body["router_message"]["error"]
+    assert body["pending_messages"] == []
+
+    with session_scope() as s:
+        rows = s.execute(
+            select(TeamMessage)
+            .where(TeamMessage.conversation_id == cid)
+            .order_by(TeamMessage.created_at)
+        ).scalars().all()
+    assert [m.role for m in rows] == ["user", "router"]
+    assert rows[1].status == "error"
 
 
 # ---------- Isolation + delete ---------- #

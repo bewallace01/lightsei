@@ -101,12 +101,12 @@ def check_widget_origin(
     on app.lightsei.com served into a customer's page).
 
     Phase 31.x bypass: when `is_authenticated_end_user=True` (the
-    caller already resolved a valid end-user bearer token), skip
-    Origin enforcement entirely. The Origin allowlist exists to
-    defend the anonymous iframe path against CSRF/embedding-from-
-    untrusted-sites; a request carrying a bearer is by definition a
-    first-party API client (native iOS app, web /c page) where that
-    threat model doesn't apply. Bearer auth is itself anti-CSRF.
+    caller resolved a valid end-user bearer token and confirmed that
+    the end user can access this workspace), skip Origin enforcement.
+    The Origin allowlist exists to defend the anonymous iframe path
+    against CSRF/embedding from untrusted sites; workspace-linked
+    bearer auth is itself anti-CSRF. A valid but unlinked bearer still
+    uses the anonymous path and must pass the Origin allowlist.
     """
     if is_authenticated_end_user:
         return
