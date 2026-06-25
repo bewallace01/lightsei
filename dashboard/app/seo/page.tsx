@@ -294,6 +294,8 @@ const FORMATS: { value: PageFormat; label: string; path: (slug: string) => strin
   { value: "html", label: "HTML (static site)", path: (s) => `public/pages/${s}.html` },
   { value: "markdown", label: "Markdown (Hugo, Astro, Jekyll, Eleventy)", path: (s) => `content/${s}.md` },
   { value: "mdx", label: "MDX (Next.js, Astro)", path: (s) => `src/content/${s}.mdx` },
+  { value: "next-app", label: "Next.js (App Router)", path: (s) => `app/${s}/page.tsx` },
+  { value: "next-pages", label: "Next.js (Pages Router)", path: (s) => `pages/${s}.tsx` },
 ];
 
 /** "Ask Spica to write a page" — enqueues a generate command, then nudges a
@@ -372,7 +374,7 @@ type PublishState = {
   pathEdited: boolean;
   repoId: string;
   busy: boolean;
-  result?: { pr_url: string; branch: string };
+  result?: { pr_url: string; branch: string; alreadyOpen?: boolean };
   error?: string;
 };
 
@@ -601,7 +603,11 @@ function DraftCard({
               ...(st.pathEdited ? { path: st.path.trim() } : {}),
             }),
       });
-      setSt((s) => ({ ...s, busy: false, result: { pr_url: res.pr_url, branch: res.branch } }));
+      setSt((s) => ({
+        ...s,
+        busy: false,
+        result: { pr_url: res.pr_url, branch: res.branch, alreadyOpen: !!res.already_open },
+      }));
     } catch (e) {
       setSt((s) => ({ ...s, busy: false, error: String(e) }));
     }
@@ -741,7 +747,10 @@ function DraftCard({
         </div>
       ) : st.result ? (
         <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
-          ✅ Opened a pull request on <span className="font-mono">{st.result.branch}</span>.{" "}
+          {st.result.alreadyOpen
+            ? "ℹ️ This page already has an open pull request on "
+            : "✅ Opened a pull request on "}
+          <span className="font-mono">{st.result.branch}</span>.{" "}
           <a href={st.result.pr_url} target="_blank" rel="noreferrer" className="underline font-medium">
             Review &amp; merge the PR
           </a>{" "}

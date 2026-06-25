@@ -2015,7 +2015,7 @@ export async function deleteSeoDraft(draftId: string): Promise<void> {
   });
 }
 
-export type PageFormat = "html" | "markdown" | "mdx";
+export type PageFormat = "html" | "markdown" | "mdx" | "next-app" | "next-pages";
 
 export async function publishPage(input: {
   repo_id: string;
@@ -2027,12 +2027,12 @@ export async function publishPage(input: {
   content?: string;
   path?: string;
   body?: string;
-}): Promise<{ pr_url: string; pr_number: number; branch: string }> {
+}): Promise<{ pr_url: string; pr_number: number; branch: string; already_open?: boolean }> {
   return (await authedJson("/workspaces/me/github/publish-page", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
-  })) as { pr_url: string; pr_number: number; branch: string };
+  })) as { pr_url: string; pr_number: number; branch: string; already_open?: boolean };
 }
 
 export async function generateSeoPage(input: {

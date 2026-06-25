@@ -48,9 +48,30 @@ def is_safe_repo_path(path: str) -> bool:
 
 
 def _call(request: GithubRequest, token: str, method: str, url: str,
-          json: Optional[dict] = None) -> tuple[int, dict[str, Any]]:
+          json: Optional[dict] = None) -> tuple[int, Any]:
+    """Returns (status, body). Body is usually a dict; the PR-list endpoint
+    returns a JSON array, so the type is Any (callers that expect a dict use
+    .get and only hit dict-returning endpoints)."""
     res = request(method=method, url=url, token=token, json=json)
-    return int(res.get("status", 0)), (res.get("body") or {})
+    body = res.get("body")
+    return int(res.get("status", 0)), (body if body is not None else {})
+
+
+def find_open_pr_for_branch(
+    request: GithubRequest, token: str, *, owner: str, repo: str, branch: str,
+) -> Optional[dict[str, Any]]:
+    """The open PR whose head is `branch` (same-repo), or None. Used to turn a
+    'branch already exists' collision into a pointer to the PR that's already
+    open for this page, instead of a dead-end error."""
+    api = f"{GITHUB_API}/repos/{owner}/{repo}"
+    st, body = _call(request, token, "GET",
+                     f"{api}/pulls?state=open&head={owner}:{branch}")
+    if st == 200 and isinstance(body, list) and body:
+        pr = body[0]
+        if isinstance(pr, dict):
+            return {"pr_url": pr.get("html_url"), "pr_number": pr.get("number"),
+                    "branch": branch}
+    return None
 
 
 def _commit_file(request: GithubRequest, token: str, api: str, *, path: str,
@@ -112,9 +133,16 @@ def publish_page_to_repo(
     st, body = _call(request, token, "POST", f"{api}/git/refs",
                      {"ref": f"refs/heads/{branch_name}", "sha": base_sha})
     if st == 422:
+        # The deterministic branch already exists: a publish for this page is
+        # already open. Point the owner at that PR instead of erroring out.
+        existing = find_open_pr_for_branch(
+            request, token, owner=owner, repo=repo, branch=branch_name)
+        if existing is not None:
+            return {**existing, "already_open": True}
         raise GithubPublishError(
-            f"branch {branch_name!r} already exists — an unmerged publish for "
-            "this page is likely already open.")
+            f"branch {branch_name!r} already exists but has no open PR — it may "
+            "have been merged already, or be left over from a closed PR. Delete "
+            "that branch on GitHub to republish this page.")
     if st not in (200, 201):
         raise GithubPublishError(
             f"couldn't create branch {branch_name!r} (HTTP {st}): {body.get('message')}")
@@ -159,7 +187,10 @@ def _httpx_request(*, method: str, url: str, token: str,
         body = resp.json()
     except Exception:
         body = {}
-    return {"status": resp.status_code, "body": body if isinstance(body, dict) else {}}
+    # Most endpoints return an object; the PR-list endpoint returns an array.
+    # Preserve both (other shapes -> {}), so find_open_pr_for_branch can read it.
+    return {"status": resp.status_code,
+            "body": body if isinstance(body, (dict, list)) else {}}
 
 
 def fetch_file(*, request: GithubRequest, token: str, owner: str, repo: str,
