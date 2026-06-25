@@ -70,8 +70,8 @@ def test_publish_happy_path_returns_link_and_edit_url():
         "id": 42, "link": "https://example.com/emergency-plumber-austin/",
         "status": "draft"}})
     out = wp.publish_page_to_wordpress(
-        request=fake, base_url="example.com", username="admin",
-        app_password="abcd efgh", page=_PAGE)
+        request=fake, base_url="example.com", username="wp-user",
+        app_password="fake-not-a-real-app-pw", page=_PAGE)
     assert out["id"] == 42
     assert out["link"].endswith("/emergency-plumber-austin/")
     assert out["status"] == "draft"
@@ -80,7 +80,7 @@ def test_publish_happy_path_returns_link_and_edit_url():
     call = fake.calls[0]
     assert call["url"] == "https://example.com/wp-json/wp/v2/pages"
     assert call["json"]["status"] == "draft" and call["json"]["title"] == "Emergency Plumber Austin"
-    assert call["username"] == "admin" and call["app_password"] == "abcd efgh"
+    assert call["username"] == "wp-user" and call["app_password"] == "fake-not-a-real-app-pw"
 
 
 def test_publish_defaults_to_draft_status():

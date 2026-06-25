@@ -2015,7 +2015,27 @@ export async function deleteSeoDraft(draftId: string): Promise<void> {
   });
 }
 
-export type PageFormat = "html" | "markdown" | "mdx";
+export interface SeoAutopublish {
+  enabled: boolean;
+  repo_id: string | null;
+}
+
+export async function fetchSeoAutopublish(): Promise<SeoAutopublish> {
+  return (await authedJson("/workspaces/me/seo/autopublish")) as SeoAutopublish;
+}
+
+export async function setSeoAutopublish(input: {
+  enabled?: boolean;
+  repo_id?: string | null;
+}): Promise<SeoAutopublish> {
+  return (await authedJson("/workspaces/me/seo/autopublish", {
+    method: "PATCH",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(input),
+  })) as SeoAutopublish;
+}
+
+export type PageFormat = "html" | "markdown" | "mdx" | "next-app" | "next-pages";
 
 export async function publishPage(input: {
   repo_id: string;
@@ -2027,12 +2047,12 @@ export async function publishPage(input: {
   content?: string;
   path?: string;
   body?: string;
-}): Promise<{ pr_url: string; pr_number: number; branch: string }> {
+}): Promise<{ pr_url: string; pr_number: number; branch: string; already_open?: boolean }> {
   return (await authedJson("/workspaces/me/github/publish-page", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(input),
-  })) as { pr_url: string; pr_number: number; branch: string };
+  })) as { pr_url: string; pr_number: number; branch: string; already_open?: boolean };
 }
 
 export async function generateSeoPage(input: {
@@ -2099,6 +2119,14 @@ export async function fetchRepoPageFiles(repoId: string): Promise<string[]> {
     `/workspaces/me/github/repos/${encodeURIComponent(repoId)}/page-files`,
   )) as { files: string[] };
   return body.files;
+}
+
+export async function fetchRepoFramework(
+  repoId: string,
+): Promise<{ framework: string; suggested_format: PageFormat | null }> {
+  return (await authedJson(
+    `/workspaces/me/github/repos/${encodeURIComponent(repoId)}/framework`,
+  )) as { framework: string; suggested_format: PageFormat | null };
 }
 
 // Build a near-exact visual preview of a repo-matched page by borrowing the
