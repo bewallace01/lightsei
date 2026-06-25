@@ -14,6 +14,7 @@ import {
   designFormat,
   fetchDesignResult,
   fetchRepoPageFiles,
+  fetchRepoFramework,
   previewInShell,
   fetchGithubConnection,
   fetchSeoAudit,
@@ -370,6 +371,7 @@ function GeneratePanel({ onRequested }: { onRequested: () => void }) {
 
 type PublishState = {
   format: PageFormat;
+  formatEdited: boolean;
   path: string;
   pathEdited: boolean;
   repoId: string;
@@ -434,11 +436,14 @@ function DraftCard({
   const slug = draft.page.slug || "page";
   const [st, setSt] = useState<PublishState>({
     format: "html",
+    formatEdited: false,
     path: FORMATS[0].path(slug),
     pathEdited: false,
     repoId: repos[0]?.id ?? "",
     busy: false,
   });
+  // A short hint when we auto-default the format from the repo's framework.
+  const [frameworkNote, setFrameworkNote] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   // Capella's output (styled HTML, or a matching page component), when produced.
   const [polished, setPolished] = useState<string | null>(null);
@@ -487,9 +492,43 @@ function DraftCard({
 
   function onFormat(format: PageFormat) {
     const def = FORMATS.find((f) => f.value === format)!.path(slug);
-    // Re-default the path when the owner hasn't hand-edited it.
-    setSt((s) => ({ ...s, format, path: s.pathEdited ? s.path : def }));
+    // Re-default the path when the owner hasn't hand-edited it. A manual pick
+    // also stops framework auto-detection from overriding it.
+    setSt((s) => ({ ...s, format, formatEdited: true, path: s.pathEdited ? s.path : def }));
+    setFrameworkNote(null);
   }
+
+  const FRAMEWORK_LABELS: Record<string, string> = {
+    "next-app": "Next.js (App Router)",
+    "next-pages": "Next.js (Pages Router)",
+  };
+
+  // When the publish form is open, sniff the selected repo's framework and
+  // default the format to match (unless the owner picked one). Best-effort:
+  // any failure just leaves the current default.
+  useEffect(() => {
+    if (!open || !st.repoId || st.formatEdited) return;
+    let alive = true;
+    (async () => {
+      try {
+        const { suggested_format } = await fetchRepoFramework(st.repoId);
+        if (!alive || !suggested_format) return;
+        const def = FORMATS.find((f) => f.value === suggested_format)!.path(slug);
+        setSt((s) =>
+          s.formatEdited
+            ? s
+            : { ...s, format: suggested_format, path: s.pathEdited ? s.path : def },
+        );
+        setFrameworkNote(`Detected ${FRAMEWORK_LABELS[suggested_format] ?? suggested_format} — defaulted the format.`);
+      } catch {
+        /* best-effort: keep the current format */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, st.repoId, st.formatEdited]);
 
   // Poll Capella for a result; returns the output text or throws.
   async function pollResult(commandId: string): Promise<string> {
@@ -788,6 +827,9 @@ function DraftCard({
             <span className="text-[11px] text-gray-400">
               Pick what your site uses. Spica renders the page in that format.
             </span>
+            {frameworkNote && (
+              <span className="block text-[11px] text-emerald-600 mt-0.5">{frameworkNote}</span>
+            )}
           </label>
           <label className="block text-xs text-gray-500">
             File path in repo
