@@ -3203,6 +3203,34 @@ def github_repo_page_files(
     return {"files": files}
 
 
+@app.get("/workspaces/me/github/repos/{repo_id}/framework")
+def github_repo_framework(
+    repo_id: str,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Detect the connected repo's web framework so the publish UI can default
+    the page format (and so auto-publish can render the right kind of file).
+    Best-effort: reads package.json + the page-file layout; returns
+    framework='unknown'/'static' rather than erroring if either can't be read."""
+    import framework_detect
+    import github_publish
+
+    owner, repo_name, branch, token = _resolve_publish_target(
+        session, workspace_id, repo_id)
+    pkg = github_publish.fetch_file(
+        request=github_publish._httpx_request, token=token,
+        owner=owner, repo=repo_name, path="package.json", ref=branch)
+    files = github_publish.list_page_files(
+        request=github_publish._httpx_request, token=token,
+        owner=owner, repo=repo_name, ref=branch)
+    framework = framework_detect.detect_framework(files, pkg)
+    return {
+        "framework": framework,
+        "suggested_format": framework_detect.default_format_for(framework),
+    }
+
+
 class AskQuestion(BaseModel):
     question: str
 

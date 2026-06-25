@@ -135,16 +135,38 @@ def test_publish_errors_when_base_branch_missing():
     assert "base branch" in str(e.value)
 
 
-def test_publish_errors_when_branch_exists():
+def test_publish_branch_collision_points_to_existing_pr():
+    # The deterministic branch already exists (a publish for this page is open):
+    # instead of erroring, return a pointer to that PR so the owner isn't stuck.
+    # The pulls *list* call (GET ?state=open&head=...) returns the open PR. Its
+    # key must precede the generic "/pulls" (the create-PR POST) so the fake's
+    # substring match resolves the list URL here, not to the POST response.
+    resp = {"/pulls?state=open": {
+        "status": 200,
+        "body": [{"html_url": "https://github.com/o/r/pull/5", "number": 5}]}}
+    resp.update(_ok_responses())
+    resp["/git/refs"] = {"status": 422, "body": {"message": "Reference already exists"}}
+    out = github_publish.publish_page_to_repo(
+        request=_FakeGithub(resp), token="t", owner="o", repo="r",
+        base_branch="main", path="x.md", content="x",
+        branch_name="lightsei-seo/x", commit_message="m", pr_title="t", pr_body="b")
+    assert out["already_open"] is True
+    assert out["pr_number"] == 5 and out["pr_url"].endswith("/pull/5")
+
+
+def test_publish_branch_collision_without_open_pr_errors():
+    # Branch exists but no open PR (merged, or a leftover closed-PR branch):
+    # a clear, actionable error rather than the misleading "already open".
     import pytest
-    resp = _ok_responses()
+    resp = {"/pulls?state=open": {"status": 200, "body": []}}
+    resp.update(_ok_responses())
     resp["/git/refs"] = {"status": 422, "body": {"message": "exists"}}
     with pytest.raises(github_publish.GithubPublishError) as e:
         github_publish.publish_page_to_repo(
             request=_FakeGithub(resp), token="t", owner="o", repo="r",
             base_branch="main", path="x.md", content="x",
             branch_name="lightsei-seo/x", commit_message="m", pr_title="t", pr_body="b")
-    assert "already exists" in str(e.value)
+    assert "already exists" in str(e.value) and "no open PR" in str(e.value)
 
 
 # ---------- endpoint ---------- #

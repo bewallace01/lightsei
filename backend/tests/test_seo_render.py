@@ -62,3 +62,38 @@ def test_render_escapes_html():
         {"title": "A & B <x>", "meta_description": "d", "slug": "s",
          "h1": "H", "body_html": "p"}, "html")
     assert "A &amp; B &lt;x&gt;" in r["content"]
+
+
+def test_render_next_app_router():
+    r = seo_render.render_page(_PAGE, "next-app")
+    assert r["path"] == "app/restaurant-inventory-tips/page.tsx"
+    c = r["content"]
+    # Real SEO metadata export + a default-exported server component.
+    assert 'import type { Metadata } from "next";' in c
+    assert 'export const metadata: Metadata = {' in c
+    assert '"Restaurant Inventory Tips"' in c          # title as a JS string
+    assert "export default function Page()" in c
+    assert "dangerouslySetInnerHTML" in c
+
+
+def test_render_next_pages_router():
+    r = seo_render.render_page(_PAGE, "next-pages")
+    assert r["path"] == "pages/restaurant-inventory-tips.tsx"
+    c = r["content"]
+    assert 'import Head from "next/head";' in c
+    assert "<title>" in c and "dangerouslySetInnerHTML" in c
+
+
+def test_render_next_app_embeds_body_as_safe_js_string():
+    # Body HTML with quotes / a script-like tag must be a valid JS string
+    # literal (json-escaped), not break the .tsx module.
+    r = seo_render.render_page(
+        {"title": "T", "meta_description": "d", "slug": "s", "h1": "H",
+         "body_html": '<p class="lead">a "quote" & <b>x</b></p>'}, "next-app")
+    c = r["content"]
+    # The double-quotes inside the body are backslash-escaped in the JS string.
+    assert '\\"quote\\"' in c
+    # And it round-trips: extract the __html string literal and json-load it.
+    import json, re
+    m = re.search(r"__html:\s*(\".*?\")\s*\}\}", c)
+    assert m and json.loads(m.group(1)) == '<p class="lead">a "quote" & <b>x</b></p>'
