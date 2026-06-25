@@ -1027,7 +1027,61 @@ def post_event(
     if event.kind in ("run_ended", "run_completed", "run_failed"):
         _record_run_behavior(session, workspace_id, event.run_id, run.agent_name)
 
+    # Phase 37.10: Spica auto-opens the publish PR. If this workspace opted
+    # into auto-publishing and chose a target repo, a fresh page draft opens
+    # a publish PR automatically (the PR/merge stays the owner's review gate).
+    # Runs after the response via BackgroundTasks so a slow / unreachable
+    # GitHub never blocks ingest; the task degrades gracefully (never raises).
+    import seo_autopublish
+    if event.kind == seo_autopublish.PAGE_DRAFTED_KIND:
+        ws = session.get(Workspace, workspace_id)
+        if ws is not None and seo_autopublish.should_autopublish(
+            enabled=bool(getattr(ws, "seo_autopublish_enabled", False)),
+            repo_id=getattr(ws, "seo_autopublish_repo_id", None),
+            event_kind=event.kind,
+        ):
+            page = seo_autopublish.page_from_event(event.payload)
+            if page is not None:
+                background_tasks.add_task(
+                    _autopublish_seo_draft,
+                    workspace_id, ws.seo_autopublish_repo_id, page,
+                )
+
     return {"id": row.id, "status": "ok"}
+
+
+def _autopublish_seo_draft(workspace_id: str, repo_id: str, page: dict[str, Any]) -> None:
+    """Background task: open a publish PR for an auto-published SEO draft.
+
+    Opens its own DB session (the request's is gone by now) just to resolve the
+    repo token, then runs the shared publish orchestration. Degrades
+    gracefully: a missing repo / token, an unsafe page, a duplicate branch (the
+    draft was re-emitted -> deterministic branch already exists -> GitHub 422),
+    or any other GitHub error is logged and swallowed, never raised."""
+    import github_publish
+    import seo_autopublish
+    try:
+        with session_scope() as s:
+            owner, repo_name, base_branch, token = _resolve_publish_target(
+                s, workspace_id, repo_id)
+    except HTTPException as exc:
+        logger.info("autopublish: target unresolved (%s) for workspace %s",
+                    getattr(exc, "detail", exc), workspace_id)
+        return
+    except Exception:
+        logger.exception("autopublish: target resolution failed for workspace %s", workspace_id)
+        return
+    try:
+        result = seo_autopublish.orchestrate_publish(
+            request=github_publish._httpx_request, token=token,
+            owner=owner, repo=repo_name, base_branch=base_branch,
+            title=seo_autopublish.title_for(page), page=page, fmt="html")
+        logger.info("autopublish: opened PR %s for workspace %s",
+                    result.get("pr_url"), workspace_id)
+    except (ValueError, github_publish.GithubPublishError) as exc:
+        logger.info("autopublish: skipped (%s) for workspace %s", exc, workspace_id)
+    except Exception:
+        logger.exception("autopublish: unexpected failure for workspace %s", workspace_id)
 
 
 @app.post("/policy/check")
@@ -2606,6 +2660,67 @@ def delete_seo_draft(
     if res.rowcount == 0:
         raise HTTPException(status_code=404, detail="draft not found")
     return {"status": "ok"}
+
+
+class SeoAutopublishIn(BaseModel):
+    enabled: Optional[bool] = None
+    repo_id: Optional[str] = None   # "" / null clears the target
+
+
+@app.get("/workspaces/me/seo/autopublish")
+def get_seo_autopublish(
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Phase 37.10: the workspace's SEO auto-publish setting (whether a new
+    draft auto-opens a publish PR, and to which connected repo)."""
+    ws = session.get(Workspace, workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    return {
+        "enabled": bool(ws.seo_autopublish_enabled),
+        "repo_id": ws.seo_autopublish_repo_id,
+    }
+
+
+@app.patch("/workspaces/me/seo/autopublish")
+def set_seo_autopublish(
+    body: SeoAutopublishIn,
+    session: Session = Depends(get_session),
+    workspace_id: str = Depends(get_workspace_id),
+) -> dict[str, Any]:
+    """Turn SEO auto-publish on/off and choose the target repo. Opting in is
+    the owner's standing authorization to open publish PRs on their behalf; the
+    PR/merge stays the review gate. A target repo is validated (must resolve to
+    a connected repo with a usable token) when set, and enabling without a
+    target is rejected so the toggle can't be armed with nowhere to publish."""
+    if not body.model_fields_set:
+        raise HTTPException(
+            status_code=422, detail="supply enabled and/or repo_id to update")
+    ws = session.get(Workspace, workspace_id)
+    if ws is None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+
+    if "repo_id" in body.model_fields_set:
+        rid = (body.repo_id or "").strip() or None
+        if rid is not None:
+            # Validates ownership + that a publish token exists; raises 4xx
+            # otherwise, so a bad repo can't be saved as the target.
+            _resolve_publish_target(session, workspace_id, rid)
+        ws.seo_autopublish_repo_id = rid
+    if "enabled" in body.model_fields_set:
+        ws.seo_autopublish_enabled = bool(body.enabled)
+
+    if ws.seo_autopublish_enabled and not ws.seo_autopublish_repo_id:
+        raise HTTPException(
+            status_code=400,
+            detail="pick a target repo before enabling auto-publish")
+
+    session.commit()
+    return {
+        "enabled": bool(ws.seo_autopublish_enabled),
+        "repo_id": ws.seo_autopublish_repo_id,
+    }
 
 
 class SeoGenerateIn(BaseModel):
@@ -5475,78 +5590,28 @@ def github_publish_page(
     or pre-built `content` + `path`.
     """
     import github_publish
-    import seo_render
+    import seo_autopublish
 
     if not secrets_crypto.is_available():
         raise HTTPException(status_code=503, detail="secrets store unavailable: LIGHTSEI_SECRETS_KEY is not configured")
 
-    # Resolve content + path from whichever mode the caller used.
-    if body.page is not None:
-        try:
-            rendered = seo_render.render_page(body.page, body.format or "html")
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        content = rendered["content"]
-        path = body.path or rendered["path"]
-    else:
-        content = body.content or ""
-        path = body.path or ""
-
-    if not github_publish.is_safe_repo_path(path):
-        raise HTTPException(status_code=400, detail="path must be a repo-relative file path (no leading slash or ..)")
-    if not str(content or "").strip():
-        raise HTTPException(status_code=400, detail="content is required")
-
     owner, repo_name, base_branch, token = _resolve_publish_target(
         session, workspace_id, body.repo_id)
 
-    # If we're dropping a React page into a repo whose pages are registered in a
-    # central App.tsx (Vite + React Router), wire the lazy import + <Route> into
-    # the same PR so the page actually goes live on merge, not just exists in
-    # the repo. Best-effort: any failure leaves extra_files empty and we publish
-    # the page file alone (prior behavior).
-    extra_files: list[tuple[str, str]] = []
-    routed_path = None
-    if path.startswith("src/pages/") and path.endswith((".tsx", ".jsx")):
-        try:
-            import react_router_wiring
-            for app_path in ("src/App.tsx", "src/App.jsx"):
-                app_src = github_publish.fetch_file(
-                    request=github_publish._httpx_request, token=token,
-                    owner=owner, repo=repo_name, path=app_path, ref=base_branch)
-                if not app_src:
-                    continue
-                plan = react_router_wiring.plan_route_wiring(
-                    app_source=app_src, page_content=content, file_path=path)
-                if plan:
-                    extra_files.append((app_path, plan["app_source"]))
-                    routed_path = plan["route_path"]
-                break
-        except Exception:
-            logger.exception("publish: route wiring skipped")
-
-    branch = body.branch_name or github_publish.branch_name_for(body.title)
-    pr_body = body.body or (
-        "New SEO page drafted by Spica (Lightsei). Review the page, "
-        "then merge to publish it on your site.")
-    if routed_path:
-        pr_body += (
-            f"\n\nThis PR also registers the page's route ({routed_path}) in "
-            "App.tsx, so it goes live as soon as you merge.")
+    # The render + App.tsx route-wiring + open-PR orchestration lives in
+    # seo_autopublish.orchestrate_publish so the manual button (here) and the
+    # auto-publish background task share one implementation.
     try:
-        result = github_publish.publish_page_to_repo(
+        result = seo_autopublish.orchestrate_publish(
             request=github_publish._httpx_request, token=token,
             owner=owner, repo=repo_name, base_branch=base_branch,
-            path=path, content=content, branch_name=branch,
-            commit_message=f"Add page: {body.title}",
-            pr_title=f"Add SEO page: {body.title}",
-            pr_body=pr_body,
-            extra_files=extra_files,
-        )
+            title=body.title, page=body.page, fmt=body.format or "html",
+            content=body.content, path=body.path, pr_body=body.body,
+            branch_name=body.branch_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except github_publish.GithubPublishError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
-    if routed_path:
-        result["routed_path"] = routed_path
     return result
 
 

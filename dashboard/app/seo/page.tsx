@@ -22,6 +22,8 @@ import {
   fetchSeoDrafts,
   deleteSeoDraft,
   fetchSeoSuggestions,
+  fetchSeoAutopublish,
+  setSeoAutopublish,
   generateSeoPage,
   handleAuthError,
   publishPage,
@@ -864,6 +866,108 @@ function DraftCard({
   );
 }
 
+/** Auto-publish: when on, a new draft opens a publish PR by itself (no manual
+ * "Open a pull request" click). The PR is still the review gate; the owner opts
+ * in and picks the target repo. */
+function AutopublishPanel({ repos }: { repos: GithubRepo[] }) {
+  const [enabled, setEnabled] = useState(false);
+  const [repoId, setRepoId] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    fetchSeoAutopublish()
+      .then((s) => {
+        if (!alive) return;
+        setEnabled(s.enabled);
+        setRepoId(s.repo_id);
+        setLoaded(true);
+      })
+      .catch(() => setLoaded(true));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // Default the repo to the first connected one once repos arrive.
+  useEffect(() => {
+    if (loaded && repoId === null && repos.length > 0) setRepoId(repos[0].id);
+  }, [loaded, repoId, repos]);
+
+  async function save(next: { enabled?: boolean; repo_id?: string | null }) {
+    setBusy(true);
+    setNote(null);
+    try {
+      const s = await setSeoAutopublish(next);
+      setEnabled(s.enabled);
+      setRepoId(s.repo_id);
+    } catch (e) {
+      // The backend rejects enabling without a target repo; keep the toggle off.
+      setEnabled(false);
+      setNote(
+        String(e).includes("target repo")
+          ? "Pick a target repo first."
+          : "Couldn't save that. Try again.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div className="rounded-lg border border-gray-200 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="text-sm font-medium text-gray-800">
+            Auto-publish new drafts
+          </div>
+          <p className="text-xs text-gray-500 mt-0.5 max-w-md">
+            When on, Spica opens a pull request for each new page it drafts, so
+            you just review and merge. Nothing goes live until you merge.
+          </p>
+        </div>
+        <button
+          role="switch"
+          aria-checked={enabled}
+          disabled={busy || !loaded}
+          onClick={() => save({ enabled: !enabled, repo_id: repoId ?? undefined })}
+          className={`shrink-0 mt-1 inline-flex h-5 w-9 items-center rounded-full transition ${
+            enabled ? "bg-accent-600" : "bg-gray-300"
+          } disabled:opacity-50`}
+        >
+          <span
+            className={`inline-block h-4 w-4 transform rounded-full bg-white transition ${
+              enabled ? "translate-x-4" : "translate-x-0.5"
+            }`}
+          />
+        </button>
+      </div>
+      <label className="block text-xs text-gray-500 mt-3">
+        Publish to
+        <select
+          value={repoId ?? ""}
+          disabled={busy}
+          onChange={(e) => {
+            const v = e.target.value || null;
+            setRepoId(v);
+            save({ repo_id: v });
+          }}
+          className="mt-1 w-full text-sm rounded-md ring-1 ring-gray-300 px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-accent-600"
+        >
+          {repos.map((r) => (
+            <option key={r.id} value={r.id}>
+              {r.repo_owner}/{r.repo_name} ({r.branch})
+            </option>
+          ))}
+        </select>
+      </label>
+      {note && <div className="text-xs text-amber-700 mt-2">{note}</div>}
+    </div>
+  );
+}
+
 export default function SeoPage() {
   const router = useRouter();
   const [drafts, setDrafts] = useState<SeoDraft[] | null>(null);
@@ -950,6 +1054,12 @@ export default function SeoPage() {
       <div className="mt-4">
         <GeneratePanel onRequested={refetchDrafts} />
       </div>
+
+      {githubConnected && repos.length > 0 && (
+        <div className="mt-4">
+          <AutopublishPanel repos={repos} />
+        </div>
+      )}
 
       {githubConnected === false && (
         <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
