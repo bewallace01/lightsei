@@ -38,6 +38,7 @@ from tests.conftest import auth_headers
 def _google_env(monkeypatch):
     monkeypatch.setenv("LIGHTSEI_GOOGLE_CLIENT_ID", "1234.apps.googleusercontent.com")
     monkeypatch.setenv("LIGHTSEI_GOOGLE_CLIENT_SECRET", "fake_secret")
+    monkeypatch.setenv("LIGHTSEI_CONNECTOR_OAUTH_COOKIE_SECURE", "false")
     monkeypatch.setenv(
         "LIGHTSEI_CONNECTORS_GOOGLE_REDIRECT_URI",
         "https://api.lightsei.test/connectors/google/callback",
@@ -263,6 +264,16 @@ def test_start_persists_state_with_connector_type(client, alice):
         assert row.code_verifier  # PKCE verifier persisted
 
 
+def test_start_sets_state_cookie(client, alice):
+    r = client.get(
+        "/connectors/google/start?type=gmail",
+        headers=auth_headers(alice["session_token"]),
+    )
+    assert r.status_code == 200
+    state = r.json()["state"]
+    assert client.cookies.get("lightsei_connector_oauth_state") == state
+
+
 def test_callback_creates_install_row(client, alice, monkeypatch):
     """Happy path: start → callback → encrypted token blob persisted →
     303 redirect with ?installed=gmail."""
@@ -325,6 +336,61 @@ def test_callback_creates_install_row(client, alice, monkeypatch):
         assert s.get(ConnectorOAuthPendingState, state) is None
 
 
+def test_callback_refuses_missing_state_cookie(client, alice, monkeypatch):
+    """A state created in one browser cannot be completed from another
+    browser. This blocks OAuth CSRF where a victim completes an attacker
+    workspace's Google install URL."""
+    start = client.get(
+        "/connectors/google/start?type=gmail",
+        headers=auth_headers(alice["session_token"]),
+    ).json()
+    state = start["state"]
+    client.cookies.clear()
+
+    def _should_not_exchange(*args, **kwargs):
+        raise AssertionError("token exchange should not run without cookie")
+
+    monkeypatch.setattr("connectors.google_oauth.httpx.post", _should_not_exchange)
+
+    r = client.get(
+        f"/connectors/google/callback?code=abc&state={state}",
+        follow_redirects=False,
+    )
+    assert r.status_code == 400
+    assert "install session" in r.text.lower()
+
+    from sqlalchemy import select as _select
+    with session_scope() as s:
+        installs = s.execute(
+            _select(ConnectorInstallation).where(
+                ConnectorInstallation.workspace_id == alice["workspace"]["id"],
+                ConnectorInstallation.connector_type == "gmail",
+            )
+        ).scalars().all()
+        assert installs == []
+
+
+def test_callback_refuses_mismatched_state_cookie(client, alice, monkeypatch):
+    start = client.get(
+        "/connectors/google/start?type=gmail",
+        headers=auth_headers(alice["session_token"]),
+    ).json()
+    state = start["state"]
+    client.cookies.set("lightsei_connector_oauth_state", "different-state")
+
+    def _should_not_exchange(*args, **kwargs):
+        raise AssertionError("token exchange should not run on cookie mismatch")
+
+    monkeypatch.setattr("connectors.google_oauth.httpx.post", _should_not_exchange)
+
+    r = client.get(
+        f"/connectors/google/callback?code=abc&state={state}",
+        follow_redirects=False,
+    )
+    assert r.status_code == 400
+    assert "install session" in r.text.lower()
+
+
 def test_callback_reinstall_updates_existing_row(client, alice, monkeypatch):
     """Re-running the install for a connector that's already active
     should update the existing row, not insert a duplicate that
@@ -376,6 +442,10 @@ def test_callback_reinstall_updates_existing_row(client, alice, monkeypatch):
 
 
 def test_callback_html_400_on_unknown_state(client):
+    client.cookies.set(
+        "lightsei_connector_oauth_state",
+        "does-not-exist",
+    )
     r = client.get(
         "/connectors/google/callback?code=x&state=does-not-exist",
         follow_redirects=False,
@@ -430,6 +500,7 @@ def test_callback_html_400_on_unknown_connector_in_state(client, alice, monkeypa
             expires_at=datetime.now(timezone.utc) + timedelta(minutes=10),
         ))
 
+    client.cookies.set("lightsei_connector_oauth_state", "bogus-state")
     monkeypatch.setattr(
         "connectors.google_oauth.httpx.post",
         lambda *a, **kw: _fake_exchange_response(),

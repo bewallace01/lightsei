@@ -2662,6 +2662,7 @@ export async function startConnectorOAuth(
   if (options?.redirectAfter) params.set("redirect_after", options.redirectAfter);
   return (await authedJson(
     `/connectors/google/start?${params.toString()}`,
+    { credentials: "include" },
   )) as { authorization_url: string; state: string };
 }
 

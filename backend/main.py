@@ -703,9 +703,22 @@ def _serialize_workspace(w: Workspace) -> dict[str, Any]:
 
 app = FastAPI(title="Lightsei Backend", version="0.5.0")
 
+
+def _cors_origins() -> list[str]:
+    raw = os.environ.get("LIGHTSEI_CORS_ORIGINS")
+    if raw:
+        return [origin.strip() for origin in raw.split(",") if origin.strip()]
+    return [
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "https://app.lightsei.com",
+    ]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins(),
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -8878,11 +8891,24 @@ async def slack_events(
 
 
 CONNECTOR_OAUTH_STATE_TTL = timedelta(minutes=10)
+CONNECTOR_OAUTH_STATE_COOKIE = "lightsei_connector_oauth_state"
+
+
+def _connector_oauth_cookie_secure() -> bool:
+    raw = os.environ.get("LIGHTSEI_CONNECTOR_OAUTH_COOKIE_SECURE")
+    if raw is not None:
+        return raw.strip().lower() not in {"0", "false", "no"}
+    redirect_uri = os.environ.get(
+        "LIGHTSEI_CONNECTORS_GOOGLE_REDIRECT_URI",
+        "https://api.lightsei.com/connectors/google/callback",
+    )
+    return redirect_uri.startswith("https://")
 
 
 @app.get("/connectors/google/start")
 def connector_google_oauth_start(
     type: str,
+    response: Response,
     redirect_after: Optional[str] = None,
     auth: AuthResult = Depends(get_authenticated),
     session: Session = Depends(get_session),
@@ -8937,6 +8963,16 @@ def connector_google_oauth_start(
     ))
     session.flush()
 
+    response.set_cookie(
+        CONNECTOR_OAUTH_STATE_COOKIE,
+        state,
+        max_age=int(CONNECTOR_OAUTH_STATE_TTL.total_seconds()),
+        path="/connectors/google",
+        httponly=True,
+        secure=_connector_oauth_cookie_secure(),
+        samesite="lax",
+    )
+
     return {
         "authorization_url": _gco.build_authorization_url(
             state=state,
@@ -8949,6 +8985,7 @@ def connector_google_oauth_start(
 
 @app.get("/connectors/google/callback")
 def connector_google_oauth_callback(
+    request: Request,
     code: Optional[str] = None,
     state: Optional[str] = None,
     error: Optional[str] = None,
@@ -8966,6 +9003,7 @@ def connector_google_oauth_callback(
     page rather than JSON (same pattern as 19.2's Slack callback).
     """
     import json as _json
+    import html as _html
     import secrets_crypto
     from connectors import get_connector
     from connectors import google_oauth as _gco
@@ -8975,6 +9013,9 @@ def connector_google_oauth_callback(
     ).rstrip("/")
 
     def _html_error(title: str, message: str) -> Response:
+        safe_title = _html.escape(title, quote=True)
+        safe_message = _html.escape(message, quote=True)
+        safe_dashboard_base = _html.escape(dashboard_base, quote=True)
         body = (
             "<!doctype html><html><head><meta charset=utf-8>"
             "<title>Connector install — Lightsei</title>"
@@ -8982,11 +9023,16 @@ def connector_google_oauth_callback(
             "max-width:480px;margin:64px auto;padding:0 16px;color:#111}"
             "h1{font-size:18px;font-weight:600;margin-bottom:8px}"
             "p{color:#555;margin:8px 0}a{color:#4f46e5}</style></head>"
-            f"<body><h1>{title}</h1><p>{message}</p>"
-            f"<p><a href=\"{dashboard_base}/integrations\">"
+            f"<body><h1>{safe_title}</h1><p>{safe_message}</p>"
+            f"<p><a href=\"{safe_dashboard_base}/integrations\">"
             "← back to integrations</a></p></body></html>"
         )
-        return Response(content=body, media_type="text/html", status_code=400)
+        resp = Response(content=body, media_type="text/html", status_code=400)
+        resp.delete_cookie(
+            CONNECTOR_OAUTH_STATE_COOKIE,
+            path="/connectors/google",
+        )
+        return resp
 
     if error:
         return _html_error(
@@ -9000,6 +9046,14 @@ def connector_google_oauth_callback(
             "Invalid install link",
             "The Google install callback was missing required parameters. "
             "Start the install again from the integrations page.",
+        )
+
+    cookie_state = request.cookies.get(CONNECTOR_OAUTH_STATE_COOKIE)
+    if cookie_state != state:
+        return _html_error(
+            "Invalid install session",
+            "This connector install was started from a different browser "
+            "session. Start a fresh install from the integrations page.",
         )
 
     pending = session.get(ConnectorOAuthPendingState, state)
@@ -9087,7 +9141,12 @@ def connector_google_oauth_callback(
     session.flush()
 
     target = redirect_after or f"{dashboard_base}/integrations?installed={connector_type}"
-    return RedirectResponse(target, status_code=303)
+    resp = RedirectResponse(target, status_code=303)
+    resp.delete_cookie(
+        CONNECTOR_OAUTH_STATE_COOKIE,
+        path="/connectors/google",
+    )
+    return resp
 
 
 # ---------- Phase 20.8: operator-facing connector list + revoke ---------- #
