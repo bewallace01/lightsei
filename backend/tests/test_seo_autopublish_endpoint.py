@@ -150,3 +150,40 @@ def test_other_event_kinds_never_publish(client, alice, monkeypatch):
     body = {**_page_event_body(), "kind": "seo.audit_complete"}
     assert client.post("/events", headers=hk, json=body).status_code == 200
     assert calls == []
+
+
+# ---------- 38.2b: auto-publish renders to the repo's framework ---------- #
+
+
+def test_autopublish_uses_detected_framework_format(client, alice, monkeypatch):
+    import github_publish
+    import seo_autopublish
+    rid = _connect_repo(alice["workspace"]["id"])
+    # Simulate a Next.js App Router repo.
+    monkeypatch.setattr(github_publish, "fetch_file",
+                        lambda **k: '{"dependencies": {"next": "14"}}')
+    monkeypatch.setattr(github_publish, "list_page_files",
+                        lambda **k: ["app/blog/page.tsx"])
+    captured = {}
+    monkeypatch.setattr(seo_autopublish, "orchestrate_publish",
+                        lambda **k: captured.update(k) or {"pr_url": "x"})
+    main._autopublish_seo_draft(alice["workspace"]["id"], rid,
+                                {"title": "T", "body_html": "<p>x</p>"})
+    assert captured["fmt"] == "next-app"
+
+
+def test_autopublish_falls_back_to_html_when_detection_fails(client, alice, monkeypatch):
+    import github_publish
+    import seo_autopublish
+    rid = _connect_repo(alice["workspace"]["id"])
+
+    def _boom(**k):
+        raise RuntimeError("github unreachable")
+
+    monkeypatch.setattr(github_publish, "fetch_file", _boom)
+    captured = {}
+    monkeypatch.setattr(seo_autopublish, "orchestrate_publish",
+                        lambda **k: captured.update(k) or {"pr_url": "x"})
+    main._autopublish_seo_draft(alice["workspace"]["id"], rid,
+                                {"title": "T", "body_html": "<p>x</p>"})
+    assert captured["fmt"] == "html"
