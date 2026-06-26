@@ -1058,6 +1058,7 @@ def _autopublish_seo_draft(workspace_id: str, repo_id: str, page: dict[str, Any]
     gracefully: a missing repo / token, an unsafe page, a duplicate branch (the
     draft was re-emitted -> deterministic branch already exists -> GitHub 422),
     or any other GitHub error is logged and swallowed, never raised."""
+    import framework_detect
     import github_publish
     import seo_autopublish
     try:
@@ -1071,11 +1072,31 @@ def _autopublish_seo_draft(workspace_id: str, repo_id: str, page: dict[str, Any]
     except Exception:
         logger.exception("autopublish: target resolution failed for workspace %s", workspace_id)
         return
+
+    # Phase 38.2b: render the file to match the repo's framework (e.g. a Next.js
+    # page component) instead of always HTML. The manual publish path detects
+    # this in the dashboard; the background path has no UI, so detect server-side
+    # here. Best-effort: any failure falls back to html.
+    fmt = "html"
+    try:
+        pkg = github_publish.fetch_file(
+            request=github_publish._httpx_request, token=token,
+            owner=owner, repo=repo_name, path="package.json", ref=base_branch)
+        files = github_publish.list_page_files(
+            request=github_publish._httpx_request, token=token,
+            owner=owner, repo=repo_name, ref=base_branch)
+        fmt = framework_detect.default_format_for(
+            framework_detect.detect_framework(files, pkg)) or "html"
+    except Exception:
+        logger.exception(
+            "autopublish: framework detection failed; using html for workspace %s",
+            workspace_id)
+
     try:
         result = seo_autopublish.orchestrate_publish(
             request=github_publish._httpx_request, token=token,
             owner=owner, repo=repo_name, base_branch=base_branch,
-            title=seo_autopublish.title_for(page), page=page, fmt="html")
+            title=seo_autopublish.title_for(page), page=page, fmt=fmt)
         logger.info("autopublish: opened PR %s for workspace %s",
                     result.get("pr_url"), workspace_id)
     except (ValueError, github_publish.GithubPublishError) as exc:
